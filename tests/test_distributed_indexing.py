@@ -652,6 +652,16 @@ def check_btree_version_compatibility():
         return False
 
 
+def check_pylance_v2_compatibility():
+    """Check if lance version is >= 2.0.0."""
+    try:
+        lance_version = version.parse(lance.__version__)
+        v2_version = version.parse("2.0.0")
+        return lance_version >= v2_version
+    except (AttributeError, Exception):
+        return False
+
+
 @pytest.mark.skipif(
     not check_btree_version_compatibility(),
     reason="B-tree indexing requires pylance >= 0.37.0. Current version: {}".format(
@@ -1023,7 +1033,13 @@ def generate_multi_fragment_vector_dataset(
     return str(path)
 
 
-@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ","IVF_PQ"])
+@pytest.mark.skipif(
+    not check_pylance_v2_compatibility(),
+    reason="Distributed vector indexing requires pylance >= 2.0.0. Current version: {}".format(
+        getattr(lance, "__version__", "unknown")
+    ),
+)
+@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ", "IVF_PQ"])
 def test_build_distributed_vector_index(tmp_path, index_type):
     """Build a distributed vector index and verify nearest search works."""
     dataset_uri = generate_multi_fragment_vector_dataset(
