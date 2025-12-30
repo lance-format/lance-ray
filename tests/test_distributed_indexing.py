@@ -1,10 +1,12 @@
 """Test cases for lance_ray.indexing module."""
 
+import random
 import tempfile
 from pathlib import Path
 
 import lance
 import lance_ray as lr
+import pyarrow as pa
 import pytest
 import ray
 from packaging import version
@@ -117,7 +119,12 @@ def generate_multi_fragment_dataset(tmp_path, num_fragments=4, rows_per_fragment
     dataset = ray.data.from_pandas(df)
 
     path = Path(tmp_path) / "large_multi_fragment.lance"
-    lr.write_lance(dataset, str(path), min_rows_per_file=rows_per_fragment, max_rows_per_file=rows_per_fragment)
+    lr.write_lance(
+        dataset,
+        str(path),
+        min_rows_per_file=rows_per_fragment,
+        max_rows_per_file=rows_per_fragment,
+    )
 
     return lance.dataset(str(path))
 
@@ -645,6 +652,16 @@ def check_btree_version_compatibility():
         return False
 
 
+def check_pylance_v2_compatibility():
+    """Check if lance version is >= 2.0.0."""
+    try:
+        lance_version = version.parse(lance.__version__)
+        v2_version = version.parse("2.0.0")
+        return lance_version >= v2_version
+    except (AttributeError, Exception):
+        return False
+
+
 @pytest.mark.skipif(
     not check_btree_version_compatibility(),
     reason="B-tree indexing requires pylance >= 0.37.0. Current version: {}".format(
@@ -770,3 +787,96 @@ class TestDistributedBTreeIndexing:
             assert ids_idx == ids_base, (
                 f"Test '{test_name}' failed: indexed and baseline results differ for filter: {filter_expr}"
             )
+
+
+def generate_multi_fragment_vector_dataset(
+    tmp_path, num_fragments: int = 4, rows_per_fragment: int = 64, dim: int = 128
+) -> str:
+    """Generate a Lance dataset with a vector column and multiple fragments.
+
+    The dataset is written via lance-ray so that each fragment has the same
+    number of rows, which makes it suitable for distributed vector index
+    building tests.
+    """
+    num_rows = num_fragments * rows_per_fragment
+    # Generate random vectors
+    data = [random.gauss(0, 1) for _ in range(num_rows * dim)]
+
+    # Manually construct a FixedSizeList "vector" column compatible with
+    # Lance's vector index requirements.
+    values = pa.array(data, type=pa.float32())
+    vector_array = pa.FixedSizeListArray.from_arrays(values, dim)
+    tbl = pa.Table.from_arrays([vector_array], names=["vector"])
+    tbl = tbl.append_column("id", pa.array(range(num_rows), type=pa.int64()))
+
+    path = Path(tmp_path) / "multi_fragment_vector.lance"
+    lance.write_dataset(
+        tbl,
+        str(path),
+        max_rows_per_file=rows_per_fragment,
+    )
+
+    return str(path)
+
+
+@pytest.mark.skipif(
+    not check_pylance_v2_compatibility(),
+    reason="Distributed vector indexing requires pylance >= 2.0.0. Current version: {}".format(
+        getattr(lance, "__version__", "unknown")
+    ),
+)
+@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ", "IVF_PQ"])
+def test_build_distributed_vector_index(tmp_path, index_type):
+    """Build a distributed vector index and verify nearest search works."""
+    dataset_uri = generate_multi_fragment_vector_dataset(
+        tmp_path, num_fragments=4, rows_per_fragment=1024, dim=128
+    )
+
+    # Build distributed vector index using the high-level Ray entrypoint.
+    try:
+        updated_dataset = lr.create_index(
+            dataset=dataset_uri,
+            column="vector",
+            index_type=index_type,
+            name=f"idx_{index_type}",
+            num_workers=2,
+            num_partitions=4,
+            num_sub_vectors=16,
+            sample_rate=16,
+        )
+    except RuntimeError as exc:
+        # Older pylance builds may not yet support creating empty distributed
+        # vector indices with train=False. In that case we skip the functional
+        # verification while still ensuring the Ray entrypoint is wired
+        # correctly.
+        msg = str(exc)
+        if (
+            "Creating empty vector indices with train=False is not yet implemented"
+            in msg
+        ):
+            pytest.skip(
+                "Current pylance build does not yet support distributed vector "
+                "indices with train=False; skipping functional test."
+            )
+        raise
+
+    indices = updated_dataset.list_indices()
+    assert len(indices) > 0, "No indices found after distributed vector index build"
+
+    # Find the index with the name we specified
+    vec_index = next(
+        (idx for idx in indices if idx["name"] == f"idx_{index_type}"), None
+    )
+    assert vec_index is not None, f"Index with name idx_{index_type} not found"
+    assert vec_index["type"] == index_type, (
+        f"Expected {index_type} vector index, got {vec_index['type']}"
+    )
+
+    # Run a simple nearest-neighbor query to ensure the index is usable.
+    q = [random.gauss(0, 1) for _ in range(128)]
+    result = updated_dataset.to_table(
+        nearest={"column": "vector", "q": q, "k": 5},
+        columns=["id", "vector"],
+    )
+
+    assert result.num_rows == 5
