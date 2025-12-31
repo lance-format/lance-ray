@@ -45,7 +45,11 @@ def write_fragment(
     from lance.fragment import DEFAULT_MAX_BYTES_PER_FILE, write_fragments
 
     if schema is None:
-        first = next(iter(stream))
+        try:
+            first = next(iter(stream))
+        except StopIteration:
+            return []
+
         if _PANDAS_AVAILABLE and isinstance(first, pd.DataFrame):
             schema = pa.Schema.from_pandas(first).remove_metadata()
         elif isinstance(first, dict):
@@ -58,6 +62,9 @@ def write_fragment(
             schema = None
 
         stream = chain([first], stream)
+
+    if schema is None:
+        return []
 
     def record_batch_converter():
         for block in stream:
