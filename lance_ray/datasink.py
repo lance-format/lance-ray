@@ -9,11 +9,26 @@ from typing import (
 )
 
 import pyarrow as pa
+import ray
 from ray.data import DataContext
 from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink
 
 from .fragment import write_fragment
+
+
+@ray.remote(num_cpus=0)
+class _FragmentAccumulatorActor:
+    def __init__(self):
+        self._payloads: list[tuple[bytes, bytes]] = []
+
+    def add(self, payloads: list[tuple[bytes, bytes]]) -> None:
+        self._payloads.extend(payloads)
+
+    def pop_all(self) -> list[tuple[bytes, bytes]]:
+        payloads = self._payloads
+        self._payloads = []
+        return payloads
 
 if TYPE_CHECKING:
     from lance_namespace import LanceNamespace
@@ -90,6 +105,7 @@ class _BaseLanceDatasink(Datasink):
         self.mode = mode
         self.read_version: Optional[int] = None
         self.storage_options = merged_storage_options
+        self._fragment_accumulator = None
 
     @property
     def supports_distributed_writes(self) -> bool:
@@ -106,6 +122,8 @@ class _BaseLanceDatasink(Datasink):
             if self.schema is None:
                 self.schema = ds.schema
 
+        self._ensure_fragment_accumulator()
+
     def on_write_complete(
         self,
         write_result: list[list[tuple[str, str]]],
@@ -114,36 +132,24 @@ class _BaseLanceDatasink(Datasink):
 
         import lance
 
-        write_results = write_result
-        if not write_results:
-            warnings.warn(
-                "write_results is empty.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return
-        if hasattr(write_results, "write_returns"):
-            write_results = write_results.write_returns  # type: ignore
-
-        if len(write_results) == 0:
+        serialized_payloads = self._drain_fragment_payloads()
+        if not serialized_payloads:
             warnings.warn(
                 "write results is empty. please check ray version or internal error",
                 DeprecationWarning,
                 stacklevel=2,
             )
-            return
+            return super().on_write_complete(write_result)
 
         fragments = []
         schema = None
-        for batch in write_results:
-            for fragment_str, schema_str in batch:
-                fragment = pickle.loads(fragment_str)
-                fragments.append(fragment)
-                schema = pickle.loads(schema_str)
-        # Check weather writer has fragments or not.
-        # Skip commit when there are no fragments.
+        for fragment_str, schema_str in serialized_payloads:
+            fragment = pickle.loads(fragment_str)
+            fragments.append(fragment)
+            schema = pickle.loads(schema_str)
         if not schema:
-            return
+            return super().on_write_complete(write_result)
+
         op = None
         if self.mode in {"create", "overwrite"}:
             op = lance.LanceOperation.Overwrite(schema, fragments)
@@ -156,6 +162,33 @@ class _BaseLanceDatasink(Datasink):
                 read_version=self.read_version,
                 storage_options=self.storage_options,
             )
+
+        return super().on_write_complete(write_result)
+
+    def on_write_failed(self, error: Exception) -> None:
+        self._cleanup_fragment_accumulator()
+        super().on_write_failed(error)
+
+    def _ensure_fragment_accumulator(self) -> None:
+        if self._fragment_accumulator is None:
+            self._fragment_accumulator = _FragmentAccumulatorActor.remote()
+
+    def _drain_fragment_payloads(self) -> list[tuple[bytes, bytes]]:
+        if self._fragment_accumulator is None:
+            return []
+        payloads = ray.get(self._fragment_accumulator.pop_all.remote())
+        self._cleanup_fragment_accumulator()
+        return payloads
+
+    def _cleanup_fragment_accumulator(self) -> None:
+        if self._fragment_accumulator is None:
+            return
+        try:
+            ray.kill(self._fragment_accumulator, no_restart=True)
+        except Exception:
+            pass
+        finally:
+            self._fragment_accumulator = None
 
 
 class LanceDatasink(_BaseLanceDatasink):
@@ -261,10 +294,14 @@ class LanceDatasink(_BaseLanceDatasink):
             storage_options=self.storage_options,
             retry_params=self._retry_params,
         )
-        return [
+        serialized_fragments = [
             (pickle.dumps(fragment), pickle.dumps(schema))
             for fragment, schema in fragments_and_schema
         ]
+        if serialized_fragments:
+            self._ensure_fragment_accumulator()
+            ray.get(self._fragment_accumulator.add.remote(serialized_fragments))
+        return []
 
 
 class LanceFragmentCommitter(_BaseLanceDatasink):
