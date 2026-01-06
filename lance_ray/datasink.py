@@ -139,21 +139,99 @@ class _BaseLanceDatasink(Datasink):
         if serialized_payloads:
             return serialized_payloads
 
-        normalized_payloads: list[tuple[bytes, bytes]] = []
-        for batch in write_result or []:
-            if not batch:
-                continue
-            for payload in batch:
-                if isinstance(payload, (bytes, bytearray)):
-                    raise ValueError(
-                        "Write result payload must include fragment and schema; "
-                        "got raw bytes."
+        def _normalize_batch(batch: Any) -> list[tuple[Any, Any]]:
+            if batch is None:
+                return []
+
+            if isinstance(batch, pa.Table):
+                column_names = list(batch.column_names)
+                if {"fragment", "schema"}.issubset(set(column_names)):
+                    frag_col, schema_col = "fragment", "schema"
+                    return list(
+                        zip(
+                            batch[frag_col].to_pylist(),
+                            batch[schema_col].to_pylist(),
+                            strict=False,
+                        )
                     )
-                if not isinstance(payload, Iterable):
+                if len(column_names) >= 2:
+                    return list(
+                        zip(
+                            batch[0].to_pylist(),
+                            batch[1].to_pylist(),
+                            strict=False,
+                        )
+                    )
+                if len(column_names) == 1:
+                    col_values = batch[0].to_pylist()
+                    return [
+                        (vals[0], vals[1])
+                        for vals in (
+                            list(v) if isinstance(v, Iterable) else [v]
+                            for v in col_values
+                        )
+                        if len(vals) >= 2
+                    ]
+                raise ValueError(
+                    "Write result table must include 'fragment' and 'schema' columns."
+                )
+
+            try:
+                import pandas as pd
+            except Exception:  # pragma: no cover - pandas import errors are handled downstream
+                pd = None
+
+            if pd is not None and isinstance(batch, pd.DataFrame):
+                columns = list(batch.columns)
+                if {"fragment", "schema"}.issubset(set(columns)):
+                    frag_col, schema_col = "fragment", "schema"
+                elif len(columns) >= 2:
+                    # Fallback: use first two columns if unnamed (Ray may auto-name).
+                    frag_col, schema_col = columns[0], columns[1]
+                elif len(columns) == 1:
+                    # Single-column DataFrame of tuples or lists.
+                    col_values = batch.iloc[:, 0].to_list()
+                    return [
+                        (vals[0], vals[1])
+                        for vals in (
+                            list(v) if isinstance(v, Iterable) else [v]
+                            for v in col_values
+                        )
+                        if len(vals) >= 2
+                    ]
+                else:
                     raise ValueError(
-                        "Write result payload must be iterable with fragment and schema."
+                        "Write result dataframe must include 'fragment' and 'schema' columns."
                     )
 
+                return list(
+                    zip(
+                        batch[frag_col].to_list(),
+                        batch[schema_col].to_list(),
+                        strict=False,
+                    )
+                )
+
+            if isinstance(batch, Iterable) and not isinstance(
+                batch, (bytes, bytearray, str)
+            ):
+                return list(batch)
+
+            raise ValueError(
+                "Write result payload must be iterable with fragment and schema."
+            )
+
+        normalized_payloads: list[tuple[bytes, bytes]] = []
+        for batch in write_result or []:
+            try:
+                batch_items = _normalize_batch(batch)
+            except ValueError:
+                raise
+
+            if not batch_items:
+                continue
+
+            for payload in batch_items:
                 items = list(payload)
                 if len(items) < 2:
                     raise ValueError(
@@ -187,7 +265,7 @@ class _BaseLanceDatasink(Datasink):
             fragment = pickle.loads(fragment_str)
             fragments.append(fragment)
             schema = pickle.loads(schema_str)
-        if not schema:
+        if schema is None or not fragments:
             return super().on_write_complete(write_result)
 
         op = None
