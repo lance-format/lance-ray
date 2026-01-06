@@ -19,6 +19,8 @@ from .fragment import write_fragment
 
 @ray.remote(num_cpus=0)
 class _FragmentAccumulatorActor:
+    """Actor used to accumulate serialized fragment payloads across Ray tasks."""
+
     def __init__(self):
         self._payloads: list[tuple[bytes, bytes]] = []
 
@@ -124,15 +126,53 @@ class _BaseLanceDatasink(Datasink):
 
         self._ensure_fragment_accumulator()
 
+    def _collect_serialized_payloads(
+        self, write_result: list[list[tuple[Any, ...]]]
+    ) -> list[tuple[bytes, bytes]]:
+        """Collect serialized fragment/schema pairs from accumulator or write results.
+
+        Ray 2.40+ may attach additional metadata per write result entry (e.g. stats),
+        so we only keep the first two elements (fragment, schema) when normalizing.
+        """
+
+        serialized_payloads = self._drain_fragment_payloads()
+        if serialized_payloads:
+            return serialized_payloads
+
+        normalized_payloads: list[tuple[bytes, bytes]] = []
+        for batch in write_result or []:
+            if not batch:
+                continue
+            for payload in batch:
+                if isinstance(payload, (bytes, bytearray)):
+                    raise ValueError(
+                        "Write result payload must include fragment and schema; "
+                        "got raw bytes."
+                    )
+                if not isinstance(payload, Iterable):
+                    raise ValueError(
+                        "Write result payload must be iterable with fragment and schema."
+                    )
+
+                items = list(payload)
+                if len(items) < 2:
+                    raise ValueError(
+                        "Write result payload must contain at least fragment and schema."
+                    )
+
+                normalized_payloads.append((items[0], items[1]))
+
+        return normalized_payloads
+
     def on_write_complete(
         self,
-        write_result: list[list[tuple[str, str]]],
+        write_result: list[list[tuple[Any, ...]]],
     ):
         import warnings
 
         import lance
 
-        serialized_payloads = self._drain_fragment_payloads()
+        serialized_payloads = self._collect_serialized_payloads(write_result)
         if not serialized_payloads:
             warnings.warn(
                 "write results is empty. please check ray version or internal error",
