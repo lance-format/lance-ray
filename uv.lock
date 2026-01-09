@@ -392,7 +392,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6.0" },
-    { name = "ray", extras = ["data"], specifier = ">=2.40.0,<=2.52.1" },
+    { name = "ray", extras = ["data"], specifier = ">=2.41.0,<=2.52.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
 ]
 provides-extras = ["dev", "docs"]
