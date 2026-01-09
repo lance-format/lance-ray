@@ -15,7 +15,7 @@ from .datasink import LanceFragmentCommitter
 
 # Fragment API imports
 from .fragment import LanceFragmentWriter
-from .index import create_scalar_index
+from .index import create_index, create_scalar_index
 from .io import add_columns, read_lance, write_lance
 
 __all__ = [
@@ -23,6 +23,7 @@ __all__ = [
     "write_lance",
     "add_columns",
     "create_scalar_index",
+    "create_index",
     "compact_files",
     "LanceFragmentWriter",
     "LanceFragmentCommitter",
