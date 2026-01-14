@@ -784,6 +784,9 @@ class TestDistributedBTreeIndexing:
         - 5000 fragments with 16 workers resulted in "No partition metadata files found"
         - The test uses a smaller scale (50 fragments, 16 workers) for faster execution
         """
+        available_cpus = int(ray.cluster_resources().get("CPU", 4))
+        num_workers = min(16, available_cpus)
+
         ds = generate_multi_fragment_dataset(
             temp_dir, num_fragments=50, rows_per_fragment=100
         )
@@ -797,7 +800,7 @@ class TestDistributedBTreeIndexing:
             index_type="BTREE",
             name="btree_many_workers_idx",
             replace=False,
-            num_workers=16,
+            num_workers=num_workers,
         )
 
         indices = updated_dataset.list_indices()
@@ -827,6 +830,9 @@ class TestDistributedBTreeIndexing:
     def test_distributed_btree_index_string_column(self, temp_dir):
         """Test distributed BTREE index on string column (like video_uuid in the bug report)."""
         import uuid as uuid_module
+
+        available_cpus = int(ray.cluster_resources().get("CPU", 4))
+        num_workers = min(8, available_cpus)
 
         all_data = []
         num_fragments = 20
@@ -862,7 +868,7 @@ class TestDistributedBTreeIndexing:
             index_type="BTREE",
             name="video_uuid_idx",
             replace=False,
-            num_workers=8,
+            num_workers=num_workers,
         )
 
         indices = updated_dataset.list_indices()
@@ -884,3 +890,116 @@ class TestDistributedBTreeIndexing:
         assert result.num_rows == 1, (
             f"Expected 1 row for exact UUID match, got {result.num_rows}"
         )
+
+
+class TestNamespaceIndexing:
+    """Test cases for distributed indexing with DirectoryNamespace."""
+
+    def test_distributed_fts_index_with_directory_namespace(self, temp_dir):
+        """Test distributed FTS index building using DirectoryNamespace."""
+        import lance_namespace as ln
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        table_id = ["fts_index_test_table"]
+
+        data = pd.DataFrame(
+            {
+                "id": range(100),
+                "text": [
+                    f"This is document {i} with searchable content" for i in range(100)
+                ],
+            }
+        )
+        dataset = ray.data.from_pandas(data)
+        lr.write_lance(
+            dataset,
+            namespace=namespace,
+            table_id=table_id,
+            min_rows_per_file=25,
+            max_rows_per_file=25,
+        )
+
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+
+        updated_dataset = lr.create_scalar_index(
+            uri=uri,
+            column="text",
+            index_type="INVERTED",
+            name="fts_namespace_idx",
+            num_workers=2,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed FTS build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "fts_namespace_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "FTS index not found"
+        assert our_index["type"] == "Inverted"
+
+        results = updated_dataset.scanner(
+            full_text_query="document",
+            columns=["id", "text"],
+        ).to_table()
+        assert results.num_rows > 0, "FTS search should return results"
+
+    def test_distributed_btree_index_with_directory_namespace(self, temp_dir):
+        """Test distributed BTREE index building using DirectoryNamespace."""
+        import lance_namespace as ln
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        table_id = ["btree_index_test_table"]
+
+        data = pd.DataFrame(
+            {
+                "id": range(200),
+                "value": [f"value_{i}" for i in range(200)],
+            }
+        )
+        dataset = ray.data.from_pandas(data)
+        lr.write_lance(
+            dataset,
+            namespace=namespace,
+            table_id=table_id,
+            min_rows_per_file=50,
+            max_rows_per_file=50,
+        )
+
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+
+        updated_dataset = lr.create_scalar_index(
+            uri=uri,
+            column="id",
+            index_type="BTREE",
+            name="btree_namespace_idx",
+            num_workers=2,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed BTREE build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "btree_namespace_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "BTREE index not found"
+        assert our_index["type"] == "BTree"
+
+        result = updated_dataset.scanner(filter="id = 100", columns=["id"]).to_table()
+        assert result.num_rows == 1, "BTREE index query should return 1 row"

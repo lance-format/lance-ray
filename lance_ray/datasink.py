@@ -66,7 +66,6 @@ class _BaseLanceDatasink(Datasink):
             merged_storage_options.update(storage_options)
 
         # Handle namespace-based table writing
-        self._namespace = namespace
         self.storage_options_provider = None
 
         if namespace is not None and table_id is not None:
