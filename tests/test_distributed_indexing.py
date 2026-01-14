@@ -117,7 +117,12 @@ def generate_multi_fragment_dataset(tmp_path, num_fragments=4, rows_per_fragment
     dataset = ray.data.from_pandas(df)
 
     path = Path(tmp_path) / "large_multi_fragment.lance"
-    lr.write_lance(dataset, str(path), min_rows_per_file=rows_per_fragment, max_rows_per_file=rows_per_fragment)
+    lr.write_lance(
+        dataset,
+        str(path),
+        min_rows_per_file=rows_per_fragment,
+        max_rows_per_file=rows_per_fragment,
+    )
 
     return lance.dataset(str(path))
 
