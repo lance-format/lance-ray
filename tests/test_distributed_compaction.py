@@ -490,5 +490,7 @@ class TestDistributedCompaction:
         assert metrics.fragments_added == 1, "Should add 1 fragment"
 
         dataset = lance.dataset(uri)
-        assert len(dataset.get_fragments()) == 1, "Should have 1 fragment after compaction"
+        assert len(dataset.get_fragments()) == 1, (
+            "Should have 1 fragment after compaction"
+        )
         assert dataset.count_rows() == 20, "Should still have 20 total rows"

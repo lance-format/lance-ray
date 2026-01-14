@@ -14,6 +14,7 @@ from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
+from .utils import create_storage_options_provider
 
 if TYPE_CHECKING:
     from lance.types import ReaderLike
@@ -193,22 +194,6 @@ def write_lance(
     )
 
 
-def _create_storage_options_provider(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-):
-    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
-    if namespace_impl is None or namespace_properties is None or table_id is None:
-        return None
-
-    import lance_namespace as ln
-    from lance import LanceNamespaceStorageOptionsProvider
-
-    namespace = ln.connect(namespace_impl, namespace_properties)
-    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
-
-
 def _handle_fragment(
     uri: str,
     transform: "TransformType",
@@ -227,7 +212,7 @@ def _handle_fragment(
 
     def func(fragment_id: int):
         # Create storage options provider in worker for credentials refresh
-        storage_options_provider = _create_storage_options_provider(
+        storage_options_provider = create_storage_options_provider(
             namespace_impl, namespace_properties, table_id
         )
 
@@ -306,7 +291,7 @@ def add_columns(
     storage_options = storage_options or {}
 
     # Create storage options provider for local operations
-    storage_options_provider = _create_storage_options_provider(
+    storage_options_provider = create_storage_options_provider(
         namespace_impl, namespace_properties, table_id
     )
 

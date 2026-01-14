@@ -11,23 +11,9 @@ from lance.dataset import Index, IndexConfig, LanceDataset
 from packaging import version
 from ray.util.multiprocessing import Pool
 
+from .utils import create_storage_options_provider
+
 logger = logging.getLogger(__name__)
-
-
-def _create_storage_options_provider(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-):
-    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
-    if namespace_impl is None or namespace_properties is None or table_id is None:
-        return None
-
-    import lance_namespace as ln
-    from lance import LanceNamespaceStorageOptionsProvider
-
-    namespace = ln.connect(namespace_impl, namespace_properties)
-    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
 
 
 def _distribute_fragments_balanced(
@@ -160,7 +146,7 @@ def _handle_fragment_index(
                     raise ValueError(f"Invalid fragment_id: {fragment_id}")
 
             # Create storage options provider in worker for credentials refresh
-            storage_options_provider = _create_storage_options_provider(
+            storage_options_provider = create_storage_options_provider(
                 namespace_impl, namespace_properties, table_id
             )
 
@@ -359,7 +345,7 @@ def create_scalar_index(
     storage_options = storage_options or {}
 
     # Create storage options provider for local operations
-    storage_options_provider = _create_storage_options_provider(
+    storage_options_provider = create_storage_options_provider(
         namespace_impl, namespace_properties, table_id
     )
 
