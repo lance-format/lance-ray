@@ -38,6 +38,7 @@ def write_fragment(
     max_rows_per_group: int = 1024,  # Only useful for v1 writer.
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    storage_options_provider=None,
     retry_params: Optional[dict[str, Any]] = None,
 ) -> list[tuple["FragmentMetadata", pa.Schema]]:
     from lance.dependencies import _PANDAS_AVAILABLE
@@ -89,6 +90,7 @@ def write_fragment(
             max_bytes_per_file=max_bytes_per_file,
             data_storage_version=data_storage_version,
             storage_options=storage_options,
+            storage_options_provider=storage_options_provider,
         ),
         **retry_params,
     )
@@ -151,6 +153,7 @@ class LanceFragmentWriter:
         data_storage_version: Optional[str] = None,
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
+        storage_options_provider=None,
         retry_params: Optional[dict[str, Any]] = None,
     ):
         if use_legacy_format is not None:
@@ -172,6 +175,7 @@ class LanceFragmentWriter:
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
         self.storage_options = storage_options
+        self.storage_options_provider = storage_options_provider
         self.retry_params = retry_params
 
     def __call__(self, batch: Union[pa.Table, "pd.DataFrame", dict]) -> pa.Table:
@@ -195,6 +199,7 @@ class LanceFragmentWriter:
             max_bytes_per_file=self.max_bytes_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
+            storage_options_provider=self.storage_options_provider,
             retry_params=self.retry_params,
         )
         return pa.Table.from_pydict(

@@ -24,8 +24,8 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0,<=2.52.1",
-    "pylance>=1.0.0",
-    "lance-namespace>=0.3.2",
+    "pylance>=2.0.0b8",
+    "lance-namespace>=0.4.5",
     "pyarrow>=17.0.0",
     "more_itertools>=2.6.0; python_version<'3.12'",
 ]
@@ -72,3 +72,7 @@ addopts = ["--cov=lance_ray", "--cov-report=term-missing"]
 [tool.coverage.run]
 source = ["lance_ray"]
 omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.uv]
+extra-index-url = ["https://pypi.fury.io/lance-format"]
+index-strategy = "unsafe-best-match"

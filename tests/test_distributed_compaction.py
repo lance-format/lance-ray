@@ -104,7 +104,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -167,7 +167,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -213,7 +213,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with 4 workers
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=4,
         )
@@ -253,7 +253,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -289,7 +289,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with Ray options
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
             ray_remote_args={"num_cpus": 1},
@@ -327,7 +327,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with storage options
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
             storage_options={},  # Empty storage options should work
@@ -365,7 +365,7 @@ class TestDistributedCompaction:
 
         # Request more workers than tasks
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=10,  # More than needed
         )
@@ -408,7 +408,7 @@ class TestDistributedCompaction:
         )
 
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )

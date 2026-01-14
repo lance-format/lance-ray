@@ -193,18 +193,50 @@ def write_lance(
     )
 
 
+def _create_storage_options_provider(
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    table_id: Optional[list[str]],
+):
+    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
+    if namespace_impl is None or namespace_properties is None or table_id is None:
+        return None
+
+    import lance_namespace as ln
+    from lance import LanceNamespaceStorageOptionsProvider
+
+    namespace = ln.connect(namespace_impl, namespace_properties)
+    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
+
+
 def _handle_fragment(
-    lance_ds: LanceDataset,
+    uri: str,
     transform: "TransformType",
     read_columns: Optional[list[str]] = None,
     batch_size: Optional[int] = None,
     reader_schema: Optional[pa.Schema] = None,
+    read_version: Optional[int | str] = None,
+    storage_options: Optional[dict[str, Any]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
 ):
     """
     Handle a fragment of a Lance dataset.
     """
 
     def func(fragment_id: int):
+        # Create storage options provider in worker for credentials refresh
+        storage_options_provider = _create_storage_options_provider(
+            namespace_impl, namespace_properties, table_id
+        )
+
+        lance_ds = LanceDataset(
+            uri=uri,
+            storage_options=storage_options,
+            storage_options_provider=storage_options_provider,
+            version=read_version,
+        )
         fragment = lance_ds.get_fragment(fragment_id)
         fragment_meta, schema = fragment.merge_columns(
             transform, read_columns, batch_size, reader_schema
@@ -217,8 +249,6 @@ def _handle_fragment(
 def add_columns(
     uri: str,
     *,
-    namespace: Optional["LanceNamespace"] = None,
-    table_id: Optional[list[str]] = None,
     transform: "TransformType",
     filter: Optional[str] = None,
     read_columns: Optional[list[str]] = None,
@@ -226,6 +256,9 @@ def add_columns(
     read_version: Optional[int | str] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     batch_size: int = 1024,
     concurrency: Optional[int] = None,
 ) -> None:
@@ -247,51 +280,57 @@ def add_columns(
         ...     )
         >>> lr.add_columns("/tmp/data/", transform=double_score, concurrency=2)
 
-        Using a LanceNamespace and table ID:
-        >>> import lance_namespace as ln
-        >>> namespace = ln.connect("dir", {"root": "/tmp/tables"}) # doctest: +SKIP
-        >>> lr.add_columns( # doctest: +SKIP
-        ...     namespace=namespace,
-        ...     table_id=["my_table"],
-        ...     transform=double_score,
-        ...     concurrency=2
-        ... )
-
     Args:
-        uri: The path to the destination Lance dataset. Either uri OR (namespace + table_id) must be provided.
-        namespace: A LanceNamespace instance to load the table from. Must be provided together with table_id.
-        table_id: The table identifier as a list of strings. Must be provided together with namespace.
-        transform: The transform to apply to the dataset. It support a lot of types, see `LanceDB API doc https://lancedb.github.io/lance-python-doc/data-evolution.html ` for more details.
-        filter: The filter to apply to the dataset. It is not supported yet, will be supported when `get_fragments` support filter see `LanceDB API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset.get_fragments>`_.
+        uri: The path to the destination Lance dataset.
+        transform: The transform to apply to the dataset. It support a lot of types,
+            see `LanceDB API doc https://lancedb.github.io/lance-python-doc/data-evolution.html ` for more details.
+        filter: The filter to apply to the dataset. It is not supported yet, will be
+            supported when `get_fragments` support filter see
+            `LanceDB API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset.get_fragments>`_.
         read_columns: The columns from the original dataset to read.
         reader_schema: The schema to use for the reader.
         read_version: The version to read.
         ray_remote_args: The arguments to pass to the ray remote function.
         storage_options: The storage options to use for the dataset.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+            Used together with namespace_properties and table_id for credentials
+            vending in distributed workers.
+        namespace_properties: Properties for connecting to the namespace.
+            Used together with namespace_impl and table_id for credentials vending.
+        table_id: The table identifier as a list of strings.
+            Used together with namespace_impl and namespace_properties for
+            credentials vending.
         batch_size: The batch size to use for the reader.
         concurrency: The number of processes to use for the pool.
     """
-    _validate_uri_or_namespace_args(uri, namespace, table_id)
-
     storage_options = storage_options or {}
 
-    # Resolve URI from namespace if provided
-    if namespace is not None and table_id is not None:
-        from lance_namespace import DescribeTableRequest
-
-        describe_request = DescribeTableRequest(id=table_id)
-        describe_response = namespace.describe_table(describe_request)
-        uri = describe_response.location
-        if describe_response.storage_options:
-            storage_options.update(describe_response.storage_options)
+    # Create storage options provider for local operations
+    storage_options_provider = _create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
 
     lance_ds = LanceDataset(
-        uri=uri, storage_options=storage_options, version=read_version
+        uri=uri,
+        storage_options=storage_options,
+        storage_options_provider=storage_options_provider,
+        version=read_version,
     )
     fragment_ids = [f.metadata.id for f in lance_ds.get_fragments()]
     pool = Pool(processes=concurrency, ray_remote_args=ray_remote_args)
     rst_futures = pool.map_async(
-        _handle_fragment(lance_ds, transform, read_columns, batch_size, reader_schema),
+        _handle_fragment(
+            uri,
+            transform,
+            read_columns,
+            batch_size,
+            reader_schema,
+            read_version,
+            storage_options,
+            namespace_impl,
+            namespace_properties,
+            table_id,
+        ),
         fragment_ids,
         chunksize=1,
     )
@@ -316,6 +355,7 @@ def add_columns(
         op,
         read_version=lance_ds.version,
         storage_options=storage_options,
+        storage_options_provider=storage_options_provider,
     )
     pool.close()
 
