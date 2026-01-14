@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lance-ray"
-version = "0.0.8"
+version = "0.1.0"
 description = "Ray integration for Lance"
 readme = "README.md"
 requires-python = ">=3.10"
