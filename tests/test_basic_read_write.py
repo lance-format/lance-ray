@@ -277,7 +277,9 @@ class TestReadWrite:
     def test_read_lance_with_fragment_ids(self, sample_dataset, temp_dir):
         """Test reading with fragment IDs."""
         path = Path(temp_dir) / "fragment_ids_test.lance"
-        lr.write_lance(sample_dataset, str(path), min_rows_per_file=1, max_rows_per_file=1)
+        lr.write_lance(
+            sample_dataset, str(path), min_rows_per_file=1, max_rows_per_file=1
+        )
         dataset = lr.read_lance(str(path), fragment_ids=[0, 1])
         assert dataset.count() == 2
 
@@ -288,7 +290,9 @@ class TestAddColumns:
     def test_add_columns_basic(self, sample_dataset, temp_dir):
         """Test basic add columns functionality."""
         path = Path(temp_dir) / "add_columns_test.lance"
-        lr.write_lance(sample_dataset, str(path), min_rows_per_file=3, max_rows_per_file=3)
+        lr.write_lance(
+            sample_dataset, str(path), min_rows_per_file=3, max_rows_per_file=3
+        )
 
         def double_score(x: pa.RecordBatch) -> pa.RecordBatch:
             df = x.to_pandas()

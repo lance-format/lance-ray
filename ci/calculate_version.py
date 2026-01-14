@@ -28,19 +28,23 @@ def calculate_next_version(current_version, release_type, channel):
         minor = int(parts[1]) if len(parts) > 1 else 0
         patch = int(parts[2]) if len(parts) > 2 else 0
 
-    # Calculate new version for stable releases
-    if channel == "stable":
-        if release_type == "major":
-            new_version = f"{major + 1}.0.0"
-        elif release_type == "minor":
-            new_version = f"{major}.{minor + 1}.0"
-        elif release_type == "patch":
-            new_version = f"{major}.{minor}.{patch + 1}"
-        else:
-            raise ValueError(f"Unknown release type: {release_type}")
+    # Calculate new version based on release type
+    # Note: 'current' keeps the same base version (used to finalize previews to stable
+    # or for subsequent preview releases)
+    if release_type == "major":
+        new_version = f"{major + 1}.0.0"
+    elif release_type == "minor":
+        new_version = f"{major}.{minor + 1}.0"
+    elif release_type == "patch":
+        new_version = f"{major}.{minor}.{patch + 1}"
+    elif release_type == "current":
+        # Keep current base version - used for:
+        # - Subsequent preview releases (v0.0.8-beta.2, beta.3, etc.)
+        # - Finalizing preview to stable (v0.0.8-beta.X -> v0.0.8)
+        # Strip any pre-release suffix to get base version (e.g., 0.0.8-beta.1 -> 0.0.8)
+        new_version = f"{major}.{minor}.{patch}"
     else:
-        # For preview releases, keep the current version
-        new_version = current_version
+        raise ValueError(f"Unknown release type: {release_type}")
 
     return new_version
 
@@ -51,7 +55,7 @@ def main():
     parser.add_argument(
         "--type",
         required=True,
-        choices=["major", "minor", "patch"],
+        choices=["major", "minor", "patch", "current"],
         help="Release type",
     )
     parser.add_argument(

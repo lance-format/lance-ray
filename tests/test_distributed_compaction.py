@@ -46,12 +46,23 @@ def create_dataset_with_fragments(path, fragment_data):
     # Create the dataset with the first fragment
     first_df = fragment_data[0]
     first_ray_ds = ray.data.from_pandas(first_df)
-    lr.write_lance(first_ray_ds, str(path), min_rows_per_file=len(first_df), max_rows_per_file=len(first_df))
+    lr.write_lance(
+        first_ray_ds,
+        str(path),
+        min_rows_per_file=len(first_df),
+        max_rows_per_file=len(first_df),
+    )
 
     # Append remaining fragments
     for df in fragment_data[1:]:
         ray_ds = ray.data.from_pandas(df)
-        lr.write_lance(ray_ds, str(path), mode="append", min_rows_per_file=len(df), max_rows_per_file=len(df))
+        lr.write_lance(
+            ray_ds,
+            str(path),
+            mode="append",
+            min_rows_per_file=len(df),
+            max_rows_per_file=len(df),
+        )
 
     return lance.dataset(str(path))
 
