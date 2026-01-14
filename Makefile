@@ -10,7 +10,7 @@ fix: lock
 
 .PHONY: lock
 lock:
-	uv lock --extra-index-url https://pypi.org/simple --extra-index-url https://pypi.fury.io/lancedb --index-strategy unsafe-best-match
+	uv lock
 
 .PHONY: build
 build: lock

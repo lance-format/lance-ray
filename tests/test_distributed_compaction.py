@@ -104,7 +104,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -167,7 +167,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -213,7 +213,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with 4 workers
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=4,
         )
@@ -253,7 +253,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -289,7 +289,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with Ray options
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
             ray_remote_args={"num_cpus": 1},
@@ -327,7 +327,7 @@ class TestDistributedCompaction:
 
         # Execute distributed compaction with storage options
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
             storage_options={},  # Empty storage options should work
@@ -365,7 +365,7 @@ class TestDistributedCompaction:
 
         # Request more workers than tasks
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=10,  # More than needed
         )
@@ -408,7 +408,7 @@ class TestDistributedCompaction:
         )
 
         metrics = lr.compact_files(
-            dataset=str(dataset_path),
+            uri=str(dataset_path),
             compaction_options=compaction_options,
             num_workers=2,
         )
@@ -423,3 +423,72 @@ class TestDistributedCompaction:
         pd.testing.assert_frame_equal(original_data, compacted_data)
         assert metrics.fragments_removed == 2, "Should remove 2 fragments"
         assert metrics.fragments_added == 1, "Should add 1 fragment"
+
+    def test_compaction_with_directory_namespace(self, temp_dir):
+        """Test compaction using DirectoryNamespace for credentials vending."""
+        import lance_namespace as ln
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        table_id = ["compaction_test_table"]
+
+        fragment1 = pd.DataFrame(
+            {
+                "id": range(1, 11),
+                "value": [f"row_{i}" for i in range(1, 11)],
+            }
+        )
+        fragment2 = pd.DataFrame(
+            {
+                "id": range(11, 21),
+                "value": [f"row_{i}" for i in range(11, 21)],
+            }
+        )
+
+        first_ray_ds = ray.data.from_pandas(fragment1)
+        lr.write_lance(
+            first_ray_ds,
+            namespace=namespace,
+            table_id=table_id,
+            min_rows_per_file=10,
+            max_rows_per_file=10,
+        )
+
+        second_ray_ds = ray.data.from_pandas(fragment2)
+        lr.write_lance(
+            second_ray_ds,
+            namespace=namespace,
+            table_id=table_id,
+            mode="append",
+            min_rows_per_file=10,
+            max_rows_per_file=10,
+        )
+
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+
+        dataset = lance.dataset(uri)
+        assert len(dataset.get_fragments()) == 2, "Should start with 2 fragments"
+        assert dataset.count_rows() == 20, "Should have 20 total rows"
+
+        compaction_options = CompactionOptions(
+            target_rows_per_fragment=100,
+            num_threads=1,
+        )
+
+        metrics = lr.compact_files(
+            uri=uri,
+            compaction_options=compaction_options,
+            num_workers=2,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        assert metrics.fragments_removed == 2, "Should remove 2 fragments"
+        assert metrics.fragments_added == 1, "Should add 1 fragment"
+
+        dataset = lance.dataset(uri)
+        assert len(dataset.get_fragments()) == 1, "Should have 1 fragment after compaction"
+        assert dataset.count_rows() == 20, "Should still have 20 total rows"

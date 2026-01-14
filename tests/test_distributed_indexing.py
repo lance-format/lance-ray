@@ -136,7 +136,7 @@ class TestDistributedIndexing:
 
         # Build distributed index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -165,7 +165,7 @@ class TestDistributedIndexing:
 
         # Build distributed index with custom name
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             name=custom_name,
@@ -187,7 +187,7 @@ class TestDistributedIndexing:
 
         # Build distributed index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -215,7 +215,7 @@ class TestDistributedIndexing:
 
         # Build distributed FTS index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -234,7 +234,7 @@ class TestDistributedIndexing:
 
         # Build distributed index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset,
+            uri=dataset.uri,
             column="text",
             index_type="INVERTED",
             num_workers=4,
@@ -259,7 +259,7 @@ class TestDistributedIndexing:
 
         with pytest.raises(ValueError, match="Column 'nonexistent' not found"):
             lr.create_scalar_index(
-                dataset=dataset_uri,
+                uri=dataset_uri,
                 column="nonexistent",
                 index_type="INVERTED",
                 num_workers=2,
@@ -276,7 +276,7 @@ class TestDistributedIndexing:
             match=r"Index type must be one of \['BTREE', 'BITMAP', 'LABEL_LIST', 'INVERTED', 'FTS', 'NGRAM', 'ZONEMAP'\], not 'INVALID'",
         ):
             lr.create_scalar_index(
-                dataset=dataset_uri,
+                uri=dataset_uri,
                 column="text",
                 index_type="INVALID",
                 num_workers=2,
@@ -290,7 +290,7 @@ class TestDistributedIndexing:
 
         with pytest.raises(ValueError, match="num_workers must be positive"):
             lr.create_scalar_index(
-                dataset=dataset_uri,
+                uri=dataset_uri,
                 column="text",
                 index_type="INVERTED",
                 num_workers=0,
@@ -302,7 +302,7 @@ class TestDistributedIndexing:
 
         with pytest.raises(ValueError, match="Column name cannot be empty"):
             lr.create_scalar_index(
-                dataset=dataset_uri,
+                uri=dataset_uri,
                 column="",
                 index_type="INVERTED",
                 num_workers=2,
@@ -324,7 +324,7 @@ class TestDistributedIndexing:
 
         with pytest.raises(TypeError, match="must be string type"):
             lr.create_scalar_index(
-                dataset=str(path),
+                uri=str(path),
                 column="numeric_col",
                 index_type="INVERTED",
                 num_workers=2,
@@ -338,7 +338,7 @@ class TestDistributedIndexing:
 
         # Build distributed index with Ray options
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -357,7 +357,7 @@ class TestDistributedIndexing:
 
         # Build distributed index with storage options
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -374,7 +374,7 @@ class TestDistributedIndexing:
 
         # Build distributed index with additional kwargs
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -391,7 +391,7 @@ class TestDistributedIndexing:
 
         # Build distributed index using dataset object
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset,
+            uri=dataset.uri,
             column="text",
             index_type="INVERTED",
             num_workers=2,
@@ -410,7 +410,7 @@ class TestDistributedIndexing:
 
         # First, create an index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             name=index_name,
@@ -425,7 +425,7 @@ class TestDistributedIndexing:
         # The error might be raised as RuntimeError during distributed processing
         with pytest.raises((ValueError, RuntimeError)) as exc_info:
             lr.create_scalar_index(
-                dataset=dataset_uri,
+                uri=dataset_uri,
                 column="text",
                 index_type="INVERTED",
                 name=index_name,
@@ -446,7 +446,7 @@ class TestDistributedIndexing:
 
         # First, create an index
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             name=index_name,
@@ -467,7 +467,7 @@ class TestDistributedIndexing:
 
         # Now create another index with the same name but replace=True
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="text",
             index_type="INVERTED",
             name=index_name,
@@ -512,7 +512,7 @@ class TestDistributedIndexing:
 
         # Request more workers than fragments
         updated_dataset = lr.create_scalar_index(
-            dataset=str(path),
+            uri=str(path),
             column="text",
             index_type="INVERTED",
             num_workers=10,  # More than the 2 fragments
@@ -534,7 +534,7 @@ class TestDistributedIndexing:
 
         # Test with the new distributed index building function
         updated_dataset = lr.create_scalar_index(
-            dataset=ds,
+            uri=ds.uri,
             column="text",
             index_type="INVERTED",
             name="new_api_test_idx",
@@ -586,7 +586,7 @@ class TestDistributedIndexing:
 
         # Test with explicit fragment UUID handling
         updated_dataset = lr.create_scalar_index(
-            dataset=ds,
+            uri=ds.uri,
             column="text",
             index_type="INVERTED",
             name="index_uuid_test_idx",
@@ -621,7 +621,7 @@ class TestDistributedIndexing:
         # Test with invalid parameters that should be caught by the new API
         with pytest.raises(ValueError, match="Column name cannot be empty"):
             lr.create_scalar_index(
-                dataset=ds,
+                uri=ds.uri,
                 column="",
                 index_type="INVERTED",
                 num_workers=2,
@@ -633,7 +633,7 @@ class TestDistributedIndexing:
             match=r"Index type must be one of \['BTREE', 'BITMAP', 'LABEL_LIST', 'INVERTED', 'FTS', 'NGRAM', 'ZONEMAP'\], not 'INVALID_TYPE'",
         ):
             lr.create_scalar_index(
-                dataset=ds,
+                uri=ds.uri,
                 column="text",
                 index_type="INVALID_TYPE",
                 num_workers=2,
@@ -666,7 +666,7 @@ class TestDistributedBTreeIndexing:
         )
 
         updated_dataset = lr.create_scalar_index(
-            dataset=ds,
+            uri=ds.uri,
             column="id",
             index_type="BTREE",
             name="btree_multiple_fragment_idx",
@@ -713,7 +713,7 @@ class TestDistributedBTreeIndexing:
 
         # Build BTREE index on the first dataset using unified API
         with_index = lr.create_scalar_index(
-            dataset=with_index,
+            uri=with_index.uri,
             column="id",
             index_type="BTREE",
             name="btree_comp_idx",
@@ -775,3 +775,231 @@ class TestDistributedBTreeIndexing:
             assert ids_idx == ids_base, (
                 f"Test '{test_name}' failed: indexed and baseline results differ for filter: {filter_expr}"
             )
+
+    def test_distributed_btree_index_many_fragments_many_workers(self, temp_dir):
+        """
+        Test distributed BTREE index building with many fragments and many workers.
+
+        This test reproduces the scenario reported in the bug where:
+        - 5000 fragments with 16 workers resulted in "No partition metadata files found"
+        - The test uses a smaller scale (50 fragments, 16 workers) for faster execution
+        """
+        available_cpus = int(ray.cluster_resources().get("CPU", 4))
+        num_workers = min(16, available_cpus)
+
+        ds = generate_multi_fragment_dataset(
+            temp_dir, num_fragments=50, rows_per_fragment=100
+        )
+
+        fragments = list(ds.get_fragments())
+        assert len(fragments) == 50, f"Expected 50 fragments, got {len(fragments)}"
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="id",
+            index_type="BTREE",
+            name="btree_many_workers_idx",
+            replace=False,
+            num_workers=num_workers,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed BTREE build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "btree_many_workers_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "BTREE index not found by name"
+        assert our_index["type"] == "BTree", (
+            f"Expected BTree index, got {our_index['type']}"
+        )
+
+        eq_tbl = updated_dataset.scanner(filter="id = 2500", columns=["id"]).to_table()
+        assert eq_tbl.num_rows == 1, "Exact match query failed"
+
+        rg_tbl = updated_dataset.scanner(
+            filter="id >= 1000 AND id < 4000",
+            columns=["id"],
+        ).to_table()
+        assert rg_tbl.num_rows == 3000, (
+            f"Range query returned {rg_tbl.num_rows} rows, expected 3000"
+        )
+
+    def test_distributed_btree_index_string_column(self, temp_dir):
+        """Test distributed BTREE index on string column (like video_uuid in the bug report)."""
+        import uuid as uuid_module
+
+        available_cpus = int(ray.cluster_resources().get("CPU", 4))
+        num_workers = min(8, available_cpus)
+
+        all_data = []
+        num_fragments = 20
+        rows_per_fragment = 100
+        for frag_idx in range(num_fragments):
+            for row_idx in range(rows_per_fragment):
+                row_id = frag_idx * rows_per_fragment + row_idx
+                all_data.append(
+                    {
+                        "id": row_id,
+                        "video_uuid": str(uuid_module.uuid4()),
+                        "fragment_id": frag_idx,
+                    }
+                )
+
+        df = pd.DataFrame(all_data)
+        dataset = ray.data.from_pandas(df)
+
+        path = Path(temp_dir) / "string_btree_test.lance"
+        lr.write_lance(
+            dataset,
+            str(path),
+            min_rows_per_file=rows_per_fragment,
+            max_rows_per_file=rows_per_fragment,
+        )
+
+        ds = lance.dataset(str(path))
+        assert len(list(ds.get_fragments())) == num_fragments
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="video_uuid",
+            index_type="BTREE",
+            name="video_uuid_idx",
+            replace=False,
+            num_workers=num_workers,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed BTREE build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "video_uuid_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "String BTREE index not found"
+        assert our_index["type"] == "BTree"
+
+        sample_uuid = all_data[500]["video_uuid"]
+        result = updated_dataset.scanner(
+            filter=f"video_uuid = '{sample_uuid}'",
+            columns=["id", "video_uuid"],
+        ).to_table()
+        assert result.num_rows == 1, (
+            f"Expected 1 row for exact UUID match, got {result.num_rows}"
+        )
+
+
+class TestNamespaceIndexing:
+    """Test cases for distributed indexing with DirectoryNamespace."""
+
+    def test_distributed_fts_index_with_directory_namespace(self, temp_dir):
+        """Test distributed FTS index building using DirectoryNamespace."""
+        import lance_namespace as ln
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        table_id = ["fts_index_test_table"]
+
+        data = pd.DataFrame(
+            {
+                "id": range(100),
+                "text": [
+                    f"This is document {i} with searchable content" for i in range(100)
+                ],
+            }
+        )
+        dataset = ray.data.from_pandas(data)
+        lr.write_lance(
+            dataset,
+            namespace=namespace,
+            table_id=table_id,
+            min_rows_per_file=25,
+            max_rows_per_file=25,
+        )
+
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+
+        updated_dataset = lr.create_scalar_index(
+            uri=uri,
+            column="text",
+            index_type="INVERTED",
+            name="fts_namespace_idx",
+            num_workers=2,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed FTS build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "fts_namespace_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "FTS index not found"
+        assert our_index["type"] == "Inverted"
+
+        results = updated_dataset.scanner(
+            full_text_query="document",
+            columns=["id", "text"],
+        ).to_table()
+        assert results.num_rows > 0, "FTS search should return results"
+
+    def test_distributed_btree_index_with_directory_namespace(self, temp_dir):
+        """Test distributed BTREE index building using DirectoryNamespace."""
+        import lance_namespace as ln
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        table_id = ["btree_index_test_table"]
+
+        data = pd.DataFrame(
+            {
+                "id": range(200),
+                "value": [f"value_{i}" for i in range(200)],
+            }
+        )
+        dataset = ray.data.from_pandas(data)
+        lr.write_lance(
+            dataset,
+            namespace=namespace,
+            table_id=table_id,
+            min_rows_per_file=50,
+            max_rows_per_file=50,
+        )
+
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+
+        updated_dataset = lr.create_scalar_index(
+            uri=uri,
+            column="id",
+            index_type="BTREE",
+            name="btree_namespace_idx",
+            num_workers=2,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed BTREE build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "btree_namespace_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "BTREE index not found"
+        assert our_index["type"] == "BTree"
+
+        result = updated_dataset.scanner(filter="id = 100", columns=["id"]).to_table()
+        assert result.num_rows == 1, "BTREE index query should return 1 row"

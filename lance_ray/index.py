@@ -3,7 +3,7 @@
 
 import logging
 import uuid
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional
 
 import lance
 import pyarrow as pa
@@ -12,6 +12,22 @@ from packaging import version
 from ray.util.multiprocessing import Pool
 
 logger = logging.getLogger(__name__)
+
+
+def _create_storage_options_provider(
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    table_id: Optional[list[str]],
+):
+    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
+    if namespace_impl is None or namespace_properties is None or table_id is None:
+        return None
+
+    import lance_namespace as ln
+    from lance import LanceNamespaceStorageOptionsProvider
+
+    namespace = ln.connect(namespace_impl, namespace_properties)
+    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
 
 
 def _distribute_fragments_balanced(
@@ -109,6 +125,9 @@ def _handle_fragment_index(
     replace: bool,
     train: bool,
     storage_options: Optional[dict[str, str]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     **kwargs: Any,
 ):
     """
@@ -140,8 +159,17 @@ def _handle_fragment_index(
                 if fragment_id < 0 or fragment_id > 0xFFFFFFFF:
                     raise ValueError(f"Invalid fragment_id: {fragment_id}")
 
+            # Create storage options provider in worker for credentials refresh
+            storage_options_provider = _create_storage_options_provider(
+                namespace_impl, namespace_properties, table_id
+            )
+
             # Load dataset
-            dataset = LanceDataset(dataset_uri, storage_options=storage_options)
+            dataset = LanceDataset(
+                dataset_uri,
+                storage_options=storage_options,
+                storage_options_provider=storage_options_provider,
+            )
 
             # Validate fragments exist
             available_fragments = {f.fragment_id for f in dataset.get_fragments()}
@@ -204,7 +232,8 @@ def merge_index_metadata_compat(dataset, index_id, index_type, **kwargs):
 
 
 def create_scalar_index(
-    dataset: Union[str, "lance.LanceDataset"],
+    uri: str,
+    *,
     column: str,
     index_type: Literal["BTREE"]
     | Literal["BITMAP"]
@@ -215,13 +244,15 @@ def create_scalar_index(
     | Literal["ZONEMAP"]
     | IndexConfig,
     name: Optional[str] = None,
-    *,
     replace: bool = True,
     train: bool = True,
     fragment_ids: Optional[list[int]] = None,
     index_uuid: Optional[str] = None,
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     **kwargs: Any,
 ) -> "lance.LanceDataset":
@@ -233,26 +264,35 @@ def create_scalar_index(
     merged and committed as a single index.
 
     Args:
-        dataset: Lance dataset or URI to build index on
-        column: Column name to index
-        index_type: Type of index to build ("BTREE", "BITMAP", "LABEL_LIST", "INVERTED", "FTS", "NGRAM", "ZONEMAP") or IndexConfig object
-        name: Name of the index (generated if None)
-        replace: Whether to replace existing index with the same name (default: True)
-        train: Whether to train the index (default: True)
-        fragment_ids: Optional list of fragment IDs to build index on
-        index_uuid: Optional fragment UUID for distributed indexing
-        num_workers: Number of Ray workers to use (keyword-only)
-        storage_options: Storage options for the dataset (keyword-only)
-        ray_remote_args: Options for Ray tasks (e.g., num_cpus, resources) (keyword-only)
-        **kwargs: Additional arguments to pass to create_scalar_index
+        uri: The URI of the Lance dataset to build index on.
+        column: Column name to index.
+        index_type: Type of index to build ("BTREE", "BITMAP", "LABEL_LIST",
+            "INVERTED", "FTS", "NGRAM", "ZONEMAP") or IndexConfig object.
+        name: Name of the index (generated if None).
+        replace: Whether to replace existing index with the same name (default: True).
+        train: Whether to train the index (default: True).
+        fragment_ids: Optional list of fragment IDs to build index on.
+        index_uuid: Optional fragment UUID for distributed indexing.
+        num_workers: Number of Ray workers to use (keyword-only).
+        storage_options: Storage options for the dataset (keyword-only).
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+            Used together with namespace_properties and table_id for credentials
+            vending in distributed workers.
+        namespace_properties: Properties for connecting to the namespace.
+            Used together with namespace_impl and table_id for credentials vending.
+        table_id: The table identifier as a list of strings.
+            Used together with namespace_impl and namespace_properties for
+            credentials vending.
+        ray_remote_args: Options for Ray tasks (e.g., num_cpus, resources) (keyword-only).
+        **kwargs: Additional arguments to pass to create_scalar_index.
 
     Returns:
-        Updated Lance dataset with the index created
+        Updated Lance dataset with the index created.
 
     Raises:
-        ValueError: If input parameters are invalid
-        TypeError: If column type is not string
-        RuntimeError: If index building fails or pylance version is incompatible
+        ValueError: If input parameters are invalid.
+        TypeError: If column type is not string.
+        RuntimeError: If index building fails or pylance version is incompatible.
     """
     # Check pylance version compatibility
     try:
@@ -316,12 +356,19 @@ def create_scalar_index(
     # Note: Ray initialization is now handled by the Pool, following the pattern from io.py
     # This removes the need for explicit ray.init() calls
 
+    storage_options = storage_options or {}
+
+    # Create storage options provider for local operations
+    storage_options_provider = _create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
+
     # Load dataset
-    if isinstance(dataset, str):
-        dataset_uri = dataset
-        dataset = LanceDataset(dataset_uri, storage_options=storage_options)
-    else:
-        dataset_uri = dataset.uri
+    dataset = LanceDataset(
+        uri,
+        storage_options=storage_options,
+        storage_options_provider=storage_options_provider,
+    )
 
     # Validate column exists and has correct type
     try:
@@ -331,9 +378,6 @@ def create_scalar_index(
         raise ValueError(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from e
-
-    if storage_options is None:
-        storage_options = dataset._storage_options
 
     # Check column type according to index type
     value_type = field.type
@@ -413,7 +457,7 @@ def create_scalar_index(
 
     # Create the fragment handler function
     fragment_handler = _handle_fragment_index(
-        dataset_uri=dataset_uri,
+        dataset_uri=uri,
         column=column,
         index_type=index_type,
         name=name,
@@ -421,6 +465,9 @@ def create_scalar_index(
         replace=replace,
         train=train,
         storage_options=storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        table_id=table_id,
         **kwargs,
     )
 
@@ -447,7 +494,11 @@ def create_scalar_index(
         raise RuntimeError(f"Index building failed: {'; '.join(error_messages)}")
 
     # Reload dataset to get the latest state after fragment index creation
-    dataset = LanceDataset(dataset_uri, storage_options=storage_options)
+    dataset = LanceDataset(
+        uri,
+        storage_options=storage_options,
+        storage_options_provider=storage_options_provider,
+    )
 
     # Phase 2: Merge index metadata using the distributed API
     logger.info(f"Phase 2: Merging index metadata for index ID: {index_id}")
@@ -480,10 +531,11 @@ def create_scalar_index(
     )
 
     updated_dataset = lance.LanceDataset.commit(
-        dataset_uri,
+        uri,
         create_index_op,
         read_version=dataset.version,
         storage_options=storage_options,
+        storage_options_provider=storage_options_provider,
     )
 
     logger.info(
