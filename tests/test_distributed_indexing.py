@@ -897,8 +897,6 @@ class TestNamespaceIndexing:
 
     def test_distributed_fts_index_with_directory_namespace(self, temp_dir):
         """Test distributed FTS index building using DirectoryNamespace."""
-        import lance_namespace as ln
-
         table_id = ["fts_index_test_table"]
 
         data = pd.DataFrame(
@@ -949,8 +947,6 @@ class TestNamespaceIndexing:
 
     def test_distributed_btree_index_with_directory_namespace(self, temp_dir):
         """Test distributed BTREE index building using DirectoryNamespace."""
-        import lance_namespace as ln
-
         table_id = ["btree_index_test_table"]
 
         data = pd.DataFrame(
