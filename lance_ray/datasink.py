@@ -15,15 +15,14 @@ from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink
 
 from .fragment import write_fragment
+from .utils import create_storage_options_provider, get_or_create_namespace
 
 if TYPE_CHECKING:
-    from lance_namespace import LanceNamespace
-
     import pandas as pd
 
 
 def _declare_table_with_fallback(
-    namespace: "LanceNamespace", table_id: list[str]
+    namespace, table_id: list[str]
 ) -> tuple[str, Optional[dict[str, str]]]:
     """Declare a table using declare_table, falling back to create_empty_table.
 
@@ -51,12 +50,13 @@ class _BaseLanceDatasink(Datasink):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         *args: Any,
         schema: Optional[pa.Schema] = None,
         mode: Literal["create", "append", "overwrite"] = "create",
         storage_options: Optional[dict[str, Any]] = None,
+        namespace_impl: Optional[str] = None,
+        namespace_properties: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -65,8 +65,12 @@ class _BaseLanceDatasink(Datasink):
         if storage_options:
             merged_storage_options.update(storage_options)
 
-        # Handle namespace-based table writing
-        self.storage_options_provider = None
+        # Store namespace_impl and namespace_properties for worker reconstruction
+        self._namespace_impl = namespace_impl
+        self._namespace_properties = namespace_properties
+
+        # Construct namespace from impl and properties (cached per worker)
+        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
 
         if namespace is not None and table_id is not None:
             self.table_id = table_id
@@ -107,21 +111,26 @@ class _BaseLanceDatasink(Datasink):
                     merged_storage_options.update(ns_storage_options)
                     has_namespace_storage_options = True
 
-            # Create storage options provider for credentials vending
-            if has_namespace_storage_options:
-                from lance import LanceNamespaceStorageOptionsProvider
-
-                self.storage_options_provider = LanceNamespaceStorageOptionsProvider(
-                    namespace=namespace, table_id=table_id
-                )
+            # Mark that we have namespace storage options for provider creation
+            self._has_namespace_storage_options = has_namespace_storage_options
         else:
             self.table_id = None
             self.uri = uri
+            self._has_namespace_storage_options = False
 
         self.schema = schema
         self.mode = mode
         self.read_version: Optional[int] = None
         self.storage_options = merged_storage_options
+
+    @property
+    def storage_options_provider(self):
+        """Lazily create storage options provider using namespace_impl/properties."""
+        if not self._has_namespace_storage_options:
+            return None
+        return create_storage_options_provider(
+            self._namespace_impl, self._namespace_properties, self.table_id
+        )
 
     @property
     def supports_distributed_writes(self) -> bool:
@@ -221,6 +230,13 @@ class LanceDatasink(_BaseLanceDatasink):
             for more details.
         storage_options : Dict[str, Any], optional
             The storage options for the writer. Default is None.
+        namespace_impl : str, optional
+            The namespace implementation type (e.g., "rest", "dir").
+            Used together with namespace_properties and table_id for credentials
+            vending in distributed workers.
+        namespace_properties : Dict[str, str], optional
+            Properties for connecting to the namespace.
+            Used together with namespace_impl and table_id for credentials vending.
     """
 
     NAME = "Lance"
@@ -231,7 +247,6 @@ class LanceDatasink(_BaseLanceDatasink):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         *args: Any,
         schema: Optional[pa.Schema] = None,
@@ -240,16 +255,19 @@ class LanceDatasink(_BaseLanceDatasink):
         max_rows_per_file: int = 64 * 1024 * 1024,
         data_storage_version: Optional[str] = None,
         storage_options: Optional[dict[str, Any]] = None,
+        namespace_impl: Optional[str] = None,
+        namespace_properties: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ):
         super().__init__(
             uri,
-            namespace,
             table_id,
             *args,
             schema=schema,
             mode=mode,
             storage_options=storage_options,
+            namespace_impl=namespace_impl,
+            namespace_properties=namespace_properties,
             **kwargs,
         )
 
@@ -296,7 +314,9 @@ class LanceDatasink(_BaseLanceDatasink):
             max_rows_per_file=self.max_rows_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
-            storage_options_provider=self.storage_options_provider,
+            namespace_impl=self._namespace_impl,
+            namespace_properties=self._namespace_properties,
+            table_id=self.table_id,
             retry_params=self._retry_params,
         )
         return [

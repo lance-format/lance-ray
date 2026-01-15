@@ -6,23 +6,13 @@ from lance.lance import CompactionMetrics
 from lance.optimize import Compaction, CompactionOptions, CompactionTask
 from ray.util.multiprocessing import Pool
 
+from .utils import (
+    create_storage_options_provider,
+    get_or_create_namespace,
+    validate_uri_or_namespace,
+)
+
 logger = logging.getLogger(__name__)
-
-
-def _create_storage_options_provider(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-):
-    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
-    if namespace_impl is None or namespace_properties is None or table_id is None:
-        return None
-
-    import lance_namespace as ln
-    from lance import LanceNamespaceStorageOptionsProvider
-
-    namespace = ln.connect(namespace_impl, namespace_properties)
-    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
 
 
 def _handle_compaction_task(
@@ -50,7 +40,7 @@ def _handle_compaction_task(
         """
         try:
             # Create storage options provider in worker for credentials refresh
-            storage_options_provider = _create_storage_options_provider(
+            storage_options_provider = create_storage_options_provider(
                 namespace_impl, namespace_properties, table_id
             )
 
@@ -88,14 +78,14 @@ def _handle_compaction_task(
 
 
 def compact_files(
-    uri: str,
+    uri: Optional[str] = None,
     *,
+    table_id: Optional[list[str]] = None,
     compaction_options: Optional[CompactionOptions] = None,
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
-    table_id: Optional[list[str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
 ) -> Optional[CompactionMetrics]:
     """
@@ -106,18 +96,18 @@ def compact_files(
     committed as a single compaction operation.
 
     Args:
-        uri: The URI of the Lance dataset to compact.
+        uri: The URI of the Lance dataset to compact. Either uri OR
+            (namespace_impl + table_id) must be provided.
+        table_id: The table identifier as a list of strings. Must be provided
+            together with namespace_impl.
         compaction_options: Options for the compaction operation.
         num_workers: Number of Ray workers to use (default: 4).
         storage_options: Storage options for the dataset.
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
-            Used together with namespace_properties and table_id for credentials
-            vending in distributed workers.
+            Used together with table_id for resolving the dataset location and
+            credentials vending in distributed workers.
         namespace_properties: Properties for connecting to the namespace.
-            Used together with namespace_impl and table_id for credentials vending.
-        table_id: The table identifier as a list of strings.
-            Used together with namespace_impl and namespace_properties for
-            credentials vending.
+            Used together with namespace_impl and table_id.
         ray_remote_args: Options for Ray tasks (e.g., num_cpus, resources).
 
     Returns:
@@ -127,17 +117,31 @@ def compact_files(
         ValueError: If input parameters are invalid.
         RuntimeError: If compaction fails.
     """
-    storage_options = storage_options or {}
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+    merged_storage_options: dict[str, Any] = {}
+    if storage_options:
+        merged_storage_options.update(storage_options)
+
+    # Resolve URI and get storage options from namespace if provided
+    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+    if namespace is not None and table_id is not None:
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+        if describe_response.storage_options:
+            merged_storage_options.update(describe_response.storage_options)
 
     # Create storage options provider for local operations
-    storage_options_provider = _create_storage_options_provider(
+    storage_options_provider = create_storage_options_provider(
         namespace_impl, namespace_properties, table_id
     )
 
     # Load dataset
     dataset = lance.LanceDataset(
         uri,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         storage_options_provider=storage_options_provider,
     )
 
@@ -163,7 +167,7 @@ def compact_files(
     # Create the task handler function
     task_handler = _handle_compaction_task(
         dataset_uri=uri,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
         table_id=table_id,

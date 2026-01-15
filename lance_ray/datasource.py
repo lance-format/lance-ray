@@ -9,11 +9,10 @@ from ray.data.context import DataContext
 from ray.data.datasource import Datasource
 from ray.data.datasource.datasource import ReadTask
 
-from .utils import array_split
+from .utils import array_split, create_storage_options_provider, get_or_create_namespace
 
 if TYPE_CHECKING:
     import lance
-    from lance_namespace import LanceNamespace
 
 
 class LanceDatasource(Datasource):
@@ -29,7 +28,6 @@ class LanceDatasource(Datasource):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         columns: Optional[list[str]] = None,
         filter: Optional[str] = None,
@@ -37,6 +35,8 @@ class LanceDatasource(Datasource):
         scanner_options: Optional[dict[str, Any]] = None,
         dataset_options: Optional[dict[str, Any]] = None,
         fragment_ids: Optional[list[int]] = None,
+        namespace_impl: Optional[str] = None,
+        namespace_properties: Optional[dict[str, str]] = None,
     ):
         _check_import(self, module="lance", package="pylance")
 
@@ -48,9 +48,16 @@ class LanceDatasource(Datasource):
             self._scanner_options["filter"] = filter
 
         self._uri = uri
-        self._namespace = namespace
         self._table_id = table_id
         self._storage_options = storage_options
+
+        # Store namespace_impl and namespace_properties for worker reconstruction.
+        # Workers will use these to reconstruct the namespace and storage options provider.
+        self._namespace_impl = namespace_impl
+        self._namespace_properties = namespace_properties
+
+        # Construct namespace from impl and properties (cached per worker)
+        self._namespace = get_or_create_namespace(namespace_impl, namespace_properties)
 
         match = []
         match.extend(self.READ_FRAGMENTS_ERRORS_TO_RETRY)
@@ -76,6 +83,9 @@ class LanceDatasource(Datasource):
             dataset_options["namespace"] = self._namespace
             dataset_options["table_id"] = self._table_id
             dataset_options["storage_options"] = self._storage_options
+            # Note: lance.dataset() doesn't accept storage_options_provider.
+            # When namespace is provided, it handles credential refresh internally.
+            # For workers, we pass namespace_impl/properties to reconstruct the provider.
             self._lance_ds = lance.dataset(**dataset_options)
         return self._lance_ds
 
@@ -94,6 +104,18 @@ class LanceDatasource(Datasource):
             return []
 
         read_tasks = []
+
+        # Extract dataset components for worker reconstruction.
+        # We pass namespace_impl/properties/table_id instead of the provider object
+        # because namespace objects are not serializable. Workers will reconstruct
+        # the namespace and provider using these serializable parameters.
+        dataset_uri = self.lance_dataset.uri
+        dataset_version = self.lance_dataset.version
+        dataset_storage_options = self._lance_ds._storage_options
+        serialized_manifest = self._lance_ds._ds.serialized_manifest()
+        namespace_impl = self._namespace_impl
+        namespace_properties = self._namespace_properties
+        table_id = self._table_id
 
         for fragments in array_split(self.fragments, parallelism):
             if len(fragments) == 0:
@@ -134,10 +156,25 @@ class LanceDatasource(Datasource):
 
             read_task = ReadTask(
                 lambda fids=fragment_ids,
-                lance_ds=self.lance_dataset,
+                uri=dataset_uri,
+                version=dataset_version,
+                storage_options=dataset_storage_options,
+                manifest=serialized_manifest,
+                ns_impl=namespace_impl,
+                ns_props=namespace_properties,
+                tbl_id=table_id,
                 scanner_options=self._scanner_options,
                 retry_params=self._retry_params: _read_fragments_with_retry(
-                    fids, lance_ds, scanner_options, retry_params
+                    fids,
+                    uri,
+                    version,
+                    storage_options,
+                    manifest,
+                    ns_impl,
+                    ns_props,
+                    tbl_id,
+                    scanner_options,
+                    retry_params,
                 ),
                 metadata,
             )
@@ -160,10 +197,31 @@ class LanceDatasource(Datasource):
 
 def _read_fragments_with_retry(
     fragment_ids: list[int],
-    lance_ds: "lance.LanceDataset",
+    uri: str,
+    version: int,
+    storage_options: Optional[dict[str, str]],
+    manifest: bytes,
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    table_id: Optional[list[str]],
     scanner_options: dict[str, Any],
     retry_params: dict[str, Any],
 ) -> Iterator[pa.Table]:
+    # Reconstruct storage options provider on worker for credential refresh
+    storage_options_provider = create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
+
+    import lance
+
+    lance_ds = lance.LanceDataset(
+        uri,
+        version=version,
+        storage_options=storage_options,
+        serialized_manifest=manifest,
+        storage_options_provider=storage_options_provider,
+    )
+
     return call_with_retry(
         lambda: _read_fragments(fragment_ids, lance_ds, scanner_options),
         **retry_params,

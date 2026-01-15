@@ -14,10 +14,14 @@ from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
+from .utils import (
+    create_storage_options_provider,
+    has_namespace_params,
+    validate_uri_or_namespace,
+)
 
 if TYPE_CHECKING:
     from lance.types import ReaderLike
-    from lance_namespace import LanceNamespace
 
     TransformType = (
         dict[str, str]
@@ -30,7 +34,6 @@ if TYPE_CHECKING:
 def read_lance(
     uri: Optional[str] = None,
     *,
-    namespace: Optional["LanceNamespace"] = None,
     table_id: Optional[list[str]] = None,
     columns: Optional[list[str]] = None,
     filter: Optional[str] = None,
@@ -38,6 +41,8 @@ def read_lance(
     scanner_options: Optional[dict[str, Any]] = None,
     dataset_options: Optional[dict[str, Any]] = None,
     fragment_ids: Optional[list[int]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     override_num_blocks: Optional[int] = None,
@@ -55,22 +60,20 @@ def read_lance(
         ...     filter="label = 2 AND text IS NOT NULL",
         ... )
 
-        Using a LanceNamespace and table ID:
-        >>> import lance_namespace as ln
-        >>> namespace = ln.connect("dir", {"root": "/path/to/tables"}) # doctest: +SKIP
+        Using namespace_impl and namespace_properties:
         >>> ds = lr.read_lance( # doctest: +SKIP
-        ...     namespace=namespace,
+        ...     namespace_impl="dir",
+        ...     namespace_properties={"root": "/path/to/tables"},
         ...     table_id=["my_table"],
         ...     columns=["image", "label"],
         ... )
 
     Args:
         uri: The URI of the Lance dataset to read from. Local file paths, S3, and GCS
-            are supported. Either uri OR (namespace + table_id) must be provided.
-        namespace: A LanceNamespace instance to load the table from. Must be provided
-            together with table_id.
+            are supported. Either uri OR (namespace_impl + namespace_properties + table_id)
+            must be provided.
         table_id: The table identifier as a list of strings. Must be provided together
-            with namespace.
+            with namespace_impl and namespace_properties.
         columns: The columns to read. By default, all columns are read.
         filter: Read returns only the rows matching the filter. By default, no
             filter is applied.
@@ -84,6 +87,10 @@ def read_lance(
             This can include options like `version`, `block_size`, etc. For more
             information, see `Lance API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset>`_.
         fragment_ids: The fragment IDs to read. If provided, only the fragments with the given IDs will be read.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+            Used together with namespace_properties and table_id.
+        namespace_properties: Properties for connecting to the namespace.
+            Used together with namespace_impl and table_id.
         ray_remote_args: kwargs passed to :func:`ray.remote` in the read tasks.
         concurrency: The maximum number of Ray tasks to run concurrently. Set this
             to control number of tasks to run concurrently. This doesn't change the
@@ -97,11 +104,10 @@ def read_lance(
     Returns:
         A :class:`~ray.data.Dataset` producing records read from the Lance dataset.
     """  # noqa: E501
-    _validate_uri_or_namespace_args(uri, namespace, table_id)
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     datasource = LanceDatasource(
         uri=uri,
-        namespace=namespace,
         table_id=table_id,
         columns=columns,
         filter=filter,
@@ -109,6 +115,8 @@ def read_lance(
         scanner_options=scanner_options,
         dataset_options=dataset_options,
         fragment_ids=fragment_ids,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
     )
 
     return read_datasource(
@@ -123,7 +131,6 @@ def write_lance(
     ds: Dataset,
     uri: Optional[str] = None,
     *,
-    namespace: Optional["LanceNamespace"] = None,
     table_id: Optional[list[str]] = None,
     schema: Optional[pa.Schema] = None,
     mode: Literal["create", "append", "overwrite"] = "create",
@@ -131,6 +138,8 @@ def write_lance(
     max_rows_per_file: int = 64 * 1024 * 1024,
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
 ) -> None:
@@ -146,22 +155,26 @@ def write_lance(
             ds = ray.data.from_pandas(pd.DataFrame(docs))
             lr.write_lance(ds, "/tmp/data/")
 
-        Using a LanceNamespace and table ID:
+        Using namespace_impl and namespace_properties:
         .. testcode::
-            import lance_namespace as ln
             import lance_ray as lr
             import pandas as pd
 
             docs = [{"title": "Lance data sink test"} for key in range(4)]
             ds = ray.data.from_pandas(pd.DataFrame(docs))
-            namespace = ln.connect("dir", {"root": "/tmp/tables"}) # doctest: +SKIP
-            lr.write_lance(ds, namespace=namespace, table_id=["my_table"]) # doctest: +SKIP
+            lr.write_lance(  # doctest: +SKIP
+                ds,
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp/tables"},
+                table_id=["my_table"],
+            )
 
     Args:
         ds: The Ray dataset to write.
-        uri: The path to the destination Lance dataset. Can only be provided together with namespace/table_id when creating a new dataset (mode='create' or 'overwrite').
-        namespace: A LanceNamespace instance to write the table to. Must be provided together with table_id.
-        table_id: The table identifier as a list of strings. Must be provided together with namespace.
+        uri: The path to the destination Lance dataset. Can only be provided together
+            with namespace parameters when creating a new dataset (mode='create' or 'overwrite').
+        table_id: The table identifier as a list of strings. Must be provided together
+            with namespace_impl and namespace_properties.
         schema: The schema of the dataset. If not provided, it is inferred from the data.
         mode: The write mode. Can be "create", "append", or "overwrite".
         min_rows_per_file: The minimum number of rows per file.
@@ -171,12 +184,15 @@ def write_lance(
             "legacy" which will use the legacy v1 version.  See the user guide
             for more details.
         storage_options: The storage options for the writer. Default is None.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+            Used together with namespace_properties and table_id.
+        namespace_properties: Properties for connecting to the namespace.
+            Used together with namespace_impl and table_id.
     """
-    _validate_write_args(uri, namespace, table_id, mode)
+    _validate_write_args(uri, namespace_impl, table_id, mode)
 
     datasink = LanceDatasink(
         uri,
-        namespace=namespace,
         table_id=table_id,
         schema=schema,
         mode=mode,
@@ -184,6 +200,8 @@ def write_lance(
         max_rows_per_file=max_rows_per_file,
         data_storage_version=data_storage_version,
         storage_options=storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
     )
 
     ds.write_datasink(
@@ -191,22 +209,6 @@ def write_lance(
         ray_remote_args=ray_remote_args or {},
         concurrency=concurrency,
     )
-
-
-def _create_storage_options_provider(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-):
-    """Create a LanceNamespaceStorageOptionsProvider if namespace parameters are provided."""
-    if namespace_impl is None or namespace_properties is None or table_id is None:
-        return None
-
-    import lance_namespace as ln
-    from lance import LanceNamespaceStorageOptionsProvider
-
-    namespace = ln.connect(namespace_impl, namespace_properties)
-    return LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
 
 
 def _handle_fragment(
@@ -227,7 +229,7 @@ def _handle_fragment(
 
     def func(fragment_id: int):
         # Create storage options provider in worker for credentials refresh
-        storage_options_provider = _create_storage_options_provider(
+        storage_options_provider = create_storage_options_provider(
             namespace_impl, namespace_properties, table_id
         )
 
@@ -306,7 +308,7 @@ def add_columns(
     storage_options = storage_options or {}
 
     # Create storage options provider for local operations
-    storage_options_provider = _create_storage_options_provider(
+    storage_options_provider = create_storage_options_provider(
         namespace_impl, namespace_properties, table_id
     )
 
@@ -360,49 +362,29 @@ def add_columns(
     pool.close()
 
 
-def _validate_uri_or_namespace_args(
-    uri: Optional[str],
-    namespace: Optional["LanceNamespace"],
-    table_id: Optional[list[str]],
-) -> None:
-    """Validate that either uri OR (namespace + table_id) is provided."""
-    if uri is not None and (namespace is not None or table_id is not None):
-        raise ValueError(
-            "Cannot provide both 'uri' and 'namespace'/'table_id'. "
-            "Use either 'uri' OR ('namespace' + 'table_id')."
-        )
-
-    if uri is None and (namespace is None or table_id is None):
-        raise ValueError(
-            "Must provide either 'uri' OR both 'namespace' and 'table_id'."
-        )
-
-
 def _validate_write_args(
     uri: Optional[str],
-    namespace: Optional["LanceNamespace"],
+    namespace_impl: Optional[str],
     table_id: Optional[list[str]],
     mode: str,
 ) -> None:
     """Validate write arguments.
 
-    For create/overwrite modes, allows both uri and namespace/table_id to be provided
+    For create/overwrite modes, allows both uri and namespace parameters to be provided
     together (to create at a specific location and register with namespace).
-    For append mode, requires exactly one of uri OR (namespace + table_id).
+    For append mode, requires exactly one of uri OR namespace parameters.
     """
-    # namespace and table_id must be provided together
-    if (namespace is None) != (table_id is None):
-        raise ValueError("Both 'namespace' and 'table_id' must be provided together.")
+    has_ns = has_namespace_params(namespace_impl, table_id)
 
     # For append mode, use the same validation as read operations
-    if mode == "append" and uri is not None and namespace is not None:
+    if mode == "append" and uri is not None and has_ns:
         raise ValueError(
-            "For append mode, cannot provide both 'uri' and 'namespace'/'table_id'. "
-            "Use either 'uri' OR ('namespace' + 'table_id')."
+            "For append mode, cannot provide both 'uri' and namespace parameters. "
+            "Use either 'uri' OR ('namespace_impl' + 'table_id')."
         )
 
     # Must provide at least one way to identify the dataset
-    if uri is None and namespace is None:
+    if uri is None and not has_ns:
         raise ValueError(
-            "Must provide either 'uri' OR both 'namespace' and 'table_id'."
+            "Must provide either 'uri' OR ('namespace_impl' + 'table_id')."
         )

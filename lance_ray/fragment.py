@@ -26,6 +26,7 @@ __all__ = [
 ]
 
 from .pandas import pd_to_arrow
+from .utils import create_storage_options_provider
 
 
 def write_fragment(
@@ -38,7 +39,9 @@ def write_fragment(
     max_rows_per_group: int = 1024,  # Only useful for v1 writer.
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
-    storage_options_provider=None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     retry_params: Optional[dict[str, Any]] = None,
 ) -> list[tuple["FragmentMetadata", pa.Schema]]:
     from lance.dependencies import _PANDAS_AVAILABLE
@@ -79,6 +82,11 @@ def write_fragment(
             "max_attempts": 1,
             "max_backoff_s": 0,
         }
+
+    # Create storage options provider from namespace parameters
+    storage_options_provider = create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
 
     fragments = call_with_retry(
         lambda: write_fragments(
@@ -134,6 +142,17 @@ class LanceFragmentWriter:
         `data_storage_version` parameter instead.
     storage_options : Dict[str, Any], optional
         The storage options for the writer. Default is None.
+    namespace_impl : str, optional
+        The namespace implementation type (e.g., "rest", "dir").
+        Used together with namespace_properties and table_id for credentials
+        vending in distributed workers.
+    namespace_properties : Dict[str, str], optional
+        Properties for connecting to the namespace.
+        Used together with namespace_impl and table_id for credentials vending.
+    table_id : List[str], optional
+        The table identifier as a list of strings.
+        Used together with namespace_impl and namespace_properties for
+        credentials vending.
     retry_params : Dict[str, Any], optional
         Retry parameters for write operations. Default is None.
         If provided, should contain keys like 'description', 'match',
@@ -153,7 +172,9 @@ class LanceFragmentWriter:
         data_storage_version: Optional[str] = None,
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
-        storage_options_provider=None,
+        namespace_impl: Optional[str] = None,
+        namespace_properties: Optional[dict[str, str]] = None,
+        table_id: Optional[list[str]] = None,
         retry_params: Optional[dict[str, Any]] = None,
     ):
         if use_legacy_format is not None:
@@ -175,7 +196,9 @@ class LanceFragmentWriter:
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
         self.storage_options = storage_options
-        self.storage_options_provider = storage_options_provider
+        self.namespace_impl = namespace_impl
+        self.namespace_properties = namespace_properties
+        self.table_id = table_id
         self.retry_params = retry_params
 
     def __call__(self, batch: Union[pa.Table, "pd.DataFrame", dict]) -> pa.Table:
@@ -199,7 +222,9 @@ class LanceFragmentWriter:
             max_bytes_per_file=self.max_bytes_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
-            storage_options_provider=self.storage_options_provider,
+            namespace_impl=self.namespace_impl,
+            namespace_properties=self.namespace_properties,
+            table_id=self.table_id,
             retry_params=self.retry_params,
         )
         return pa.Table.from_pydict(

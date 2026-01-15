@@ -320,15 +320,21 @@ class TestNamespaceReadWrite:
 
     def test_write_and_read_with_directory_namespace(self, sample_data, temp_dir):
         """Test write and read using DirectoryNamespace."""
-        import lance_namespace as ln
-
-        namespace = ln.connect("dir", {"root": temp_dir})
         table_id = ["test_table"]
 
         original_dataset = ray.data.from_pandas(sample_data)
-        lr.write_lance(original_dataset, namespace=namespace, table_id=table_id)
+        lr.write_lance(
+            original_dataset,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
 
-        read_dataset = lr.read_lance(namespace=namespace, table_id=table_id)
+        read_dataset = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
         read_df = read_dataset.to_pandas()
 
         original_sorted = sample_data.sort_values("id").reset_index(drop=True)
