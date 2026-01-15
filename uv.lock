@@ -381,7 +381,7 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lance-namespace", specifier = ">=0.4.5" },
+    { name = "lance-namespace" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-awesome-pages-plugin", marker = "extra == 'docs'", specifier = ">=2.9.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
