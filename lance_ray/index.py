@@ -11,7 +11,11 @@ from lance.dataset import Index, IndexConfig, LanceDataset
 from packaging import version
 from ray.util.multiprocessing import Pool
 
-from .utils import create_storage_options_provider
+from .utils import (
+    create_storage_options_provider,
+    get_or_create_namespace,
+    validate_uri_or_namespace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +222,7 @@ def merge_index_metadata_compat(dataset, index_id, index_type, **kwargs):
 
 
 def create_scalar_index(
-    uri: str,
+    uri: Optional[str] = None,
     *,
     column: str,
     index_type: Literal["BTREE"]
@@ -229,6 +233,7 @@ def create_scalar_index(
     | Literal["NGRAM"]
     | Literal["ZONEMAP"]
     | IndexConfig,
+    table_id: Optional[list[str]] = None,
     name: Optional[str] = None,
     replace: bool = True,
     train: bool = True,
@@ -238,7 +243,6 @@ def create_scalar_index(
     storage_options: Optional[dict[str, str]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
-    table_id: Optional[list[str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     **kwargs: Any,
 ) -> "lance.LanceDataset":
@@ -250,10 +254,13 @@ def create_scalar_index(
     merged and committed as a single index.
 
     Args:
-        uri: The URI of the Lance dataset to build index on.
+        uri: The URI of the Lance dataset to build index on. Either uri OR
+            (namespace_impl + table_id) must be provided.
         column: Column name to index.
         index_type: Type of index to build ("BTREE", "BITMAP", "LABEL_LIST",
             "INVERTED", "FTS", "NGRAM", "ZONEMAP") or IndexConfig object.
+        table_id: The table identifier as a list of strings. Must be provided
+            together with namespace_impl.
         name: Name of the index (generated if None).
         replace: Whether to replace existing index with the same name (default: True).
         train: Whether to train the index (default: True).
@@ -262,13 +269,10 @@ def create_scalar_index(
         num_workers: Number of Ray workers to use (keyword-only).
         storage_options: Storage options for the dataset (keyword-only).
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
-            Used together with namespace_properties and table_id for credentials
-            vending in distributed workers.
+            Used together with table_id for resolving the dataset location and
+            credentials vending in distributed workers.
         namespace_properties: Properties for connecting to the namespace.
-            Used together with namespace_impl and table_id for credentials vending.
-        table_id: The table identifier as a list of strings.
-            Used together with namespace_impl and namespace_properties for
-            credentials vending.
+            Used together with namespace_impl and table_id.
         ray_remote_args: Options for Ray tasks (e.g., num_cpus, resources) (keyword-only).
         **kwargs: Additional arguments to pass to create_scalar_index.
 
@@ -303,6 +307,9 @@ def create_scalar_index(
 
     index_id = str(uuid.uuid4())
     logger.info(f"Starting distributed index build with ID: {index_id}")
+
+    # Validate uri or namespace params
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     # Basic input validation
     if not column:
@@ -342,7 +349,19 @@ def create_scalar_index(
     # Note: Ray initialization is now handled by the Pool, following the pattern from io.py
     # This removes the need for explicit ray.init() calls
 
-    storage_options = storage_options or {}
+    merged_storage_options: dict[str, Any] = {}
+    if storage_options:
+        merged_storage_options.update(storage_options)
+
+    # Resolve URI and get storage options from namespace if provided
+    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+    if namespace is not None and table_id is not None:
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+        if describe_response.storage_options:
+            merged_storage_options.update(describe_response.storage_options)
 
     # Create storage options provider for local operations
     storage_options_provider = create_storage_options_provider(
@@ -352,7 +371,7 @@ def create_scalar_index(
     # Load dataset
     dataset = LanceDataset(
         uri,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         storage_options_provider=storage_options_provider,
     )
 
@@ -450,7 +469,7 @@ def create_scalar_index(
         index_uuid=index_id,
         replace=replace,
         train=train,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
         table_id=table_id,
@@ -482,7 +501,7 @@ def create_scalar_index(
     # Reload dataset to get the latest state after fragment index creation
     dataset = LanceDataset(
         uri,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         storage_options_provider=storage_options_provider,
     )
 
@@ -520,7 +539,7 @@ def create_scalar_index(
         uri,
         create_index_op,
         read_version=dataset.version,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
         storage_options_provider=storage_options_provider,
     )
 

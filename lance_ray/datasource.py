@@ -9,11 +9,10 @@ from ray.data.context import DataContext
 from ray.data.datasource import Datasource
 from ray.data.datasource.datasource import ReadTask
 
-from .utils import array_split, create_storage_options_provider
+from .utils import array_split, create_storage_options_provider, get_or_create_namespace
 
 if TYPE_CHECKING:
     import lance
-    from lance_namespace import LanceNamespace
 
 
 class LanceDatasource(Datasource):
@@ -29,7 +28,6 @@ class LanceDatasource(Datasource):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         columns: Optional[list[str]] = None,
         filter: Optional[str] = None,
@@ -50,7 +48,6 @@ class LanceDatasource(Datasource):
             self._scanner_options["filter"] = filter
 
         self._uri = uri
-        self._namespace = namespace
         self._table_id = table_id
         self._storage_options = storage_options
 
@@ -58,6 +55,9 @@ class LanceDatasource(Datasource):
         # Workers will use these to reconstruct the namespace and storage options provider.
         self._namespace_impl = namespace_impl
         self._namespace_properties = namespace_properties
+
+        # Construct namespace from impl and properties (cached per worker)
+        self._namespace = get_or_create_namespace(namespace_impl, namespace_properties)
 
         match = []
         match.extend(self.READ_FRAGMENTS_ERRORS_TO_RETRY)

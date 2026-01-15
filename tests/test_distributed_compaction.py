@@ -428,7 +428,6 @@ class TestDistributedCompaction:
         """Test compaction using DirectoryNamespace for credentials vending."""
         import lance_namespace as ln
 
-        namespace = ln.connect("dir", {"root": temp_dir})
         table_id = ["compaction_test_table"]
 
         fragment1 = pd.DataFrame(
@@ -447,7 +446,8 @@ class TestDistributedCompaction:
         first_ray_ds = ray.data.from_pandas(fragment1)
         lr.write_lance(
             first_ray_ds,
-            namespace=namespace,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
             table_id=table_id,
             min_rows_per_file=10,
             max_rows_per_file=10,
@@ -456,7 +456,8 @@ class TestDistributedCompaction:
         second_ray_ds = ray.data.from_pandas(fragment2)
         lr.write_lance(
             second_ray_ds,
-            namespace=namespace,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
             table_id=table_id,
             mode="append",
             min_rows_per_file=10,
@@ -465,6 +466,7 @@ class TestDistributedCompaction:
 
         from lance_namespace import DescribeTableRequest
 
+        namespace = ln.connect("dir", {"root": temp_dir})
         describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
         uri = describe_response.location
 
@@ -477,8 +479,8 @@ class TestDistributedCompaction:
             num_threads=1,
         )
 
+        # Use namespace params only - compact_files will resolve URI internally
         metrics = lr.compact_files(
-            uri=uri,
             compaction_options=compaction_options,
             num_workers=2,
             namespace_impl="dir",

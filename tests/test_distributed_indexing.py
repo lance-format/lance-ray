@@ -899,7 +899,6 @@ class TestNamespaceIndexing:
         """Test distributed FTS index building using DirectoryNamespace."""
         import lance_namespace as ln
 
-        namespace = ln.connect("dir", {"root": temp_dir})
         table_id = ["fts_index_test_table"]
 
         data = pd.DataFrame(
@@ -913,19 +912,15 @@ class TestNamespaceIndexing:
         dataset = ray.data.from_pandas(data)
         lr.write_lance(
             dataset,
-            namespace=namespace,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
             table_id=table_id,
             min_rows_per_file=25,
             max_rows_per_file=25,
         )
 
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-
+        # Use namespace params only - create_scalar_index will resolve URI internally
         updated_dataset = lr.create_scalar_index(
-            uri=uri,
             column="text",
             index_type="INVERTED",
             name="fts_namespace_idx",
@@ -956,7 +951,6 @@ class TestNamespaceIndexing:
         """Test distributed BTREE index building using DirectoryNamespace."""
         import lance_namespace as ln
 
-        namespace = ln.connect("dir", {"root": temp_dir})
         table_id = ["btree_index_test_table"]
 
         data = pd.DataFrame(
@@ -968,19 +962,15 @@ class TestNamespaceIndexing:
         dataset = ray.data.from_pandas(data)
         lr.write_lance(
             dataset,
-            namespace=namespace,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
             table_id=table_id,
             min_rows_per_file=50,
             max_rows_per_file=50,
         )
 
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-
+        # Use namespace params only - create_scalar_index will resolve URI internally
         updated_dataset = lr.create_scalar_index(
-            uri=uri,
             column="id",
             index_type="BTREE",
             name="btree_namespace_idx",

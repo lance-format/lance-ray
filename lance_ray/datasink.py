@@ -15,16 +15,14 @@ from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink
 
 from .fragment import write_fragment
-from .utils import create_storage_options_provider
+from .utils import create_storage_options_provider, get_or_create_namespace
 
 if TYPE_CHECKING:
-    from lance_namespace import LanceNamespace
-
     import pandas as pd
 
 
 def _declare_table_with_fallback(
-    namespace: "LanceNamespace", table_id: list[str]
+    namespace, table_id: list[str]
 ) -> tuple[str, Optional[dict[str, str]]]:
     """Declare a table using declare_table, falling back to create_empty_table.
 
@@ -52,7 +50,6 @@ class _BaseLanceDatasink(Datasink):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         *args: Any,
         schema: Optional[pa.Schema] = None,
@@ -71,6 +68,9 @@ class _BaseLanceDatasink(Datasink):
         # Store namespace_impl and namespace_properties for worker reconstruction
         self._namespace_impl = namespace_impl
         self._namespace_properties = namespace_properties
+
+        # Construct namespace from impl and properties (cached per worker)
+        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
 
         if namespace is not None and table_id is not None:
             self.table_id = table_id
@@ -247,7 +247,6 @@ class LanceDatasink(_BaseLanceDatasink):
     def __init__(
         self,
         uri: Optional[str] = None,
-        namespace: Optional["LanceNamespace"] = None,
         table_id: Optional[list[str]] = None,
         *args: Any,
         schema: Optional[pa.Schema] = None,
@@ -262,7 +261,6 @@ class LanceDatasink(_BaseLanceDatasink):
     ):
         super().__init__(
             uri,
-            namespace,
             table_id,
             *args,
             schema=schema,
