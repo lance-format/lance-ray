@@ -1033,7 +1033,7 @@ def test_build_distributed_vector_index(tmp_path, index_type):
     # Build distributed vector index using the high-level Ray entrypoint.
     try:
         updated_dataset = lr.create_index(
-            dataset=dataset_uri,
+            uri=dataset_uri,
             column="vector",
             index_type=index_type,
             name=f"idx_{index_type}",

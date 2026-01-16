@@ -708,7 +708,7 @@ def _handle_vector_fragment_index(
 
 
 def create_index(
-    dataset: Union[str, "lance.LanceDataset"],
+    uri: Union[str, "lance.LanceDataset"],
     column: str,
     index_type: str | Any,
     name: Optional[str] = None,
@@ -734,7 +734,7 @@ def create_index(
     vector index families supported by Lance's distributed merge pipeline.
 
     Args:
-        dataset: Lance dataset or URI to build index on
+        uri: Lance dataset or URI to build index on
         column: Column name to index
         index_type: Type of index to build (e.g., "IVF_PQ", "IVF_HNSW_PQ")
         name: Name of the index (generated if None)
@@ -767,12 +767,12 @@ def create_index(
     index_id = str(uuid.uuid4())
     logger.info("Starting distributed vector index build with ID: %s", index_id)
 
-    if isinstance(dataset, str):
-        dataset_uri = dataset
+    if isinstance(uri, str):
+        dataset_uri = uri
         dataset_obj = LanceDataset(dataset_uri, storage_options=storage_options)
     else:
-        dataset_obj = dataset
-        dataset_uri = dataset.uri
+        dataset_obj = uri
+        dataset_uri = dataset_obj.uri
         if storage_options is None:
             storage_options = getattr(dataset_obj, "_storage_options", None)
 
