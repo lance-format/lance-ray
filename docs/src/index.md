@@ -23,6 +23,12 @@ enabling scalable data processing workflows with optimal performance.
 pip install lance-ray
 ```
 
+To install a prerelease version:
+
+```shell
+pip install lance-ray==0.2.0b1 --extra-index-url https://pypi.fury.io/lance-format/
+```
+
 ### Simple Example
 
 ```python
