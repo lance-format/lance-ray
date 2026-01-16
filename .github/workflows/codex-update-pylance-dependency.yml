@@ -83,23 +83,22 @@ jobs:
 
           Follow these steps exactly:
           1. Update the pylance dependency version in pyproject.toml. The dependency line looks like "pylance>=X.Y.Z" - update it to "pylance>=${VERSION}".
-          2. Run "uv lock" to update the lock file with the new dependency version.
-          3. Run "uv run ruff check" to check for any linting issues. If there are issues, fix them and rerun until it passes.
-          4. Run "uv run ruff format --check ." to verify formatting. If formatting fails, run "uv run ruff format ." to fix it.
-          5. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
-          6. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
-          7. Stage all relevant files with "git add -A". Commit using the message "chore: update pylance dependency to v${VERSION}".
-          8. Push the branch to origin. If the branch already exists, force-push your changes.
-          9. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
-          10. Create a pull request targeting "main" with title "chore: update pylance dependency to v${VERSION}". In the body, summarize the dependency bump, linting verification, and link the triggering tag (${TAG}).
-          11. After creating the PR, display the PR URL, "git status --short", and a concise summary of the commands run and their results.
+          2. Run "make lock" to update the lock file with the new dependency version.
+          3. Run "make lint" to check for any linting issues. If there are issues, run "make fix" to fix them and rerun "make lint" until it passes.
+          4. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
+          5. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
+          6. Stage all relevant files with "git add -A". Commit using the message "chore: update pylance dependency to v${VERSION}".
+          7. Push the branch to origin. If the branch already exists, force-push your changes.
+          8. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
+          9. Create a pull request targeting "main" with title "chore: update pylance dependency to v${VERSION}". In the body, summarize the dependency bump, linting verification, and link the triggering tag (${TAG}).
+          10. After creating the PR, display the PR URL, "git status --short", and a concise summary of the commands run and their results.
 
           Constraints:
           - Use bash commands; avoid modifying GitHub workflow files other than through the scripted task above.
           - Do not merge the PR.
           - If any command fails, diagnose and fix the issue instead of aborting.
-          - If you see compatibility errors related to pylance, checkout lance-format/lance for source code reference.
-          - If you see compatibility errors related to lance-namespace, checkout lance-format/lance-namespace for source code reference.
+          - For pylance compatibility errors, checkout lance-format/lance for source code reference.
+          - For lance-namespace compatibility errors, checkout lance-format/lance-namespace for source code reference.
           EOF
 
           printenv OPENAI_API_KEY | codex login --with-api-key
