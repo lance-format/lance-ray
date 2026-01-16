@@ -98,6 +98,8 @@ jobs:
           - Use bash commands; avoid modifying GitHub workflow files other than through the scripted task above.
           - Do not merge the PR.
           - If any command fails, diagnose and fix the issue instead of aborting.
+          - If you see compatibility errors related to pylance, checkout lance-format/lance for source code reference.
+          - If you see compatibility errors related to lance-namespace, checkout lance-format/lance-namespace for source code reference.
           EOF
 
           printenv OPENAI_API_KEY | codex login --with-api-key
