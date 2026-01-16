@@ -16,6 +16,7 @@ on:
   release:
     types:
       - released
+      - prereleased
   pull_request:
     paths:
       - .github/workflows/python-release.yml
@@ -67,10 +68,36 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Package version: $VERSION"
 
+      - name: Determine release type
+        id: release_type
+        run: |
+          # Check if this is a beta/rc release based on the tag
+          TAG="${{ github.event.release.tag_name }}"
+          if [[ "$TAG" == *-beta.* ]] || [[ "$TAG" == *-rc.* ]]; then
+            echo "repo=fury" >> $GITHUB_OUTPUT
+            echo "Release type: beta/rc -> fury.io"
+          else
+            echo "repo=pypi" >> $GITHUB_OUTPUT
+            echo "Release type: stable -> PyPI"
+          fi
+
       - name: Publish to PyPI
         if: |
-          (github.event_name == 'release' && github.event.action == 'released') ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'release')
+          steps.release_type.outputs.repo == 'pypi' &&
+          ((github.event_name == 'release' && github.event.action == 'released') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'release'))
         run: |
           uv publish --trusted-publishing always
           echo "✅ Successfully published version ${{ steps.get_version.outputs.version }} to PyPI!"
+
+      - name: Publish to Fury (beta/rc)
+        if: |
+          steps.release_type.outputs.repo == 'fury' &&
+          github.event_name == 'release' && github.event.action == 'prereleased'
+        env:
+          FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
+        run: |
+          WHEEL=$(ls dist/lance_ray-*.whl 2> /dev/null | head -n 1)
+          echo "Uploading $WHEEL to Fury"
+          curl -f -F package=@$WHEEL https://$FURY_TOKEN@push.fury.io/lance-format/
+          echo "✅ Successfully published version ${{ steps.get_version.outputs.version }} to fury.io!"
