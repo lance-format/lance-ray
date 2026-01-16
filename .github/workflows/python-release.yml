@@ -15,21 +15,28 @@ name: Python Release
 on:
   release:
     types:
-      - released
-      - prereleased
+      - published
   pull_request:
     paths:
       - .github/workflows/python-release.yml
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry_run: build & test only, release: build & publish to PyPI"
+        description: "dry_run: build & test only, release: build & publish"
         required: true
         default: "dry_run"
         type: choice
         options:
           - dry_run
           - release
+      repo:
+        description: "Target repository for publishing"
+        required: true
+        default: "fury"
+        type: choice
+        options:
+          - fury
+          - pypi
       ref:
         description: 'The branch, tag or SHA to checkout'
         required: false
@@ -71,21 +78,27 @@ jobs:
       - name: Determine release type
         id: release_type
         run: |
-          # Check if this is a beta/rc release based on the tag
-          TAG="${{ github.event.release.tag_name }}"
-          if [[ "$TAG" == *-beta.* ]] || [[ "$TAG" == *-rc.* ]]; then
-            echo "repo=fury" >> $GITHUB_OUTPUT
-            echo "Release type: beta/rc -> fury.io"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Use the input for manual workflow dispatch
+            echo "repo=${{ inputs.repo }}" >> $GITHUB_OUTPUT
+            echo "Release type (manual): ${{ inputs.repo }}"
           else
-            echo "repo=pypi" >> $GITHUB_OUTPUT
-            echo "Release type: stable -> PyPI"
+            # For release events, check the tag
+            TAG="${{ github.event.release.tag_name }}"
+            if [[ "$TAG" == *-beta.* ]] || [[ "$TAG" == *-rc.* ]]; then
+              echo "repo=fury" >> $GITHUB_OUTPUT
+              echo "Release type: beta/rc -> fury.io"
+            else
+              echo "repo=pypi" >> $GITHUB_OUTPUT
+              echo "Release type: stable -> PyPI"
+            fi
           fi
 
       - name: Publish to PyPI
         if: |
           steps.release_type.outputs.repo == 'pypi' &&
-          ((github.event_name == 'release' && github.event.action == 'released') ||
-          (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'release'))
+          (github.event_name == 'release' ||
+          (github.event_name == 'workflow_dispatch' && inputs.mode == 'release'))
         run: |
           uv publish --trusted-publishing always
           echo "✅ Successfully published version ${{ steps.get_version.outputs.version }} to PyPI!"
@@ -93,7 +106,8 @@ jobs:
       - name: Publish to Fury (beta/rc)
         if: |
           steps.release_type.outputs.repo == 'fury' &&
-          github.event_name == 'release' && github.event.action == 'prereleased'
+          (github.event_name == 'release' ||
+          (github.event_name == 'workflow_dispatch' && inputs.mode == 'release'))
         env:
           FURY_TOKEN: ${{ secrets.FURY_TOKEN }}
         run: |
