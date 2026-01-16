@@ -35,7 +35,7 @@ jobs:
       - name: Check for new Pylance tag
         id: check
         env:
-          GH_TOKEN: ${{ secrets.ROBOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
         run: |
           python3 ci/check_pylance_release.py --github-output "$GITHUB_OUTPUT"
 
@@ -43,7 +43,7 @@ jobs:
         if: steps.check.outputs.needs_update == 'true'
         id: pr
         env:
-          GH_TOKEN: ${{ secrets.ROBOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           TITLE="chore: update pylance dependency to v${{ steps.check.outputs.latest_version }}"
@@ -59,7 +59,7 @@ jobs:
       - name: Trigger codex update workflow
         if: steps.check.outputs.needs_update == 'true' && steps.pr.outputs.pr_exists != 'true'
         env:
-          GH_TOKEN: ${{ secrets.ROBOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           TAG=${{ steps.check.outputs.latest_tag }}
@@ -68,7 +68,7 @@ jobs:
       - name: Show latest codex workflow run
         if: steps.check.outputs.needs_update == 'true' && steps.pr.outputs.pr_exists != 'true'
         env:
-          GH_TOKEN: ${{ secrets.ROBOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           gh run list --workflow codex-update-pylance-dependency.yml --limit 1 --json databaseId,url,displayTitle

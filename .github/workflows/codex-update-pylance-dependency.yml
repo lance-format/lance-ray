@@ -69,8 +69,8 @@ jobs:
       - name: Run Codex to update Pylance dependency
         env:
           TAG: ${{ inputs.tag }}
-          GITHUB_TOKEN: ${{ secrets.ROBOT_TOKEN }}
-          GH_TOKEN: ${{ secrets.ROBOT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
           OPENAI_API_KEY: ${{ secrets.CODEX_TOKEN }}
         run: |
           set -euo pipefail
