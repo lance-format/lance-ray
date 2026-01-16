@@ -46,6 +46,9 @@ jobs:
       with:
         python-version: '3.11'
     
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+
     - name: Install dependencies
       run: |
         pip install packaging toml bump-my-version
@@ -106,7 +109,12 @@ jobs:
       if: steps.versions.outputs.version_changed == 'true'
       run: |
         python ci/bump_version.py --version "${{ steps.versions.outputs.pkg_version }}"
-    
+
+    - name: Update uv.lock (when version changes)
+      if: steps.versions.outputs.version_changed == 'true'
+      run: |
+        make lock
+
     - name: Configure git identity
       run: |
         git config user.name 'github-actions[bot]'
