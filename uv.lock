@@ -355,7 +355,7 @@ wheels = [
 
 [[package]]
 name = "lance-ray"
-version = "0.1.0"
+version = "0.2.0b3"
 source = { editable = "." }
 dependencies = [
     { name = "lance-namespace" },
