@@ -63,8 +63,8 @@ jobs:
 
       - name: Configure git user
         run: |
-          git config user.name "lancedb automation"
-          git config user.email "robot@lancedb.com"
+          git config user.name "lance-community"
+          git config user.email "community@lance.org"
 
       - name: Run Codex to update Pylance dependency
         env:
@@ -93,8 +93,7 @@ jobs:
           7. Push the branch to origin. If the branch already exists, force-push your changes.
           8. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
           9. Create a pull request targeting "main" with title "chore: update pylance dependency to v${PEP440_VERSION}". First, write the PR body to /tmp/pr-body.md using a heredoc (cat <<'EOF' > /tmp/pr-body.md). The body should summarize the dependency bump, linting verification, and link the triggering tag (${TAG}). Then run "gh pr create --body-file /tmp/pr-body.md".
-          10. After creating the PR, trigger the CI workflow manually using "gh workflow run pr.yaml --ref ${BRANCH_NAME}".
-          11. Display the PR URL, "git status --short", and a concise summary of the commands run and their results.
+          10. Display the PR URL, "git status --short", and a concise summary of the commands run and their results.
 
           Constraints:
           - Use bash commands; avoid modifying GitHub workflow files other than through the scripted task above.
