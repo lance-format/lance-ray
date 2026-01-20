@@ -26,7 +26,28 @@ SEMVER_RE = re.compile(
     r"(?:\+[0-9A-Za-z.-]+)?\s*$"
 )
 
+PYPI_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<pre>a|b|rc)(?P<num>\d+)$")
+
 PYLANCE_DEP_RE = re.compile(r"^pylance[><=!~]+(.+)$")
+
+
+def pypi_to_semver(version: str) -> str:
+    """Convert PyPI version format to semver format.
+
+    Examples:
+        2.0.0b8  -> 2.0.0-beta.8
+        2.0.0a1  -> 2.0.0-alpha.1
+        2.0.0rc1 -> 2.0.0-rc.1
+        2.0.0    -> 2.0.0
+    """
+    match = PYPI_PRERELEASE_RE.match(version.strip())
+    if not match:
+        return version
+    base = match.group("base")
+    pre = match.group("pre")
+    num = match.group("num")
+    pre_map = {"a": "alpha", "b": "beta", "rc": "rc"}
+    return f"{base}-{pre_map[pre]}.{num}"
 
 
 @dataclass(frozen=True)
@@ -191,7 +212,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = Path(args.repo_root)
-    current_version = read_current_version(repo_root)
+    current_pypi_version = read_current_version(repo_root)
+    current_version = pypi_to_semver(current_pypi_version)
     current_semver = parse_semver(current_version)
 
     tags = fetch_remote_tags()
