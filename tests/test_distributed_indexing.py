@@ -1023,7 +1023,7 @@ def generate_multi_fragment_vector_dataset(
     return str(path)
 
 
-@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ","IVF_PQ"])
+@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ", "IVF_PQ"])
 def test_build_distributed_vector_index(tmp_path, index_type):
     """Build a distributed vector index and verify nearest search works."""
     dataset_uri = generate_multi_fragment_vector_dataset(
