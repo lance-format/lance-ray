@@ -76,22 +76,25 @@ jobs:
           set -euo pipefail
           VERSION="${TAG#refs/tags/}"
           VERSION="${VERSION#v}"
+          # Convert semver beta format (2.0.0-beta.10) to PEP 440 format (2.0.0b10)
+          PEP440_VERSION=$(echo "$VERSION" | sed -E 's/-beta\./b/g; s/-alpha\./a/g; s/-rc\./rc/g')
           BRANCH_NAME="codex/update-pylance-${VERSION//[^a-zA-Z0-9]/-}"
 
           cat <<EOF >/tmp/codex-prompt.txt
-          You are running inside the lance-ray repository on a GitHub Actions runner. Update the Pylance dependency to version ${VERSION} and prepare a pull request for maintainers to review.
+          You are running inside the lance-ray repository on a GitHub Actions runner. Update the Pylance dependency to version ${PEP440_VERSION} (PEP 440 format) and prepare a pull request for maintainers to review.
 
           Follow these steps exactly:
-          1. Update the pylance dependency version in pyproject.toml. The dependency line looks like "pylance>=X.Y.Z" - update it to "pylance>=${VERSION}".
+          1. Update the pylance dependency version in pyproject.toml. The dependency line looks like "pylance>=X.Y.Z" - update it to "pylance>=${PEP440_VERSION}".
           2. Run "make lock" to update the lock file with the new dependency version.
           3. Run "make lint" to check for any linting issues. If there are issues, run "make fix" to fix them and rerun "make lint" until it passes.
           4. Inspect "git status --short" and "git diff" to confirm the dependency update and any required fixes.
           5. Create and switch to a new branch named "${BRANCH_NAME}" (replace any duplicated hyphens if necessary).
-          6. Stage all relevant files with "git add -A". Commit using the message "chore: update pylance dependency to v${VERSION}".
+          6. Stage all relevant files with "git add -A". Commit using the message "chore: update pylance dependency to v${PEP440_VERSION}".
           7. Push the branch to origin. If the branch already exists, force-push your changes.
           8. env "GH_TOKEN" is available, use "gh" tools for github related operations like creating pull request.
-          9. Create a pull request targeting "main" with title "chore: update pylance dependency to v${VERSION}". In the body, summarize the dependency bump, linting verification, and link the triggering tag (${TAG}).
-          10. After creating the PR, display the PR URL, "git status --short", and a concise summary of the commands run and their results.
+          9. Create a pull request targeting "main" with title "chore: update pylance dependency to v${PEP440_VERSION}". First, write the PR body to /tmp/pr-body.md using a heredoc (cat <<'EOF' > /tmp/pr-body.md). The body should summarize the dependency bump, linting verification, and link the triggering tag (${TAG}). Then run "gh pr create --body-file /tmp/pr-body.md".
+          10. After creating the PR, trigger the CI workflow manually using "gh workflow run pr.yaml --ref ${BRANCH_NAME}".
+          11. Display the PR URL, "git status --short", and a concise summary of the commands run and their results.
 
           Constraints:
           - Use bash commands; avoid modifying GitHub workflow files other than through the scripted task above.
