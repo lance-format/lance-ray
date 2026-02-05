@@ -5,7 +5,7 @@ This package provides integration between Ray and Lance for distributed
 columnar data processing.
 """
 
-__version__ = "0.2.0-beta.3"
+__version__ = "0.2.0"
 __author__ = "LanceDB Devs"
 __email__ = "dev@lancedb.com"
 from .compaction import compact_files
