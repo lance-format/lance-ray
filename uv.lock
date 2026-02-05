@@ -387,7 +387,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
     { name = "pyarrow", specifier = ">=17.0.0" },
-    { name = "pylance", specifier = ">=2.0.0b10" },
+    { name = "pylance", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
@@ -1025,8 +1025,8 @@ wheels = [
 
 [[package]]
 name = "pylance"
-version = "2.0.0b10"
-source = { registry = "https://pypi.fury.io/lance-format" }
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "lance-namespace" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1034,12 +1034,12 @@ dependencies = [
     { name = "pyarrow" },
 ]
 wheels = [
-    { url = "https://pypi.fury.io/lance-format/-/ver_9UwtW/pylance-2.0.0b10-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:39e28b440c8a48c6042c89ca750b8f7109129131935116288bca8c83a467551d" },
-    { url = "https://pypi.fury.io/lance-format/-/ver_2dIMLX/pylance-2.0.0b10-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:f89da60e8be4070ce71cc24b438153044e91b13fb63d0903a7ea62531bdfe1f4" },
-    { url = "https://pypi.fury.io/lance-format/-/ver_1sMiqd/pylance-2.0.0b10-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:2d525378fe5293aefcbf2e6a5efaa408fa5ee413e99c7a32393ec3045ecb94d2" },
-    { url = "https://pypi.fury.io/lance-format/-/ver_1Gjz7s/pylance-2.0.0b10-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ce6a385783dd10d48b8f11ee85e91ed4967aa7d82e1d6784ea71cc71e4605716" },
-    { url = "https://pypi.fury.io/lance-format/-/ver_20bLNa/pylance-2.0.0b10-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:946d36adc2e6ee189ad5bb1d9061d2943b7ad0b381196b8431bb743c41cd5312" },
-    { url = "https://pypi.fury.io/lance-format/-/ver_2eqBKc/pylance-2.0.0b10-cp39-abi3-win_amd64.whl", hash = "sha256:e9fd39080bdf7fa23999f9f863f885b3fbefef3ca703968f6c1b7a3806d627da" },
+    { url = "https://files.pythonhosted.org/packages/89/1e/7cba63f641e25243521a73c85d9f198c970546904bd32d86a74d8a5503b4/pylance-2.0.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:ecfc291cace1aae2faeac9b329ee9b42674e6cad505fafcfe223b7fcbbc15a34", size = 51673048, upload-time = "2026-02-05T19:53:58.676Z" },
+    { url = "https://files.pythonhosted.org/packages/3d/b7/0674bea6e33a3edf466afa6d28271c495996a6f287f4426dd20d3cc08fcc/pylance-2.0.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c0397d7b9e7da2bbcc15c13edc52698a988f10e30ddb7577bebe82ec5deb82eb", size = 54124374, upload-time = "2026-02-05T20:01:43.278Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/16/43ddd4dab5ae785eb6b6fea10c747ef757edebd702d8cdd2f7c451c82810/pylance-2.0.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:25be16d2797d7b684365f44e2ccdc85da210a1763cf7abb9382fbb1b132a605f", size = 57604350, upload-time = "2026-02-05T20:10:03.402Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/91/94bd6e88cc59e9a3642479a448c636307cbe3919cfbb03a2894fe40004d7/pylance-2.0.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:63fcedecb88ff0ab18d538b32ed5d285a814f2bab0776a75ef9f3bd42d5b6d7d", size = 54139864, upload-time = "2026-02-05T20:02:07.957Z" },
+    { url = "https://files.pythonhosted.org/packages/b1/ac/4cf5c2529cf7f10d1ed1195745c75e0817a09862297ad705ab539abab830/pylance-2.0.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:a3792af7bb4e77aa80436d7553b8567a3ac63be9199a0ece786a9ef2438f7930", size = 57575193, upload-time = "2026-02-05T20:10:27.163Z" },
+    { url = "https://files.pythonhosted.org/packages/45/a3/05fd03f25c417e55f5f141e08585da8a5e5d0b17c71882b446388f203584/pylance-2.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:f08d9f87c6d6ac2d2dea6898a4364faef57d3c6a802f8faf3b62fe756fb6834b", size = 61682039, upload-time = "2026-02-05T20:30:48.272Z" },
 ]
 
 [[package]]
