@@ -155,26 +155,19 @@ class LanceDatasource(Datasource):
                 )
 
             read_task = ReadTask(
-                lambda fids=fragment_ids,
-                uri=dataset_uri,
-                version=dataset_version,
-                storage_options=dataset_storage_options,
-                manifest=serialized_manifest,
-                ns_impl=namespace_impl,
-                ns_props=namespace_properties,
-                tbl_id=table_id,
-                scanner_options=self._scanner_options,
-                retry_params=self._retry_params: _read_fragments_with_retry(
-                    fids,
-                    uri,
-                    version,
-                    storage_options,
-                    manifest,
-                    ns_impl,
-                    ns_props,
-                    tbl_id,
-                    scanner_options,
-                    retry_params,
+                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, scanner_options=self._scanner_options, retry_params=self._retry_params: (
+                    _read_fragments_with_retry(
+                        fids,
+                        uri,
+                        version,
+                        storage_options,
+                        manifest,
+                        ns_impl,
+                        ns_props,
+                        tbl_id,
+                        scanner_options,
+                        retry_params,
+                    )
                 ),
                 metadata,
             )
