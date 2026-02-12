@@ -894,6 +894,189 @@ class TestDistributedBTreeIndexing:
         )
 
 
+@pytest.mark.skipif(
+    not check_btree_version_compatibility(),
+    reason="Sorted B-tree indexing requires pylance >= 0.37.0. Current version: {}".format(
+        getattr(lance, "__version__", "unknown")
+    ),
+)
+class TestDistributedSortedBTreeIndexing:
+    """Tests for range-based sorted BTree indexing (sorted=True)."""
+
+    def test_sorted_btree_basic(self, temp_dir):
+        """Build a sorted BTree index and verify queries work."""
+        ds = generate_multi_fragment_dataset(
+            temp_dir, num_fragments=3, rows_per_fragment=500
+        )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="id",
+            index_type="BTREE",
+            name="sorted_btree_idx",
+            sorted=True,
+            num_workers=3,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after sorted BTree build"
+
+        our_index = None
+        for idx in indices:
+            if idx["name"] == "sorted_btree_idx":
+                our_index = idx
+                break
+        assert our_index is not None, "Sorted BTree index not found by name"
+        assert our_index["type"] == "BTree"
+
+        eq_tbl = updated_dataset.scanner(filter="id = 100", columns=["id"]).to_table()
+        assert eq_tbl.num_rows == 1
+
+        rg_tbl = updated_dataset.scanner(
+            filter="id >= 200 AND id < 800", columns=["id"]
+        ).to_table()
+        assert rg_tbl.num_rows == 600
+
+    @pytest.fixture
+    def sorted_comp_datasets(self, tmp_path):
+        """Build sorted and fragment-based BTree indices on identical data."""
+        sorted_ds = generate_multi_fragment_dataset(
+            tmp_path / "sorted", num_fragments=3, rows_per_fragment=500
+        )
+        fragment_ds = generate_multi_fragment_dataset(
+            tmp_path / "fragment", num_fragments=3, rows_per_fragment=500
+        )
+
+        sorted_ds = lr.create_scalar_index(
+            uri=sorted_ds.uri,
+            column="id",
+            index_type="BTREE",
+            name="comp_sorted_idx",
+            sorted=True,
+            num_workers=2,
+        )
+        fragment_ds = lr.create_scalar_index(
+            uri=fragment_ds.uri,
+            column="id",
+            index_type="BTREE",
+            name="comp_fragment_idx",
+            num_workers=2,
+        )
+
+        return {"sorted": sorted_ds, "fragment": fragment_ds}
+
+    @pytest.mark.parametrize(
+        "test_name,filter_expr",
+        [
+            ("Equality first", "id = 0"),
+            ("Equality middle", "id = 750"),
+            ("Equality last", "id = 1499"),
+            ("Range within", "id >= 100 AND id < 200"),
+            ("Cross fragment", "id >= 495 AND id < 505"),
+            ("Full range", "id >= 0 AND id < 1500"),
+            ("Non-existent", "id = 9999"),
+            ("Less than", "id < 100"),
+            ("Greater than", "id > 1400"),
+        ],
+    )
+    def test_sorted_btree_vs_fragment_correctness(
+        self, sorted_comp_datasets, test_name, filter_expr
+    ):
+        """Compare sorted and fragment-based BTree query results."""
+        sorted_ds = sorted_comp_datasets["sorted"]
+        fragment_ds = sorted_comp_datasets["fragment"]
+
+        res_sorted = sorted_ds.scanner(filter=filter_expr, columns=["id"]).to_table()
+        res_fragment = fragment_ds.scanner(
+            filter=filter_expr, columns=["id"]
+        ).to_table()
+
+        assert res_sorted.num_rows == res_fragment.num_rows, (
+            f"Test '{test_name}': sorted returned {res_sorted.num_rows} rows, "
+            f"fragment returned {res_fragment.num_rows} rows for: {filter_expr}"
+        )
+
+        if res_sorted.num_rows > 0:
+            ids_sorted = sorted(res_sorted.column("id").to_pylist())
+            ids_fragment = sorted(res_fragment.column("id").to_pylist())
+            assert ids_sorted == ids_fragment
+
+    def test_sorted_btree_string_column(self, temp_dir):
+        """Verify sorted BTree works on string columns."""
+        all_data = []
+        for i in range(400):
+            all_data.append({"id": i, "category": f"cat_{i:04d}"})
+
+        df = pd.DataFrame(all_data)
+        dataset = ray.data.from_pandas(df)
+        path = Path(temp_dir) / "string_sorted.lance"
+        lr.write_lance(dataset, str(path), min_rows_per_file=100, max_rows_per_file=100)
+        ds = lance.dataset(str(path))
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="category",
+            index_type="BTREE",
+            name="str_sorted_idx",
+            sorted=True,
+            num_workers=2,
+        )
+
+        indices = updated_dataset.list_indices()
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "str_sorted_idx"), None
+        )
+        assert our_index is not None
+        assert our_index["type"] == "BTree"
+
+        result = updated_dataset.scanner(
+            filter="category = 'cat_0200'", columns=["id", "category"]
+        ).to_table()
+        assert result.num_rows == 1
+        assert result.column("id")[0].as_py() == 200
+
+    def test_sorted_btree_rejects_non_btree(self, temp_dir):
+        """sorted=True with non-BTREE index type raises ValueError."""
+        ds = generate_multi_fragment_dataset(
+            temp_dir, num_fragments=2, rows_per_fragment=50
+        )
+
+        with pytest.raises(ValueError, match="sorted=True is only supported"):
+            lr.create_scalar_index(
+                uri=ds.uri,
+                column="text",
+                index_type="INVERTED",
+                sorted=True,
+                num_workers=2,
+            )
+
+    def test_sorted_btree_single_worker(self, temp_dir):
+        """Edge case: sorted BTree with num_workers=1."""
+        ds = generate_multi_fragment_dataset(
+            temp_dir, num_fragments=2, rows_per_fragment=100
+        )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="id",
+            index_type="BTREE",
+            name="sorted_single_worker_idx",
+            sorted=True,
+            num_workers=1,
+        )
+
+        indices = updated_dataset.list_indices()
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "sorted_single_worker_idx"),
+            None,
+        )
+        assert our_index is not None
+        assert our_index["type"] == "BTree"
+
+        eq_tbl = updated_dataset.scanner(filter="id = 50", columns=["id"]).to_table()
+        assert eq_tbl.num_rows == 1
+
+
 class TestNamespaceIndexing:
     """Test cases for distributed indexing with DirectoryNamespace."""
 
