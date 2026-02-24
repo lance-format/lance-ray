@@ -1,12 +1,12 @@
 .PHONY: lint
 lint: lock
-	uv run ruff check
-	uv run ruff format --check .
+	uv run --extra dev ruff check
+	uv run --extra dev ruff format --check .
 
 .PHONY: fix
 fix: lock
-	uv run ruff check --fix --unsafe-fixes
-	uv run ruff format .
+	uv run --extra dev ruff check --fix --unsafe-fixes
+	uv run --extra dev ruff format .
 
 .PHONY: lock
 lock:
