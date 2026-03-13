@@ -894,6 +894,75 @@ class TestDistributedBTreeIndexing:
         )
 
 
+class TestOptimizeIndices:
+    """Test cases for optimize_indices (incremental index optimization)."""
+
+    def test_optimize_indices_uri_required(self):
+        """optimize_indices raises ValueError when neither uri nor namespace provided."""
+        with pytest.raises(ValueError, match="Must provide either"):
+            lr.optimize_indices()
+
+    def test_optimize_indices_uri_and_namespace_exclusive(self):
+        """optimize_indices raises ValueError when both uri and namespace provided."""
+        with pytest.raises(ValueError, match="Cannot provide both"):
+            lr.optimize_indices(
+                uri="/some/path.lance",
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+                table_id=["t1"],
+            )
+
+    def test_optimize_indices_success_with_uri(self, multi_fragment_lance_dataset):
+        """optimize_indices returns LanceDataset and list_indices is consistent when API is available."""
+        dataset_uri = multi_fragment_lance_dataset
+        lr.create_scalar_index(
+            uri=dataset_uri,
+            column="text",
+            index_type="INVERTED",
+            name="text_idx",
+            num_workers=2,
+        )
+
+        ds = lance.LanceDataset(dataset_uri)
+        has_optimize = (
+            getattr(ds, "optimize_indices", None) is not None
+            or getattr(ds, "optimize", None) is not None
+        )
+        if not has_optimize:
+            pytest.skip(
+                "Lance dataset does not expose optimize_indices or optimize; "
+                "skipping optimize_indices integration test."
+            )
+
+        result = lr.optimize_indices(uri=dataset_uri)
+        assert result is not None
+        assert isinstance(result, lance.LanceDataset)
+        assert result.count_rows() == lance.LanceDataset(dataset_uri).count_rows()
+
+        indices = result.list_indices()
+        assert len(indices) >= 1, "list_indices should include at least the existing index"
+        names = [idx["name"] for idx in indices]
+        assert "text_idx" in names, f"Expected 'text_idx' in list_indices: {names}"
+
+    def test_optimize_indices_runtime_error_when_api_missing(self, temp_dir):
+        """optimize_indices raises RuntimeError when dataset has no optimize API."""
+        path = Path(temp_dir) / "no_optimize.lance"
+        df = pd.DataFrame({"id": [1, 2], "t": ["a", "b"]})
+        lr.write_lance(ray.data.from_pandas(df), str(path))
+        ds = lance.LanceDataset(str(path))
+
+        if getattr(ds, "optimize_indices", None) is not None or getattr(
+            ds, "optimize", None
+        ) is not None:
+            pytest.skip(
+                "This lance version exposes optimize_indices/optimize; "
+                "cannot test RuntimeError path."
+            )
+
+        with pytest.raises(RuntimeError, match="optimize_indices or optimize"):
+            lr.optimize_indices(uri=str(path))
+
+
 class TestNamespaceIndexing:
     """Test cases for distributed indexing with DirectoryNamespace."""
 

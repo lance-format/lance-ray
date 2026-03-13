@@ -940,3 +940,142 @@ def create_index(
     )
 
     return updated_dataset
+
+
+def optimize_indices(
+    uri: Optional[str] = None,
+    *,
+    table_id: Optional[list[str]] = None,
+    indices: Optional[list[str]] = None,
+    num_indices_to_merge: int = 1,
+    retrain: bool = False,
+    storage_options: Optional[dict[str, str]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    **kwargs: Any,
+) -> "lance.LanceDataset":
+    """Optimize indices for newly added data (incremental index update).
+
+    As new data arrives it is not added to existing indexes automatically.
+    This function adds the new data to existing indexes, restoring search
+    performance. It does not retrain the index by default; it only assigns
+    the new data to existing partitions, so the update is quicker than
+    retraining but may have less accuracy if the new data has different
+    patterns.
+
+    Delegates to ``dataset.optimize.optimize_indices()`` from the lance library.
+
+    Args:
+        uri: The URI of the Lance dataset. Either uri OR
+            (namespace_impl + table_id) must be provided.
+        table_id: The table identifier as a list of strings. Must be provided
+            together with namespace_impl.
+        indices: Optional list of index names to optimize. If None, all indices
+            on the dataset are optimized. Passed to lance as ``index_names``.
+            When the dataset has both scalar and vector columns, specifying
+            only the index names you need (e.g. ``["label_btree"]``) can avoid
+            internal errors on list/vector fields in some lance versions.
+            If you still get an error about ``vector.item`` / ``List(Float64)``,
+            this is a known lance bug: use a dataset with only scalar columns
+            for scalar index optimization until lance fixes it.
+        num_indices_to_merge: Number of delta indices to merge (default 1).
+            If set to 0, a new delta index will be created instead of merging.
+        retrain: If True, retrain the whole index from current data; all indices
+            are merged into one and ``num_indices_to_merge`` is ignored.
+            Use when data distribution has changed significantly (default False).
+        storage_options: Storage options for the dataset.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+            Used together with table_id for resolving the dataset location.
+        namespace_properties: Properties for connecting to the namespace.
+        **kwargs: Additional arguments passed through to the underlying
+            ``DatasetOptimizer.optimize_indices`` API.
+
+    Returns:
+        The Lance dataset instance (optimization is applied in-place on storage).
+
+    Raises:
+        ValueError: If input parameters are invalid.
+        RuntimeError: If optimize_indices is not supported by the current
+            lance version or if the operation fails.
+
+    Example:
+        >>> import lance_ray
+        >>> ds = lance_ray.optimize_indices("path/to/dataset")
+        >>> ds = lance_ray.optimize_indices(
+        ...     "path/to/dataset",
+        ...     indices=["vec_idx", "scalar_idx"],
+        ...     num_indices_to_merge=2,
+        ... )
+    """
+    logger.info(
+        "Starting optimize_indices: uri=%s, indices=%s, num_indices_to_merge=%s, retrain=%s",
+        uri if uri else "(from namespace)",
+        indices,
+        num_indices_to_merge,
+        retrain,
+    )
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+    merged_storage_options: dict[str, Any] = {}
+    if storage_options:
+        merged_storage_options.update(storage_options)
+
+    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+    if namespace is not None and table_id is not None:
+        from lance_namespace import DescribeTableRequest
+
+        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        uri = describe_response.location
+        if describe_response.storage_options:
+            merged_storage_options.update(describe_response.storage_options)
+        logger.info(
+            "Resolved dataset URI from namespace (table_id=%s): %s",
+            table_id,
+            uri,
+        )
+
+    storage_options_provider = create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
+
+    dataset = LanceDataset(
+        uri,
+        storage_options=merged_storage_options,
+        storage_options_provider=storage_options_provider,
+    )
+    logger.info(
+        "Loaded dataset: uri=%s, version=%s",
+        uri,
+        getattr(dataset, "version", "unknown"),
+    )
+
+    if not hasattr(dataset, "optimize"):
+        raise RuntimeError(
+            "LanceDataset has no 'optimize' property. Please ensure "
+            "lance is installed with a version that provides DatasetOptimizer."
+        )
+    optimizer = dataset.optimize
+    if not hasattr(optimizer, "optimize_indices"):
+        raise RuntimeError(
+            "optimize_indices is not available on DatasetOptimizer. Please ensure "
+            "lance is installed with a version that provides optimize_indices."
+        )
+
+    call_kw: dict[str, Any] = {
+        "num_indices_to_merge": num_indices_to_merge,
+        "retrain": retrain,
+        **kwargs,
+    }
+    if indices is not None:
+        call_kw["index_names"] = indices
+
+    logger.info(
+        "Calling DatasetOptimizer.optimize_indices with: %s",
+        {k: v for k, v in call_kw.items() if k != "storage_options"},
+    )
+    optimizer.optimize_indices(**call_kw)
+    logger.info(
+        "optimize_indices completed successfully for dataset uri=%s",
+        uri,
+    )
+    return dataset
