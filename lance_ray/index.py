@@ -194,7 +194,10 @@ def _handle_fragment_index(
                 **kwargs,
             )
 
-            field_id = dataset.schema.get_field_index(column)
+            lance_field = dataset.lance_schema.field(column)
+            if lance_field is None:
+                raise KeyError(f"{column} not found in schema")
+            field_id = lance_field.id()
 
             logger.info(
                 "Fragment scalar index created successfully for fragments %s",

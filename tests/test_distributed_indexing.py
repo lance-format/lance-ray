@@ -4,6 +4,7 @@ import random
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import lance
 import lance_ray as lr
 import pyarrow as pa
@@ -128,6 +129,47 @@ def generate_multi_fragment_dataset(tmp_path, num_fragments=4, rows_per_fragment
 
     return lance.dataset(str(path))
 
+
+def generate_mixed_schema_dataset(
+    tmp_path,
+    num_rows: int = 200,
+    vector_dim: int = 8,
+    rows_per_fragment: int = 50,
+):
+    """Generate a Lance dataset with both scalar and vector columns.
+
+    Schema: id (int64), vector (fixed-size list float32), label (int64), score (float64).
+    Used to test creating a scalar index on a dataset that also has a vector column.
+    """
+    ids = pa.array(range(num_rows), type=pa.int64())
+    vectors = np.random.randn(num_rows, vector_dim).astype(np.float32)
+    vector_values = pa.array(vectors.ravel(), type=pa.float32())
+    vector_array = pa.FixedSizeListArray.from_arrays(vector_values, vector_dim)
+    labels = pa.array(
+        np.random.randint(0, 10, size=num_rows),
+        type=pa.int64(),
+    )
+    scores = pa.array(
+        np.random.uniform(0, 100, size=num_rows),
+        type=pa.float64(),
+    )
+    tbl = pa.table(
+        {
+            "id": ids,
+            "vector": vector_array,
+            "label": labels,
+            "score": scores,
+        }
+    )
+    dataset = ray.data.from_arrow(tbl)
+    path = Path(tmp_path) / "mixed_schema.lance"
+    lr.write_lance(
+        dataset,
+        str(path),
+        min_rows_per_file=rows_per_fragment,
+        max_rows_per_file=rows_per_fragment,
+    )
+    return str(path)
 
 class TestDistributedIndexing:
     """Test cases for distributed indexing functionality."""
@@ -402,6 +444,41 @@ class TestDistributedIndexing:
         # Verify the index was created
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building"
+
+    def test_scalar_index_on_mixed_schema_list_indices(self, temp_dir):
+        """Create scalar index on schema with both scalar and vector columns; verify list_indices."""
+        dataset_uri = generate_mixed_schema_dataset(
+            temp_dir,
+            num_rows=200,
+            vector_dim=8,
+            rows_per_fragment=50,
+        )
+        index_name = "label_btree_idx"
+
+        updated_dataset = lr.create_scalar_index(
+            uri=dataset_uri,
+            column="label",
+            index_type="BTREE",
+            name=index_name,
+            num_workers=2,
+        )
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) >= 1, "list_indices should return at least the new scalar index"
+        names = [idx["name"] for idx in indices]
+        assert index_name in names, f"Expected index name {index_name!r} in list_indices: {names}"
+
+        label_index = next(idx for idx in indices if idx["name"] == index_name)
+        assert label_index["type"] == "BTree", (
+            f"Expected BTree type for scalar index, got {label_index['type']!r}"
+        )
+
+        # Schema should still have both scalar and vector columns
+        schema = updated_dataset.schema
+        assert schema.field("id") is not None
+        assert schema.field("vector") is not None
+        assert schema.field("label") is not None
+        assert schema.field("score") is not None
 
     def test_build_distributed_index_replace_false_existing_index(
         self, multi_fragment_lance_dataset
