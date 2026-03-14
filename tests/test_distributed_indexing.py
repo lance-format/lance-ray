@@ -4,15 +4,14 @@ import random
 import tempfile
 from pathlib import Path
 
-import numpy as np
 import lance
 import lance_ray as lr
+import numpy as np
+import pandas as pd
 import pyarrow as pa
 import pytest
 import ray
 from packaging import version
-
-import pandas as pd
 
 
 def check_lance_version_compatibility():
@@ -170,6 +169,7 @@ def generate_mixed_schema_dataset(
         max_rows_per_file=rows_per_fragment,
     )
     return str(path)
+
 
 class TestDistributedIndexing:
     """Test cases for distributed indexing functionality."""
