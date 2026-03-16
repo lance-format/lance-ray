@@ -7,11 +7,12 @@ from pathlib import Path
 import lance
 import lance_ray as lr
 import numpy as np
-import pandas as pd
 import pyarrow as pa
 import pytest
 import ray
 from packaging import version
+
+import pandas as pd
 
 
 def check_lance_version_compatibility():
