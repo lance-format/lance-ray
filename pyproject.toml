@@ -7,7 +7,7 @@ name = "lance-ray"
 version = "0.2.0"
 description = "Ray integration for Lance"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 license = {file = "LICENSE"}
 authors = [{ name = "LanceDB Devs", email = "dev@lancedb.com" }]
 keywords = ["ray", "lance", "distributed", "columnar", "data"]
@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0",
-    "pylance>=2.0.0",
+    "pylance>=4.0.0rc1",
     "lance-namespace",
     "pyarrow>=17.0.0",
     "more_itertools>=2.6.0; python_version<'3.12'",
@@ -72,6 +72,9 @@ addopts = ["--cov=lance_ray", "--cov-report=term-missing"]
 [tool.coverage.run]
 source = ["lance_ray"]
 omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.uv.sources]
+pylance = { git = "https://github.com/lance-format/lance.git", tag = "v4.0.0-rc.1", subdirectory = "python" }
 
 [tool.uv]
 extra-index-url = ["https://pypi.fury.io/lance-format"]
