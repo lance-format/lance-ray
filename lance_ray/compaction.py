@@ -212,3 +212,115 @@ def compact_files(
     logger.info(f"Compaction completed successfully. Metrics: {metrics}")
 
     return metrics
+
+
+def compact_database(
+    *,
+    database: list[str],
+    namespace_impl: str,
+    namespace_properties: Optional[dict[str, str]] = None,
+    compaction_options: Optional[CompactionOptions] = None,
+    num_workers: int = 4,
+    storage_options: Optional[dict[str, str]] = None,
+    ray_remote_args: Optional[dict[str, Any]] = None,
+) -> list[dict[str, Any]]:
+    """
+    Compact all tables under a given database (namespace) using distributed Ray workers.
+
+    This function lists all tables under the specified database via the namespace API,
+    then runs :func:`compact_files` on each table. Use this when you want to compact
+    an entire database instead of a single table.
+
+    Args:
+        database: The database (namespace) identifier as a list of path segments,
+            e.g. ``["my_database"]``. All tables under this namespace will be compacted.
+        namespace_impl: The namespace implementation type (e.g. ``"rest"``, ``"dir"``).
+            Required for resolving table locations and credentials.
+        namespace_properties: Properties for connecting to the namespace.
+        compaction_options: Options for the compaction operation (used for every table).
+        num_workers: Number of Ray workers per table (default: 4).
+        storage_options: Storage options for the datasets.
+        ray_remote_args: Options for Ray tasks (e.g. num_cpus, resources).
+
+    Returns:
+        A list of dicts, one per table, with keys:
+        - ``"table_id"``: ``list[str]`` – full table identifier (database + table name).
+        - ``"metrics"``: :class:`~lance.lance.CompactionMetrics` or ``None`` –
+          compaction result for that table, or ``None`` if no compaction was needed.
+
+    Raises:
+        ValueError: If database is empty or namespace_impl is not provided.
+        RuntimeError: If listing tables fails or any table compaction fails.
+
+    Example:
+        >>> results = compact_database(
+        ...     database=["my_db"],
+        ...     namespace_impl="dir",
+        ...     namespace_properties={"root": "/path/to/tables"},
+        ...     compaction_options=CompactionOptions(target_rows_per_fragment=10000),
+        ...     num_workers=2,
+        ... )
+        >>> for item in results:
+        ...     print(item["table_id"], item["metrics"])
+    """
+    if not database:
+        raise ValueError("'database' must be a non-empty list of path segments.")
+    if not namespace_impl:
+        raise ValueError(
+            "'namespace_impl' is required when using compact_database."
+        )
+
+    from lance_namespace import ListTablesRequest
+
+    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+    if namespace is None:
+        raise RuntimeError(
+            "Failed to create namespace from namespace_impl and namespace_properties."
+        )
+
+    # List all tables under the database (namespace) with pagination
+    all_tables: list[str] = []
+    page_token: Optional[str] = None
+    limit = 500
+
+    while True:
+        request = ListTablesRequest(
+            id=database,
+            page_token=page_token,
+            limit=limit,
+        )
+        response = namespace.list_tables(request)
+        all_tables.extend(response.tables)
+        page_token = getattr(response, "page_token", None)
+        if not page_token:
+            break
+
+    if not all_tables:
+        logger.info("No tables found under database %s, nothing to compact.", database)
+        return []
+
+    # table_id = database + [table_name] for each table under this namespace
+    table_ids = [database + [t] for t in all_tables]
+    results: list[dict[str, Any]] = []
+
+    for table_id in table_ids:
+        logger.info("Compacting table %s", table_id)
+        try:
+            metrics = compact_files(
+                uri=None,
+                table_id=table_id,
+                compaction_options=compaction_options,
+                num_workers=num_workers,
+                storage_options=storage_options,
+                namespace_impl=namespace_impl,
+                namespace_properties=namespace_properties,
+                ray_remote_args=ray_remote_args,
+            )
+            results.append({"table_id": table_id, "metrics": metrics})
+        except Exception as e:
+            logger.exception("Compaction failed for table %s: %s", table_id, e)
+            raise RuntimeError(
+                f"Compaction failed for table {table_id}: {e}"
+            ) from e
+
+    return results

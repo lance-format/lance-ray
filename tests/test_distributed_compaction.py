@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import lance
 import lance_ray as lr
@@ -496,3 +497,133 @@ class TestDistributedCompaction:
             "Should have 1 fragment after compaction"
         )
         assert dataset.count_rows() == 20, "Should still have 20 total rows"
+
+
+class TestCompactDatabase:
+    """Test cases for compact_database functionality."""
+
+    def test_compact_database_empty_database_raises(self):
+        """compact_database raises ValueError when database is empty."""
+        with pytest.raises(ValueError, match="database.*non-empty"):
+            lr.compact_database(
+                database=[],
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+            )
+
+    def test_compact_database_missing_namespace_impl_raises(self):
+        """compact_database raises ValueError when namespace_impl is empty."""
+        with pytest.raises(ValueError, match="namespace_impl.*required"):
+            lr.compact_database(
+                database=["my_db"],
+                namespace_impl="",
+                namespace_properties={"root": "/tmp"},
+            )
+
+    def test_compact_database_empty_tables_returns_empty_list(self):
+        """When database has no tables, compact_database returns empty list."""
+        mock_response = MagicMock()
+        mock_response.tables = []
+        mock_response.page_token = None
+
+        mock_namespace = MagicMock()
+        mock_namespace.list_tables.return_value = mock_response
+
+        with patch(
+            "lance_ray.compaction.get_or_create_namespace",
+            return_value=mock_namespace,
+        ):
+            results = lr.compact_database(
+                database=["my_db"],
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+            )
+
+        assert results == []
+        mock_namespace.list_tables.assert_called_once()
+        # list_tables(request) may be called with request as positional or keyword arg
+        args, kwargs = mock_namespace.list_tables.call_args
+        request = args[0] if args else kwargs.get("request")
+        assert request is not None and request.id == ["my_db"]
+
+    def test_compact_database_two_tables_both_compacted(self, temp_dir):
+        """compact_database compacts all tables under the given database."""
+        import lance_namespace as ln
+
+        database = ["compact_db"]
+        table_names = ["table_a", "table_b"]
+        compaction_options = CompactionOptions(
+            target_rows_per_fragment=100,
+            num_threads=1,
+        )
+
+        for table_name in table_names:
+            table_id = database + [table_name]
+            fragment1 = pd.DataFrame(
+                {"id": range(1, 11), "value": [f"row_{i}" for i in range(1, 11)]}
+            )
+            fragment2 = pd.DataFrame(
+                {"id": range(11, 21), "value": [f"row_{i}" for i in range(11, 21)]}
+            )
+            first_ray_ds = ray.data.from_pandas(fragment1)
+            lr.write_lance(
+                first_ray_ds,
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                table_id=table_id,
+                min_rows_per_file=10,
+                max_rows_per_file=10,
+            )
+            second_ray_ds = ray.data.from_pandas(fragment2)
+            lr.write_lance(
+                second_ray_ds,
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                table_id=table_id,
+                mode="append",
+                min_rows_per_file=10,
+                max_rows_per_file=10,
+            )
+
+        from lance_namespace import DescribeTableRequest
+
+        namespace = ln.connect("dir", {"root": temp_dir})
+        for table_name in table_names:
+            table_id = database + [table_name]
+            describe_response = namespace.describe_table(
+                DescribeTableRequest(id=table_id)
+            )
+            dataset = lance.dataset(describe_response.location)
+            assert len(dataset.get_fragments()) == 2, (
+                f"Table {table_id} should start with 2 fragments"
+            )
+
+        results = lr.compact_database(
+            database=database,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            compaction_options=compaction_options,
+            num_workers=2,
+        )
+
+        assert len(results) == 2, "Should have compacted 2 tables"
+        result_table_ids = [tuple(item["table_id"]) for item in results]
+        assert set(result_table_ids) == {
+            ("compact_db", "table_a"),
+            ("compact_db", "table_b"),
+        }, "Should have one result per table"
+        for item in results:
+            assert item["metrics"] is not None
+            assert item["metrics"].fragments_removed == 2
+            assert item["metrics"].fragments_added == 1
+
+        for table_name in table_names:
+            table_id = database + [table_name]
+            describe_response = namespace.describe_table(
+                DescribeTableRequest(id=table_id)
+            )
+            dataset = lance.dataset(describe_response.location)
+            assert len(dataset.get_fragments()) == 1, (
+                f"Table {table_id} should have 1 fragment after compaction"
+            )
+            assert dataset.count_rows() == 20

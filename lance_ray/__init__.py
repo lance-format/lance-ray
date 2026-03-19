@@ -8,7 +8,7 @@ columnar data processing.
 __version__ = "0.2.0"
 __author__ = "LanceDB Devs"
 __email__ = "dev@lancedb.com"
-from .compaction import compact_files
+from .compaction import compact_database, compact_files
 
 # Main imports
 from .datasink import LanceFragmentCommitter
@@ -26,6 +26,7 @@ __all__ = [
     "create_index",
     "optimize_indices",
     "compact_files",
+    "compact_database",
     "LanceFragmentWriter",
     "LanceFragmentCommitter",
 ]
