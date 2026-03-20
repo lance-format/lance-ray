@@ -124,7 +124,6 @@ def _map_async_with_pool(
     try:
         results = rst_futures.get()
     except Exception as exc:  # pragma: no cover - exercised via integration tests
-        pool.close()
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
     finally:
         pool.close()
