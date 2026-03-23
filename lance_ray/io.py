@@ -490,7 +490,13 @@ def add_columns(
         fragment_ids,
         chunksize=1,
     )
-    result = rst_futures.get()
+    try:
+        result = rst_futures.get()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to add columns: {exc}") from exc
+    finally:
+        pool.close()
+
     commit_messages = []
     new_schema = None
     for fragment_meta, schema in result:
@@ -513,7 +519,6 @@ def add_columns(
         storage_options=storage_options,
         storage_options_provider=storage_options_provider,
     )
-    pool.close()
 
 
 def _validate_write_args(
