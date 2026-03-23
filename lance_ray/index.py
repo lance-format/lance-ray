@@ -472,6 +472,12 @@ def create_scalar_index(
         **kwargs,
     )
 
+    logger.info(
+        "Phase 1: Distributing scalar index build across %d workers for %d fragments",
+        len(fragment_batches),
+        len(fragment_ids_to_use),
+    )
+
     results = _map_async_with_pool(
         fragment_handler=fragment_handler,
         fragment_batches=fragment_batches,
@@ -820,6 +826,11 @@ def create_index(
     # Always perform global IVF training up front so that all shards share the
     # same centroids and number of partitions. The Ray entrypoint owns the
     # lifecycle of these artifacts and distributes them to workers.
+    logger.info(
+        "Phase 1: Training IVF centroids (index_type=%s, metric=%s)",
+        index_type_name,
+        metric_lower,
+    )
     builder = IndicesBuilder(dataset_obj, column)
     num_rows = dataset_obj.count_rows()
     dimension = builder.dimension
@@ -827,16 +838,31 @@ def create_index(
     computed_num_partitions = builder._determine_num_partitions(
         num_partitions, num_rows
     )
+    logger.info(
+        "Training IVF with num_partitions=%d, num_rows=%d, dimension=%d",
+        computed_num_partitions,
+        num_rows,
+        dimension,
+    )
     ivf_model = builder.train_ivf(
         num_partitions=computed_num_partitions,
         distance_type=metric_lower,
     )
     ivf_centroids_artifact = ivf_model.centroids
     num_partitions = ivf_model.num_partitions
+    logger.info(
+        "IVF training completed: num_partitions=%d",
+        num_partitions,
+    )
 
     if needs_pq:
         computed_num_sub_vectors = builder._normalize_pq_params(
             num_sub_vectors, dimension
+        )
+        logger.info(
+            "Training PQ codebook: num_sub_vectors=%d, sample_rate=%d",
+            computed_num_sub_vectors,
+            kwargs.get("sample_rate", 256),
         )
         pq_model = builder.train_pq(
             ivf_model,
@@ -845,6 +871,7 @@ def create_index(
         )
         pq_codebook_artifact = pq_model.codebook
         num_sub_vectors = computed_num_sub_vectors
+        logger.info("PQ training completed: num_sub_vectors=%d", num_sub_vectors)
 
     if ivf_centroids_artifact is None:
         raise ValueError(
@@ -860,6 +887,12 @@ def create_index(
 
     fragment_batches = _distribute_fragments_balanced(
         fragments, num_workers=num_workers, logger=logger
+    )
+
+    logger.info(
+        "Phase 2: Distributing vector index build across %d workers for %d fragments",
+        len(fragment_batches),
+        len(fragment_ids_to_use),
     )
 
     fragment_handler = _handle_vector_fragment_index(
