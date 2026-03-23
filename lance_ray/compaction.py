@@ -184,7 +184,6 @@ def compact_files(
     try:
         results = rst_futures.get()
     except Exception as e:
-        pool.close()
         raise RuntimeError(f"Failed to complete distributed compaction: {e}") from e
     finally:
         pool.close()
