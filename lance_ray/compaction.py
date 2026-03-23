@@ -266,9 +266,7 @@ def compact_database(
     if not database:
         raise ValueError("'database' must be a non-empty list of path segments.")
     if not namespace_impl:
-        raise ValueError(
-            "'namespace_impl' is required when using compact_database."
-        )
+        raise ValueError("'namespace_impl' is required when using compact_database.")
 
     from lance_namespace import ListTablesRequest
 
@@ -319,8 +317,6 @@ def compact_database(
             results.append({"table_id": table_id, "metrics": metrics})
         except Exception as e:
             logger.exception("Compaction failed for table %s: %s", table_id, e)
-            raise RuntimeError(
-                f"Compaction failed for table {table_id}: {e}"
-            ) from e
+            raise RuntimeError(f"Compaction failed for table {table_id}: {e}") from e
 
     return results
