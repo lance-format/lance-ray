@@ -424,16 +424,18 @@ def create_scalar_index(
         name = f"{column}_idx"
 
     if not replace:
+        index_exists = False
         try:
             existing_indices = dataset.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
-            if name in existing_names:
-                raise ValueError(
-                    f"Index with name '{name}' already exists. Set replace=True "
-                    "to replace it."
-                )
-        except Exception:  # pragma: no cover - best effort safeguard
+            index_exists = name in existing_names
+        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
             pass
+        if index_exists:
+            raise ValueError(
+                f"Index with name '{name}' already exists. Set replace=True "
+                "to replace it."
+            )
 
     fragments = dataset.get_fragments()
     if not fragments:
@@ -796,16 +798,18 @@ def create_index(
         name = f"{column}_idx"
 
     if not replace:
+        index_exists = False
         try:
             existing_indices = dataset_obj.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
-            if name in existing_names:
-                raise ValueError(
-                    f"Index with name '{name}' already exists. Set replace=True "
-                    "to replace it."
-                )
-        except Exception:  # pragma: no cover - best effort safeguard
+            index_exists = name in existing_names
+        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
             pass
+        if index_exists:
+            raise ValueError(
+                f"Index with name '{name}' already exists. Set replace=True "
+                "to replace it."
+            )
 
     fragments = dataset_obj.get_fragments()
     if not fragments:
