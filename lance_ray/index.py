@@ -795,7 +795,7 @@ def create_index(
     if storage_options:
         merged_storage_options.update(storage_options)
 
-    if isinstance(uri, (str, type(None))):
+    if isinstance(uri, str | type(None)):
         # URI or namespace mode
         validate_uri_or_namespace(uri, namespace_impl, table_id)
 
