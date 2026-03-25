@@ -429,7 +429,9 @@ def create_scalar_index(
             existing_indices = dataset.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
             index_exists = name in existing_names
-        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
+        except (
+            Exception
+        ):  # pragma: no cover - list_indices() not available in older lance versions
             pass
         if index_exists:
             raise ValueError(
@@ -803,7 +805,9 @@ def create_index(
             existing_indices = dataset_obj.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
             index_exists = name in existing_names
-        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
+        except (
+            Exception
+        ):  # pragma: no cover - list_indices() not available in older lance versions
             pass
         if index_exists:
             raise ValueError(
