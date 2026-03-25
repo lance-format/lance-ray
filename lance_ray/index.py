@@ -643,6 +643,9 @@ def _handle_vector_fragment_index(
     ivf_centroids: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
     pq_codebook: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
     storage_options: Optional[dict[str, str]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     **kwargs: Any,
 ):
     """Create a fragment handler closure for vector index builds."""
@@ -656,7 +659,15 @@ def _handle_vector_fragment_index(
                 if fragment_id < 0 or fragment_id > 0xFFFFFFFF:
                     raise ValueError(f"Invalid fragment_id: {fragment_id}")
 
-            dataset = LanceDataset(dataset_uri, storage_options=storage_options)
+            # Create storage options provider in worker for credentials refresh
+            storage_options_provider = create_storage_options_provider(
+                namespace_impl, namespace_properties, table_id
+            )
+            dataset = LanceDataset(
+                dataset_uri,
+                storage_options=storage_options,
+                storage_options_provider=storage_options_provider,
+            )
             available_fragments = {f.fragment_id for f in dataset.get_fragments()}
             invalid_fragments = set(fragment_ids) - available_fragments
             if invalid_fragments:
@@ -718,14 +729,17 @@ def _handle_vector_fragment_index(
 
 
 def create_index(
-    uri: Union[str, "lance.LanceDataset"],
-    column: str,
-    index_type: str | Any,
+    uri: Optional[Union[str, "lance.LanceDataset"]] = None,
+    column: str = "",
+    index_type: str | Any = "",
     name: Optional[str] = None,
     *,
     replace: bool = True,
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     metric: str = "l2",
     num_partitions: Optional[int] = None,
@@ -777,14 +791,42 @@ def create_index(
     index_id = str(uuid.uuid4())
     logger.info("Starting distributed vector index build with ID: %s", index_id)
 
-    if isinstance(uri, str):
+    merged_storage_options: dict[str, Any] = {}
+    if storage_options:
+        merged_storage_options.update(storage_options)
+
+    if isinstance(uri, (str, type(None))):
+        # URI or namespace mode
+        validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+        # Resolve URI and storage options from namespace if provided
+        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+        if namespace is not None and table_id is not None:
+            from lance_namespace import DescribeTableRequest
+
+            describe_response = namespace.describe_table(
+                DescribeTableRequest(id=table_id)
+            )
+            uri = describe_response.location
+            if describe_response.storage_options:
+                merged_storage_options.update(describe_response.storage_options)
+
         dataset_uri = uri
-        dataset_obj = LanceDataset(dataset_uri, storage_options=storage_options)
+        storage_options_provider = create_storage_options_provider(
+            namespace_impl, namespace_properties, table_id
+        )
+        dataset_obj = LanceDataset(
+            dataset_uri,
+            storage_options=merged_storage_options,
+            storage_options_provider=storage_options_provider,
+        )
     else:
+        # LanceDataset object passed directly
         dataset_obj = uri
         dataset_uri = dataset_obj.uri
-        if storage_options is None:
-            storage_options = getattr(dataset_obj, "_storage_options", None)
+        if not merged_storage_options:
+            merged_storage_options = getattr(dataset_obj, "_storage_options", None) or {}
+        storage_options_provider = None
 
     try:
         dataset_obj.schema.field(column)
@@ -911,7 +953,10 @@ def create_index(
         num_sub_vectors=num_sub_vectors,
         ivf_centroids=ivf_centroids_artifact,
         pq_codebook=pq_codebook_artifact,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        table_id=table_id,
         **kwargs,
     )
 
@@ -928,7 +973,11 @@ def create_index(
         error_messages = [r["error"] for r in failed_results if "error" in r]
         raise RuntimeError("Vector index building failed: " + "; ".join(error_messages))
 
-    dataset_obj = LanceDataset(dataset_uri, storage_options=storage_options)
+    dataset_obj = LanceDataset(
+        dataset_uri,
+        storage_options=merged_storage_options,
+        storage_options_provider=storage_options_provider,
+    )
 
     logger.info("Phase 3: Merging index metadata for index ID: %s", index_id)
     merge_index_metadata_compat(
@@ -964,7 +1013,8 @@ def create_index(
         dataset_uri,
         create_index_op,
         read_version=dataset_obj.version,
-        storage_options=storage_options,
+        storage_options=merged_storage_options,
+        storage_options_provider=storage_options_provider,
     )
 
     logger.info(

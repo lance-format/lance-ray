@@ -1139,6 +1139,91 @@ class TestNamespaceIndexing:
         result = updated_dataset.scanner(filter="id = 100", columns=["id"]).to_table()
         assert result.num_rows == 1, "BTREE index query should return 1 row"
 
+    def test_distributed_vector_index_with_directory_namespace(self, temp_dir):
+        """Test distributed vector index building using DirectoryNamespace.
+
+        Verifies that create_index() correctly resolves the dataset URI and
+        passes a storage_options_provider to workers when namespace params
+        are supplied, mirroring the behaviour of create_scalar_index().
+        """
+        table_id = ["vector_index_namespace_test"]
+        dim = 32
+        num_rows = 1024  # needs >= num_partitions * sample_rate (4 * 256)
+
+        # Build a vector dataset and register it under the dir namespace.
+        values = pa.array(
+            [random.gauss(0, 1) for _ in range(num_rows * dim)], type=pa.float32()
+        )
+        vector_array = pa.FixedSizeListArray.from_arrays(values, dim)
+        tbl = pa.Table.from_arrays(
+            [vector_array, pa.array(range(num_rows), type=pa.int64())],
+            names=["vector", "id"],
+        )
+        dataset = ray.data.from_arrow(tbl)
+        lr.write_lance(
+            dataset,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+            min_rows_per_file=64,
+            max_rows_per_file=64,
+        )
+
+        # Build vector index via namespace params — no URI needed.
+        # sample_rate=4: PQ requires 256 * sample_rate <= num_rows (256*4=1024 ✓)
+        try:
+            updated_dataset = lr.create_index(
+                column="vector",
+                index_type="IVF_PQ",
+                name="vec_namespace_idx",
+                num_workers=2,
+                num_partitions=4,
+                num_sub_vectors=4,
+                sample_rate=4,
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                table_id=table_id,
+            )
+        except RuntimeError as exc:
+            if "not yet implemented" in str(exc):
+                pytest.skip(f"Skipping: lance version limitation: {exc}")
+            raise
+
+        indices = updated_dataset.list_indices()
+        assert len(indices) > 0, "No indices found after distributed vector build"
+
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "vec_namespace_idx"), None
+        )
+        assert our_index is not None, "vector index not found in dataset"
+
+        # Sanity-check that the index is usable for ANN search.
+        query = [random.gauss(0, 1) for _ in range(dim)]
+        results = updated_dataset.to_table(
+            nearest={"column": "vector", "q": query, "k": 5}
+        )
+        assert results.num_rows == 5, "ANN search should return 5 results"
+
+    def test_create_index_namespace_uri_mutual_exclusion(self, temp_dir):
+        """create_index raises ValueError when both uri and namespace params are given."""
+        with pytest.raises(ValueError, match="Cannot provide both"):
+            lr.create_index(
+                uri="/some/path.lance",
+                column="vector",
+                index_type="IVF_PQ",
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                table_id=["some_table"],
+            )
+
+    def test_create_index_namespace_requires_uri_or_namespace(self):
+        """create_index raises ValueError when neither uri nor namespace params are given."""
+        with pytest.raises(ValueError, match="Must provide either"):
+            lr.create_index(
+                column="vector",
+                index_type="IVF_PQ",
+            )
+
 
 def generate_multi_fragment_vector_dataset(
     tmp_path, num_fragments: int = 4, rows_per_fragment: int = 64, dim: int = 128
