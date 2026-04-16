@@ -80,9 +80,11 @@ class LanceDatasource(Datasource):
 
             dataset_options = self._dataset_options.copy()
             dataset_options["uri"] = self._uri
-            dataset_options["namespace"] = self._namespace
-            dataset_options["table_id"] = self._table_id
             dataset_options["storage_options"] = self._storage_options
+            ns_kwargs = get_namespace_kwargs(
+                self._namespace_impl, self._namespace_properties, self._table_id
+            )
+            dataset_options.update(ns_kwargs)
             self._lance_ds = lance.dataset(**dataset_options)
         return self._lance_ds
 
