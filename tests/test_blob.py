@@ -344,10 +344,7 @@ def test_stream_copy_basic_local(temp_dir):
     assert src.schema == dst.schema
 
     src_df = (
-        ray.data.from_arrow(table)
-        .to_pandas()
-        .sort_values("id")
-        .reset_index(drop=True)
+        ray.data.from_arrow(table).to_pandas().sort_values("id").reset_index(drop=True)
     )
     dst_df = (
         lr.read_lance(str(dst_path))
@@ -367,7 +364,9 @@ def test_stream_copy_resume_local(temp_dir):
     # Legacy blob schema
     schema = pa.schema(
         [
-            pa.field("blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"}),
+            pa.field(
+                "blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"}
+            ),
             pa.field("id", pa.int64()),
             pa.field("name", pa.string()),
             pa.field("val", pa.float64()),
@@ -402,10 +401,7 @@ def test_stream_copy_resume_local(temp_dir):
     )
 
     src_df = (
-        ray.data.from_arrow(table)
-        .to_pandas()
-        .sort_values("id")
-        .reset_index(drop=True)
+        ray.data.from_arrow(table).to_pandas().sort_values("id").reset_index(drop=True)
     )
     dst_df = (
         lr.read_lance(str(dst_path))
