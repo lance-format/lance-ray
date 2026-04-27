@@ -465,9 +465,13 @@ class TestDistributedIndexing:
         )
 
         indices = updated_dataset.list_indices()
-        assert len(indices) >= 1, "list_indices should return at least the new scalar index"
+        assert len(indices) >= 1, (
+            "list_indices should return at least the new scalar index"
+        )
         names = [idx["name"] for idx in indices]
-        assert index_name in names, f"Expected index name {index_name!r} in list_indices: {names}"
+        assert index_name in names, (
+            f"Expected index name {index_name!r} in list_indices: {names}"
+        )
 
         label_index = next(idx for idx in indices if idx["name"] == index_name)
         assert label_index["type"] == "BTree", (
@@ -1018,7 +1022,9 @@ class TestOptimizeIndices:
         assert result.count_rows() == lance.LanceDataset(dataset_uri).count_rows()
 
         indices = result.list_indices()
-        assert len(indices) >= 1, "list_indices should include at least the existing index"
+        assert len(indices) >= 1, (
+            "list_indices should include at least the existing index"
+        )
         names = [idx["name"] for idx in indices]
         assert "text_idx" in names, f"Expected 'text_idx' in list_indices: {names}"
 
@@ -1029,9 +1035,10 @@ class TestOptimizeIndices:
         lr.write_lance(ray.data.from_pandas(df), str(path))
         ds = lance.LanceDataset(str(path))
 
-        if getattr(ds, "optimize_indices", None) is not None or getattr(
-            ds, "optimize", None
-        ) is not None:
+        if (
+            getattr(ds, "optimize_indices", None) is not None
+            or getattr(ds, "optimize", None) is not None
+        ):
             pytest.skip(
                 "This lance version exposes optimize_indices/optimize; "
                 "cannot test RuntimeError path."
