@@ -129,7 +129,9 @@ def _create_storage_options_provider(
     if not hasattr(lance, "LanceNamespaceStorageOptionsProvider"):
         return None
 
-    return lance.LanceNamespaceStorageOptionsProvider(namespace=namespace, table_id=table_id)
+    return lance.LanceNamespaceStorageOptionsProvider(
+        namespace=namespace, table_id=table_id
+    )
 
 
 def get_namespace_kwargs(
@@ -185,7 +187,9 @@ def get_write_fragments_kwargs(
             return {}
         return {"namespace_client": namespace, "table_id": table_id}
 
-    provider = _create_storage_options_provider(namespace_impl, namespace_properties, table_id)
+    provider = _create_storage_options_provider(
+        namespace_impl, namespace_properties, table_id
+    )
     if provider is None:
         return {}
     return {"storage_options_provider": provider}
