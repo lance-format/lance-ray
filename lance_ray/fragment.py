@@ -107,7 +107,10 @@ def write_fragment(
         except (AttributeError, ValueError):  # pragma: no cover
             write_sig = None
 
-        if write_sig is not None and "allow_external_blob_outside_bases" in write_sig.parameters:
+        if (
+            write_sig is not None
+            and "allow_external_blob_outside_bases" in write_sig.parameters
+        ):
             write_kwargs.setdefault("allow_external_blob_outside_bases", True)
 
         tbl_first = pd_to_arrow(first, schema)
