@@ -353,11 +353,12 @@ wheels = [
 
 [[package]]
 name = "lance-ray"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "lance-namespace" },
     { name = "more-itertools", marker = "python_full_version < '3.12'" },
+    { name = "packaging" },
     { name = "pyarrow" },
     { name = "pylance" },
     { name = "pytest" },
@@ -384,6 +385,7 @@ requires-dist = [
     { name = "mkdocs-awesome-pages-plugin", marker = "extra == 'docs'", specifier = ">=2.9.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
+    { name = "packaging" },
     { name = "pyarrow", specifier = ">=17.0.0" },
     { name = "pylance", specifier = ">=4.0.0" },
     { name = "pytest", specifier = ">=8.4.0" },
