@@ -145,9 +145,7 @@ class _BaseLanceDatasink(Datasink):
         if self.mode == "append":
             base_store_params_kwargs = {}
             if self.base_store_params:
-                base_store_params_kwargs = {
-                    "base_store_params": self.base_store_params
-                }
+                base_store_params_kwargs = {"base_store_params": self.base_store_params}
             ds = lance.LanceDataset(
                 self.uri,
                 storage_options=self.storage_options,
@@ -212,9 +210,7 @@ class _BaseLanceDatasink(Datasink):
         if op:
             base_store_params_kwargs = {}
             if self.base_store_params:
-                base_store_params_kwargs = {
-                    "base_store_params": self.base_store_params
-                }
+                base_store_params_kwargs = {"base_store_params": self.base_store_params}
             lance.LanceDataset.commit(
                 self.uri,
                 op,
