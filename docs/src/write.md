@@ -28,6 +28,8 @@ Write a Ray Dataset to Lance format.
 - `max_rows_per_file`: Maximum rows per file (default: 64 * 1024 * 1024)
 - `data_storage_version`: Optional data storage version
 - `storage_options`: Optional storage configuration dictionary
+- `base_store_params`: Optional runtime storage options keyed by registered base path URI, used for BlobV2 references outside the dataset root
+- `initial_bases`: Optional Lance `DatasetBasePath` objects to register when creating a new dataset
 - `ray_remote_args`: Optional kwargs for Ray remote tasks
 - `concurrency`: Optional maximum number of concurrent Ray tasks
 

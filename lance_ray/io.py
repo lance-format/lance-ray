@@ -17,6 +17,8 @@ from .datasource import LanceDatasource
 from .utils import (
     get_namespace_kwargs,
     has_namespace_params,
+    materialize_initial_bases,
+    normalize_initial_bases,
     validate_uri_or_namespace,
 )
 
@@ -38,6 +40,7 @@ def read_lance(
     columns: Optional[list[str]] = None,
     filter: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     scanner_options: Optional[dict[str, Any]] = None,
     dataset_options: Optional[dict[str, Any]] = None,
     fragment_ids: Optional[list[int]] = None,
@@ -80,6 +83,9 @@ def read_lance(
         storage_options: Extra options that make sense for a particular storage
             connection. This is used to store connection parameters like credentials,
             endpoint, etc. For more information, see `Object Store Configuration <https://lancedb.github.io/lance/guide/object_store/>`_.
+        base_store_params: Runtime-only storage options keyed by registered
+            base path URI. Used for BlobV2 references that live outside the
+            dataset root.
         scanner_options: Additional options to configure the `LanceDataset.scanner()`
             method, such as `batch_size`. For more information,
             see `Lance API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset.scanner>`_
@@ -112,6 +118,7 @@ def read_lance(
         columns=columns,
         filter=filter,
         storage_options=storage_options,
+        base_store_params=base_store_params,
         scanner_options=scanner_options,
         dataset_options=dataset_options,
         fragment_ids=fragment_ids,
@@ -138,6 +145,8 @@ def write_lance(
     max_rows_per_file: int = 64 * 1024 * 1024,
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    base_store_params: Optional[dict[str, dict[str, Any]]] = None,
+    initial_bases: Optional[list[Any]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
@@ -188,6 +197,11 @@ def write_lance(
             "legacy" which will use the legacy v1 version.  See the user guide
             for more details.
         storage_options: The storage options for the writer. Default is None.
+        base_store_params: Runtime-only storage options keyed by registered
+            base path URI. Used for BlobV2 references that live outside the
+            dataset root.
+        initial_bases: Lance DatasetBasePath objects to register when creating
+            a new dataset.
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
             Used together with namespace_properties and table_id.
         namespace_properties: Properties for connecting to the namespace.
@@ -197,6 +211,9 @@ def write_lance(
         resume_rows: Number of leading rows to skip when streaming (for resume).
     """
     _validate_write_args(uri, namespace_impl, table_id, mode)
+    if initial_bases and mode != "create":
+        raise ValueError("'initial_bases' can only be used with mode='create'")
+    initial_bases = normalize_initial_bases(initial_bases)
 
     # Fast path: non-streaming write using the Datasink API.
     if not stream:
@@ -209,6 +226,8 @@ def write_lance(
             max_rows_per_file=max_rows_per_file,
             data_storage_version=data_storage_version,
             storage_options=storage_options,
+            base_store_params=base_store_params,
+            initial_bases=initial_bases,
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
         )
@@ -237,9 +256,16 @@ def write_lance(
     dest_uri: str = uri
     dest_exists = False
     dest_version: Optional[int] = None
+    base_store_params_kwargs = {}
+    if base_store_params:
+        base_store_params_kwargs = {"base_store_params": base_store_params}
 
     try:
-        _dest = lance.LanceDataset(dest_uri, storage_options=storage_options)
+        _dest = lance.LanceDataset(
+            dest_uri,
+            storage_options=storage_options,
+            **base_store_params_kwargs,
+        )
         dest_exists = True
         dest_version = _dest.version
     except Exception:
@@ -255,18 +281,6 @@ def write_lance(
     from .fragment import LanceFragmentWriter
 
     effective_batch_size = batch_size if batch_size is not None else 1024
-
-    writer = LanceFragmentWriter(
-        uri=dest_uri,
-        schema=schema,  # if None, writer infers from first batch (preserves Arrow metadata)
-        max_rows_per_file=max_rows_per_file,
-        max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
-        data_storage_version=data_storage_version,
-        storage_options=storage_options,
-        namespace_impl=None,
-        namespace_properties=None,
-        table_id=None,
-    )
 
     rows_seen = 0
     first_commit_done = False
@@ -291,6 +305,21 @@ def write_lance(
             continue
 
         # Write this batch as one fragment and collect metadata.
+        fragment_initial_bases = (
+            initial_bases if mode == "create" and not first_commit_done else None
+        )
+        writer = LanceFragmentWriter(
+            uri=dest_uri,
+            schema=schema,  # if None, writer infers from first batch (preserves Arrow metadata)
+            max_rows_per_file=max_rows_per_file,
+            max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
+            data_storage_version=data_storage_version,
+            storage_options=storage_options,
+            initial_bases=fragment_initial_bases,
+            namespace_impl=None,
+            namespace_properties=None,
+            table_id=None,
+        )
         frag_tbl = writer(tbl)
         fragments: list[Any] = []
         schema_obj: Optional[pa.Schema] = None
@@ -305,18 +334,29 @@ def write_lance(
         if not first_commit_done:
             # First commit: respect mode.
             if mode in ("create", "overwrite") or not dest_exists:
-                op = LanceOperation.Overwrite(schema_obj, fragments)
+                op = LanceOperation.Overwrite(
+                    schema_obj,
+                    fragments,
+                    initial_bases=(
+                        materialize_initial_bases(initial_bases)
+                        if mode == "create"
+                        else None
+                    ),
+                )
                 LanceDataset.commit(
                     dest_uri,
                     op,
                     read_version=None,
                     storage_options=storage_options,
+                    **base_store_params_kwargs,
                 )
                 first_commit_done = True
                 dest_exists = True
                 try:
                     _dest = lance.LanceDataset(
-                        dest_uri, storage_options=storage_options
+                        dest_uri,
+                        storage_options=storage_options,
+                        **base_store_params_kwargs,
                     )
                     dest_version = _dest.version
                 except Exception:
@@ -328,23 +368,35 @@ def write_lance(
                     op,
                     read_version=dest_version,
                     storage_options=storage_options,
+                    **base_store_params_kwargs,
                 )
                 first_commit_done = True
                 try:
                     _dest = lance.LanceDataset(
-                        dest_uri, storage_options=storage_options
+                        dest_uri,
+                        storage_options=storage_options,
+                        **base_store_params_kwargs,
                     )
                     dest_version = _dest.version
                 except Exception:
                     pass
             else:
                 # Fallback: overwrite.
-                op = LanceOperation.Overwrite(schema_obj, fragments)
+                op = LanceOperation.Overwrite(
+                    schema_obj,
+                    fragments,
+                    initial_bases=(
+                        materialize_initial_bases(initial_bases)
+                        if mode == "create"
+                        else None
+                    ),
+                )
                 LanceDataset.commit(
                     dest_uri,
                     op,
                     read_version=None,
                     storage_options=storage_options,
+                    **base_store_params_kwargs,
                 )
                 first_commit_done = True
         else:
@@ -355,9 +407,14 @@ def write_lance(
                 op,
                 read_version=dest_version,
                 storage_options=storage_options,
+                **base_store_params_kwargs,
             )
             try:
-                _dest = lance.LanceDataset(dest_uri, storage_options=storage_options)
+                _dest = lance.LanceDataset(
+                    dest_uri,
+                    storage_options=storage_options,
+                    **base_store_params_kwargs,
+                )
                 dest_version = _dest.version
             except Exception:
                 pass

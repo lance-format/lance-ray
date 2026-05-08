@@ -9,7 +9,11 @@ from ray.data.context import DataContext
 from ray.data.datasource import Datasource
 from ray.data.datasource.datasource import ReadTask
 
-from .utils import array_split, get_namespace_kwargs, get_or_create_namespace
+from .utils import (
+    array_split,
+    get_namespace_kwargs,
+    get_or_create_namespace,
+)
 
 if TYPE_CHECKING:
     import lance
@@ -34,13 +38,31 @@ class LanceDatasource(Datasource):
         storage_options: Optional[dict[str, str]] = None,
         scanner_options: Optional[dict[str, Any]] = None,
         dataset_options: Optional[dict[str, Any]] = None,
+        base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         fragment_ids: Optional[list[int]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
     ):
         _check_import(self, module="lance", package="pylance")
 
-        self._dataset_options = dataset_options or {}
+        self._dataset_options = dict(dataset_options or {})
+        dataset_base_store_params = self._dataset_options.pop(
+            "base_store_params", None
+        )
+        if (
+            base_store_params is not None
+            and dataset_base_store_params is not None
+            and base_store_params != dataset_base_store_params
+        ):
+            raise ValueError(
+                "'base_store_params' conflicts with "
+                "dataset_options['base_store_params']"
+            )
+        self._base_store_params = (
+            base_store_params
+            if base_store_params is not None
+            else dataset_base_store_params
+        )
         self._scanner_options = scanner_options or {}
         if columns is not None:
             self._scanner_options["columns"] = columns
@@ -85,7 +107,15 @@ class LanceDatasource(Datasource):
                 self._namespace_impl, self._namespace_properties, self._table_id
             )
             dataset_options.update(ns_kwargs)
-            self._lance_ds = lance.dataset(**dataset_options)
+            base_store_params_kwargs = {}
+            if self._base_store_params:
+                base_store_params_kwargs = {
+                    "base_store_params": self._base_store_params
+                }
+            self._lance_ds = lance.dataset(
+                **dataset_options,
+                **base_store_params_kwargs,
+            )
         return self._lance_ds
 
     @property
@@ -115,6 +145,7 @@ class LanceDatasource(Datasource):
         namespace_impl = self._namespace_impl
         namespace_properties = self._namespace_properties
         table_id = self._table_id
+        base_store_params = self._base_store_params
 
         for fragments in array_split(self.fragments, parallelism):
             if len(fragments) == 0:
@@ -154,7 +185,7 @@ class LanceDatasource(Datasource):
                 )
 
             read_task = ReadTask(
-                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, scanner_options=self._scanner_options, retry_params=self._retry_params: (
+                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, base_params=base_store_params, scanner_options=self._scanner_options, retry_params=self._retry_params: (
                     _read_fragments_with_retry(
                         fids,
                         uri,
@@ -164,6 +195,7 @@ class LanceDatasource(Datasource):
                         ns_impl,
                         ns_props,
                         tbl_id,
+                        base_params,
                         scanner_options,
                         retry_params,
                     )
@@ -196,12 +228,16 @@ def _read_fragments_with_retry(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
+    base_store_params: Optional[dict[str, dict[str, Any]]],
     scanner_options: dict[str, Any],
     retry_params: dict[str, Any],
 ) -> Iterator[pa.Table]:
     namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
     )
+    base_store_params_kwargs = {}
+    if base_store_params:
+        base_store_params_kwargs = {"base_store_params": base_store_params}
 
     import lance
 
@@ -211,6 +247,7 @@ def _read_fragments_with_retry(
         storage_options=storage_options,
         serialized_manifest=manifest,
         **namespace_kwargs,
+        **base_store_params_kwargs,
     )
 
     return call_with_retry(
