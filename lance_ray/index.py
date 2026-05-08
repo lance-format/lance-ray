@@ -990,8 +990,10 @@ def create_index(
         raise RuntimeError("No successful vector index creation results found")
 
     segment_indices = [r["segment_index"] for r in successful_results]
-    segment_builder = dataset_obj.create_index_segment_builder().with_segments(
-        segment_indices
+    segment_builder = (
+        dataset_obj.create_index_segment_builder()
+        .with_index_type(index_type_name)
+        .with_segments(segment_indices)
     )
     segments = segment_builder.build_all()
 

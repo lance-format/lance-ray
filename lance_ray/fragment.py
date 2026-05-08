@@ -11,7 +11,6 @@ from typing import (
     Optional,
     Union,
 )
-from urllib.parse import urlparse
 
 import pyarrow as pa
 from ray.data._internal.util import call_with_retry
@@ -27,7 +26,11 @@ __all__ = [
 ]
 
 from .pandas import pd_to_arrow
-from .utils import get_write_fragments_kwargs
+from .utils import (
+    get_write_fragments_kwargs,
+    materialize_initial_bases,
+    normalize_initial_bases,
+)
 
 
 def write_fragment(
@@ -40,6 +43,7 @@ def write_fragment(
     max_rows_per_group: int = 1024,  # Only useful for v1 writer.
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
+    initial_bases: Optional[list[Any]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
@@ -92,51 +96,12 @@ def write_fragment(
     write_kwargs = get_write_fragments_kwargs(
         namespace_impl, namespace_properties, table_id
     )
-
-    blob_v2_columns = [
-        field.name
-        for field in schema
-        if isinstance(field.type, pa.ExtensionType)
-        and getattr(field.type, "extension_name", None) == "lance.blob.v2"
-    ]
-    if blob_v2_columns:
-        import inspect
-
-        try:
-            write_sig = inspect.signature(write_fragments)
-        except (AttributeError, ValueError):  # pragma: no cover
-            write_sig = None
-
-        if write_sig is not None and "allow_external_blob_outside_bases" in write_sig.parameters:
-            write_kwargs.setdefault("allow_external_blob_outside_bases", True)
-
-        tbl_first = pd_to_arrow(first, schema)
-        has_external_file_blobs = False
-        for col in blob_v2_columns:
-            for item in tbl_first.column(col).to_pylist():
-                if not isinstance(item, dict):
-                    continue
-                uri_value = item.get("uri")
-                if not uri_value:
-                    continue
-                if urlparse(uri_value).scheme == "file":
-                    has_external_file_blobs = True
-                    break
-            if has_external_file_blobs:
-                break
-
-        if has_external_file_blobs:
-            import lance
-
-            initial_bases = [
-                lance.DatasetBasePath(
-                    "file:///",
-                    name="external_file",
-                    is_dataset_root=False,
-                    id=1,
-                )
-            ]
-            write_kwargs = {**write_kwargs, "initial_bases": initial_bases}
+    if initial_bases:
+        initial_bases_kwargs = {
+            "initial_bases": materialize_initial_bases(initial_bases)
+        }
+    else:
+        initial_bases_kwargs = {}
 
     fragments = call_with_retry(
         lambda: write_fragments(
@@ -149,6 +114,7 @@ def write_fragment(
             data_storage_version=data_storage_version,
             storage_options=storage_options,
             **write_kwargs,
+            **initial_bases_kwargs,
         ),
         **retry_params,
     )
@@ -190,8 +156,10 @@ class LanceFragmentWriter:
     use_legacy_format : optional, bool, default None
         Deprecated method for setting the data storage version. Use the
         `data_storage_version` parameter instead.
-    storage_options : Dict[str, Any], optional
-        The storage options for the writer. Default is None.
+        storage_options : Dict[str, Any], optional
+            The storage options for the writer. Default is None.
+    initial_bases : list, optional
+        Lance DatasetBasePath objects to register when creating a new dataset.
     namespace_impl : str, optional
         The namespace implementation type (e.g., "rest", "dir").
         Used together with namespace_properties and table_id for credentials
@@ -222,12 +190,13 @@ class LanceFragmentWriter:
         data_storage_version: Optional[str] = None,
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
+        initial_bases: Optional[list[Any]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         table_id: Optional[list[str]] = None,
         retry_params: Optional[dict[str, Any]] = None,
     ):
-        if use_legacy_format is not None:
+        if use_legacy_format is not None and data_storage_version is None:
             warnings.warn(
                 "The `use_legacy_format` parameter is deprecated. Use the "
                 "`data_storage_version` parameter instead.",
@@ -246,6 +215,7 @@ class LanceFragmentWriter:
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
         self.storage_options = storage_options
+        self.initial_bases = normalize_initial_bases(initial_bases)
         self.namespace_impl = namespace_impl
         self.namespace_properties = namespace_properties
         self.table_id = table_id
@@ -284,6 +254,7 @@ class LanceFragmentWriter:
             max_bytes_per_file=self.max_bytes_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
+            initial_bases=self.initial_bases,
             namespace_impl=self.namespace_impl,
             namespace_properties=self.namespace_properties,
             table_id=self.table_id,

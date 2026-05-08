@@ -24,11 +24,11 @@ Read a Lance dataset and return a Ray Dataset.
 - `columns`: Optional list of column names to read
 - `filter`: Optional filter expression to apply
 - `storage_options`: Optional storage configuration dictionary
+- `base_store_params`: Optional runtime storage options keyed by registered base path URI, used for BlobV2 references outside the dataset root
 - `scanner_options`: Optional scanner configuration dictionary
 - `ray_remote_args`: Optional kwargs for Ray remote tasks
 - `concurrency`: Optional maximum number of concurrent Ray tasks
 - `override_num_blocks`: Optional override for number of output blocks
 
 **Returns:** Ray Dataset
-
 

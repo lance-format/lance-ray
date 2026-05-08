@@ -12,6 +12,53 @@ _NAMESPACE_CACHE_SIZE = int(os.environ.get("LANCE_RAY_NAMESPACE_CACHE_SIZE", "16
 _PYLANCE_5 = (5, 0, 0)
 
 
+def normalize_initial_bases(
+    initial_bases: Optional[list[Any]],
+) -> Optional[list[dict[str, Any]]]:
+    """Convert Lance DatasetBasePath objects into Ray-serializable specs."""
+    if not initial_bases:
+        return None
+    return [
+        {
+            "path": base["path"] if isinstance(base, dict) else base.path,
+            "name": base.get("name") if isinstance(base, dict) else base.name,
+            "is_dataset_root": (
+                base.get("is_dataset_root", False)
+                if isinstance(base, dict)
+                else base.is_dataset_root
+            ),
+            "id": base.get("id", 0) if isinstance(base, dict) else base.id,
+        }
+        for base in initial_bases
+    ]
+
+
+def materialize_initial_bases(
+    initial_bases: Optional[list[dict[str, Any]]],
+) -> Optional[list[Any]]:
+    """Rebuild Lance DatasetBasePath objects from serializable specs."""
+    if not initial_bases:
+        return None
+
+    from lance import DatasetBasePath
+
+    bases = []
+    for base in initial_bases:
+        if not isinstance(base, dict):
+            raise TypeError(
+                "initial_bases must be normalized before materialization"
+            )
+        bases.append(
+            DatasetBasePath(
+                base["path"],
+                name=base.get("name"),
+                is_dataset_root=base.get("is_dataset_root", False),
+                id=base.get("id", 0),
+            )
+        )
+    return bases
+
+
 @lru_cache(maxsize=1)
 def _pylance_version() -> tuple[int, ...]:
     """Return the installed pylance version as a comparable tuple."""
