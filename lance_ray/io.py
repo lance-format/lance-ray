@@ -517,7 +517,9 @@ def add_columns(
     """
     storage_options = storage_options or {}
 
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_namespace_kwargs(
+        namespace_impl, namespace_properties, table_id
+    )
 
     lance_ds = LanceDataset(
         uri=uri,
