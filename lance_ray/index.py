@@ -371,7 +371,9 @@ def create_scalar_index(
         if describe_response.storage_options:
             merged_storage_options.update(describe_response.storage_options)
 
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_namespace_kwargs(
+        namespace_impl, namespace_properties, table_id
+    )
 
     # Load dataset
     dataset = LanceDataset(
@@ -441,7 +443,9 @@ def create_scalar_index(
             existing_indices = dataset.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
             index_exists = name in existing_names
-        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
+        except (
+            Exception
+        ):  # pragma: no cover - list_indices() not available in older lance versions
             pass
         if index_exists:
             raise ValueError(
@@ -835,7 +839,9 @@ def create_index(
         dataset_obj = uri
         dataset_uri = dataset_obj.uri
         if not merged_storage_options:
-            merged_storage_options = getattr(dataset_obj, "_storage_options", None) or {}
+            merged_storage_options = (
+                getattr(dataset_obj, "_storage_options", None) or {}
+            )
         namespace_kwargs = {}
 
     try:
@@ -855,7 +861,9 @@ def create_index(
             existing_indices = dataset_obj.list_indices()
             existing_names = {idx["name"] for idx in existing_indices}
             index_exists = name in existing_names
-        except Exception:  # pragma: no cover - list_indices() not available in older lance versions
+        except (
+            Exception
+        ):  # pragma: no cover - list_indices() not available in older lance versions
             pass
         if index_exists:
             raise ValueError(
@@ -1117,7 +1125,9 @@ def optimize_indices(
             uri,
         )
 
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_namespace_kwargs(
+        namespace_impl, namespace_properties, table_id
+    )
 
     dataset = LanceDataset(
         uri,
