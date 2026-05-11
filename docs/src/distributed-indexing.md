@@ -105,6 +105,7 @@ def create_index(
     metric: str = "l2",
     num_partitions: Optional[int] = None,
     num_sub_vectors: Optional[int] = None,
+    sample_rate: int = 256,
     ivf_centroids: Optional["pyarrow.Array"] = None,
     pq_codebook: Optional["pyarrow.Array"] = None,
     **kwargs: Any,
@@ -129,9 +130,10 @@ def create_index(
 | `metric` | `str`, optional | Distance metric to use (e.g., `"l2"`, `"cosine"`, `"dot"`, `"hamming"`), default is `"l2"` |
 | `num_partitions` | `int`, optional | Number of IVF partitions |
 | `num_sub_vectors` | `int`, optional | Number of PQ sub-vectors |
+| `sample_rate` | `int`, optional | Number of rows sampled per IVF partition and PQ centroid, default is 256 |
 | `ivf_centroids` | `pyarrow.Array`, optional | Pre-computed IVF centroids (advanced) |
 | `pq_codebook` | `pyarrow.Array`, optional | Pre-computed PQ codebook for PQ-based indices (advanced) |
-| `**kwargs` | `Any` | Additional arguments to pass (e.g., `sample_rate`) |
+| `**kwargs` | `Any` | Additional arguments to pass through to Lance index creation |
 
 #### Return Value
 
@@ -240,6 +242,7 @@ updated_dataset = lr.create_index(
     num_workers=4,
     num_partitions=256,
     num_sub_vectors=16,
+    sample_rate=64,
     metric="l2"
 )
 

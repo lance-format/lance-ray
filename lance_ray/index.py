@@ -749,6 +749,7 @@ def create_index(
     metric: str = "l2",
     num_partitions: Optional[int] = None,
     num_sub_vectors: Optional[int] = None,
+    sample_rate: int = 256,
     ivf_centroids: Optional[
         pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray
     ] = None,
@@ -774,9 +775,10 @@ def create_index(
         metric: Distance metric to use (default: "l2")
         num_partitions: Number of IVF partitions (optional)
         num_sub_vectors: Number of PQ sub-vectors (optional)
+        sample_rate: Number of rows sampled per IVF partition and PQ centroid (default: 256)
         ivf_centroids: Pre-computed IVF centroids (optional)
         pq_codebook: Pre-computed PQ codebook (optional)
-        **kwargs: Additional arguments to pass to create_index and train_pq (e.g., sample_rate)
+        **kwargs: Additional arguments to pass to the fragment index build entrypoint
 
     Returns:
         Updated Lance dataset with the index created
@@ -789,6 +791,9 @@ def create_index(
 
     if num_workers <= 0:
         raise ValueError(f"num_workers must be positive, got {num_workers}")
+
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
 
     index_type_name = _normalize_index_type(index_type)
     metric_lower = _validate_metric(metric)
@@ -888,14 +893,17 @@ def create_index(
 
     requested_num_partitions = num_partitions
     logger.info(
-        "Training IVF with requested_num_partitions=%s, num_rows=%d, dimension=%d",
+        "Training IVF with requested_num_partitions=%s, num_rows=%d, "
+        "dimension=%d, sample_rate=%d",
         requested_num_partitions,
         num_rows,
         dimension,
+        sample_rate,
     )
     ivf_model = builder.train_ivf(
         num_partitions=requested_num_partitions,
         distance_type=metric_lower,
+        sample_rate=sample_rate,
     )
     ivf_centroids_artifact = ivf_model.centroids
     num_partitions = ivf_model.num_partitions
@@ -909,12 +917,12 @@ def create_index(
         logger.info(
             "Training PQ codebook: requested_num_sub_vectors=%s, sample_rate=%d",
             requested_num_sub_vectors,
-            kwargs.get("sample_rate", 256),
+            sample_rate,
         )
         pq_model = builder.train_pq(
             ivf_model,
             num_subvectors=requested_num_sub_vectors,
-            sample_rate=kwargs.get("sample_rate", 256),
+            sample_rate=sample_rate,
         )
         pq_codebook_artifact = pq_model.codebook
         num_sub_vectors = pq_model.num_subvectors
