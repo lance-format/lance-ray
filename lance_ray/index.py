@@ -778,7 +778,7 @@ def create_index(
         sample_rate: Number of rows sampled per IVF partition and PQ centroid (default: 256)
         ivf_centroids: Pre-computed IVF centroids (optional)
         pq_codebook: Pre-computed PQ codebook (optional)
-        **kwargs: Additional arguments to pass to create_index
+        **kwargs: Additional arguments to pass to the fragment index build entrypoint
 
     Returns:
         Updated Lance dataset with the index created
@@ -791,6 +791,9 @@ def create_index(
 
     if num_workers <= 0:
         raise ValueError(f"num_workers must be positive, got {num_workers}")
+
+    if sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate}")
 
     index_type_name = _normalize_index_type(index_type)
     metric_lower = _validate_metric(metric)

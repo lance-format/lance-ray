@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 
 def _load_index_module_with_stubs():
     """Load lance_ray.index when the native pylance extension is unavailable."""
@@ -163,3 +165,17 @@ def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
     assert captured["fragment_handler_kwargs"]["ivf_centroids"] == "ivf_centroids"
     assert captured["fragment_handler_kwargs"]["pq_codebook"] == "pq_codebook"
     assert "sample_rate" not in captured["fragment_handler_kwargs"]
+
+
+def test_create_index_rejects_non_positive_sample_rate(monkeypatch):
+    """Invalid sample rates should fail before training starts."""
+
+    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
+
+    with pytest.raises(ValueError, match="sample_rate must be positive, got 0"):
+        index_mod.create_index(
+            uri=_FakeDataset(),
+            column="vector",
+            index_type="IVF_PQ",
+            sample_rate=0,
+        )
