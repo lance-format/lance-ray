@@ -46,9 +46,7 @@ class LanceDatasource(Datasource):
         _check_import(self, module="lance", package="pylance")
 
         self._dataset_options = dict(dataset_options or {})
-        dataset_base_store_params = self._dataset_options.pop(
-            "base_store_params", None
-        )
+        dataset_base_store_params = self._dataset_options.pop("base_store_params", None)
         if (
             base_store_params is not None
             and dataset_base_store_params is not None
