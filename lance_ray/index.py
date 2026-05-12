@@ -21,6 +21,20 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 
+def _dataset_load_kwargs(
+    storage_options: Optional[dict[str, Any]],
+    namespace_kwargs: dict[str, Any],
+    block_size: Optional[int],
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "storage_options": storage_options,
+        **namespace_kwargs,
+    }
+    if block_size is not None:
+        kwargs["block_size"] = block_size
+    return kwargs
+
+
 def _distribute_fragments_balanced(
     fragments: list[Any], num_workers: int, logger: logging.Logger
 ) -> list[list[int]]:
@@ -140,6 +154,7 @@ def _handle_fragment_index(
     replace: bool,
     train: bool,
     storage_options: Optional[dict[str, str]] = None,
+    block_size: Optional[int] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
@@ -167,8 +182,7 @@ def _handle_fragment_index(
             # Load dataset
             dataset = LanceDataset(
                 dataset_uri,
-                storage_options=storage_options,
-                **namespace_kwargs,
+                **_dataset_load_kwargs(storage_options, namespace_kwargs, block_size),
             )
 
             available_fragments = {f.fragment_id for f in dataset.get_fragments()}
@@ -254,6 +268,7 @@ def create_scalar_index(
     index_uuid: Optional[str] = None,
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
+    block_size: Optional[int] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
@@ -276,6 +291,7 @@ def create_scalar_index(
         index_uuid: Optional fragment UUID for distributed indexing.
         num_workers: Number of Ray workers to use (keyword-only).
         storage_options: Storage options for the dataset (keyword-only).
+        block_size: Block size to use when loading the dataset (keyword-only).
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
             Used together with table_id for resolving the dataset location and
             credentials vending in distributed workers.
@@ -325,6 +341,9 @@ def create_scalar_index(
 
     if num_workers <= 0:
         raise ValueError(f"num_workers must be positive, got {num_workers}")
+
+    if block_size is not None and block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
 
     if isinstance(index_type, str):
         valid_index_types = [
@@ -376,8 +395,7 @@ def create_scalar_index(
     # Load dataset
     dataset = LanceDataset(
         uri,
-        storage_options=merged_storage_options,
-        **namespace_kwargs,
+        **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
     )
 
     try:
@@ -431,8 +449,9 @@ def create_scalar_index(
             dataset.drop_index(name)
             dataset = LanceDataset(
                 uri,
-                storage_options=merged_storage_options,
-                **namespace_kwargs,
+                **_dataset_load_kwargs(
+                    merged_storage_options, namespace_kwargs, block_size
+                ),
             )
 
     else:
@@ -480,6 +499,7 @@ def create_scalar_index(
         replace=False,
         train=train,
         storage_options=merged_storage_options,
+        block_size=block_size,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
         table_id=table_id,
@@ -508,8 +528,7 @@ def create_scalar_index(
     # Reload dataset to get the latest state after fragment index creation
     dataset = LanceDataset(
         uri,
-        storage_options=merged_storage_options,
-        **namespace_kwargs,
+        **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
     )
 
     logger.info("Phase 2: Merging index metadata for index ID: %s", index_id)
@@ -655,6 +674,7 @@ def _handle_vector_fragment_index(
     ivf_centroids: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
     pq_codebook: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
     storage_options: Optional[dict[str, str]] = None,
+    block_size: Optional[int] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
@@ -676,8 +696,7 @@ def _handle_vector_fragment_index(
             )
             dataset = LanceDataset(
                 dataset_uri,
-                storage_options=storage_options,
-                **namespace_kwargs,
+                **_dataset_load_kwargs(storage_options, namespace_kwargs, block_size),
             )
             available_fragments = {f.fragment_id for f in dataset.get_fragments()}
             invalid_fragments = set(fragment_ids) - available_fragments
@@ -742,6 +761,7 @@ def create_index(
     replace: bool = True,
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
+    block_size: Optional[int] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
@@ -771,6 +791,7 @@ def create_index(
         replace: Whether to replace existing index with the same name (default: True)
         num_workers: Number of Ray workers to use (keyword-only)
         storage_options: Storage options for the dataset (keyword-only)
+        block_size: Block size to use when loading the dataset (keyword-only)
         ray_remote_args: Options for Ray tasks (keyword-only)
         metric: Distance metric to use (default: "l2")
         num_partitions: Number of IVF partitions (optional)
@@ -794,6 +815,9 @@ def create_index(
 
     if sample_rate <= 0:
         raise ValueError(f"sample_rate must be positive, got {sample_rate}")
+
+    if block_size is not None and block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
 
     index_type_name = _normalize_index_type(index_type)
     metric_lower = _validate_metric(metric)
@@ -827,8 +851,9 @@ def create_index(
         )
         dataset_obj = LanceDataset(
             dataset_uri,
-            storage_options=merged_storage_options,
-            **namespace_kwargs,
+            **_dataset_load_kwargs(
+                merged_storage_options, namespace_kwargs, block_size
+            ),
         )
     else:
         # LanceDataset object passed directly
@@ -963,6 +988,7 @@ def create_index(
         ivf_centroids=ivf_centroids_artifact,
         pq_codebook=pq_codebook_artifact,
         storage_options=merged_storage_options,
+        block_size=block_size,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
         table_id=table_id,
@@ -984,8 +1010,7 @@ def create_index(
 
     dataset_obj = LanceDataset(
         dataset_uri,
-        storage_options=merged_storage_options,
-        **namespace_kwargs,
+        **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
     )
 
     logger.info(

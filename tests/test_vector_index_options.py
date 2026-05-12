@@ -55,11 +55,40 @@ except ImportError:  # pragma: no cover - environment dependent
     index_mod = _load_index_module_with_stubs()
 
 
+class _FakeField:
+    def __init__(self, name, field_type=None):
+        self.name = name
+        self.type = field_type or index_mod.pa.float32()
+
+
+class _FakeLanceField:
+    def id(self):
+        return 7
+
+
+class _FakeLanceSchema:
+    def field(self, column):
+        if column != "value":
+            raise KeyError(column)
+        return _FakeLanceField()
+
+
 class _FakeSchema:
     def field(self, column):
-        if column != "vector":
+        if column == "vector":
+            return _FakeField(column)
+        if column == "value":
+            return _FakeField(column, index_mod.pa.int64())
+        else:
             raise KeyError(column)
-        return SimpleNamespace(name=column)
+
+    def __iter__(self):
+        return iter(
+            [
+                _FakeField("vector"),
+                _FakeField("value", index_mod.pa.int64()),
+            ]
+        )
 
 
 class _FakeFragment:
@@ -87,6 +116,8 @@ class _FakeSegmentBuilder:
 class _FakeDataset:
     uri = "memory://fake"
     schema = _FakeSchema()
+    lance_schema = _FakeLanceSchema()
+    version = 1
 
     def get_fragments(self):
         return [_FakeFragment(0, 100), _FakeFragment(1, 100)]
@@ -94,8 +125,18 @@ class _FakeDataset:
     def count_rows(self):
         return 200
 
+    def list_indices(self):
+        return []
+
+    def create_scalar_index(self, **kwargs):
+        self.scalar_index_kwargs = kwargs
+
     def create_index_segment_builder(self):
         return _FakeSegmentBuilder()
+
+    def create_index_uncommitted(self, **kwargs):
+        self.vector_index_kwargs = kwargs
+        return "segment"
 
     def commit_existing_index_segments(self, **kwargs):
         self.commit_kwargs = kwargs
@@ -179,3 +220,174 @@ def test_create_index_rejects_non_positive_sample_rate(monkeypatch):
             index_type="IVF_PQ",
             sample_rate=0,
         )
+
+
+def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch):
+    """The scalar index path should use block_size whenever it loads a dataset."""
+
+    captured = {"loads": []}
+    fake_dataset = _FakeDataset()
+
+    def fake_lance_dataset(*args, **kwargs):
+        captured["loads"].append(kwargs)
+        return fake_dataset
+
+    def fake_handle_fragment_index(**kwargs):
+        captured["fragment_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {
+            "status": "success",
+            "fragment_ids": fragment_ids,
+            "fields": [7],
+        }
+
+    def fake_map_async_with_pool(**kwargs):
+        captured["map_kwargs"] = kwargs
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "fields": [7],
+            }
+        ]
+
+    monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
+    monkeypatch.setattr(
+        index_mod,
+        "_handle_fragment_index",
+        fake_handle_fragment_index,
+    )
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+    monkeypatch.setattr(index_mod, "merge_index_metadata_compat", lambda *a, **k: None)
+    monkeypatch.setattr(index_mod, "Index", SimpleNamespace)
+    monkeypatch.setattr(
+        index_mod.lance,
+        "LanceDataset",
+        SimpleNamespace(commit=lambda *args, **kwargs: fake_dataset),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        index_mod.lance,
+        "LanceOperation",
+        SimpleNamespace(CreateIndex=SimpleNamespace),
+        raising=False,
+    )
+
+    updated_dataset = index_mod.create_scalar_index(
+        uri="memory://fake",
+        column="value",
+        index_type="BTREE",
+        num_workers=2,
+        block_size=4096,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert [load["block_size"] for load in captured["loads"]] == [4096, 4096]
+    assert captured["fragment_handler_kwargs"]["block_size"] == 4096
+
+
+def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
+    """The vector index path should use block_size for driver and worker loads."""
+
+    captured = {"loads": []}
+    fake_dataset = _FakeDataset()
+
+    class FakeIndicesBuilder:
+        dimension = 16
+
+        def __init__(self, dataset, column):
+            captured["builder_dataset"] = dataset
+            captured["builder_column"] = column
+
+        def train_ivf(self, **kwargs):
+            captured["train_ivf"] = kwargs
+            return SimpleNamespace(centroids="ivf_centroids", num_partitions=4)
+
+        def train_pq(self, ivf_model, **kwargs):
+            captured["train_pq_ivf_model"] = ivf_model
+            captured["train_pq"] = kwargs
+            return SimpleNamespace(codebook="pq_codebook", num_subvectors=4)
+
+    def fake_lance_dataset(*args, **kwargs):
+        captured["loads"].append(kwargs)
+        return fake_dataset
+
+    def fake_handle_vector_fragment_index(**kwargs):
+        captured["fragment_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
+
+    def fake_map_async_with_pool(**kwargs):
+        captured["map_kwargs"] = kwargs
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "segment_index": "segment",
+            }
+        ]
+
+    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
+    monkeypatch.setattr(index_mod, "IndicesBuilder", FakeIndicesBuilder)
+    monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
+    monkeypatch.setattr(
+        index_mod,
+        "_handle_vector_fragment_index",
+        fake_handle_vector_fragment_index,
+    )
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+
+    updated_dataset = index_mod.create_index(
+        uri="memory://fake",
+        column="vector",
+        index_type="IVF_PQ",
+        name="vector_idx",
+        num_workers=2,
+        num_partitions=4,
+        num_sub_vectors=4,
+        block_size=8192,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert [load["block_size"] for load in captured["loads"]] == [8192, 8192]
+    assert captured["fragment_handler_kwargs"]["block_size"] == 8192
+
+
+def test_fragment_handlers_pass_block_size_to_dataset_load(monkeypatch):
+    """Worker-side scalar and vector handlers should load datasets with block_size."""
+
+    captured = {"loads": []}
+    fake_dataset = _FakeDataset()
+
+    def fake_lance_dataset(*args, **kwargs):
+        captured["loads"].append(kwargs)
+        return fake_dataset
+
+    monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
+
+    scalar_handler = index_mod._handle_fragment_index(
+        dataset_uri="memory://fake",
+        column="value",
+        index_type="BTREE",
+        name="value_idx",
+        index_uuid="scalar-index",
+        replace=False,
+        train=True,
+        block_size=4096,
+    )
+    vector_handler = index_mod._handle_vector_fragment_index(
+        dataset_uri="memory://fake",
+        column="vector",
+        index_type="IVF_PQ",
+        name="vector_idx",
+        index_uuid="vector-index",
+        replace=False,
+        metric="l2",
+        num_partitions=4,
+        num_sub_vectors=4,
+        ivf_centroids="ivf_centroids",
+        pq_codebook="pq_codebook",
+        block_size=8192,
+    )
+
+    assert scalar_handler([0])["status"] == "success"
+    assert vector_handler([0])["status"] == "success"
+    assert [load["block_size"] for load in captured["loads"]] == [4096, 8192]
