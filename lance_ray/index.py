@@ -291,7 +291,7 @@ def create_scalar_index(
         index_uuid: Optional fragment UUID for distributed indexing.
         num_workers: Number of Ray workers to use (keyword-only).
         storage_options: Storage options for the dataset (keyword-only).
-        block_size: Block size to use when loading the dataset (keyword-only).
+        block_size: Block size in bytes to use when loading the dataset (keyword-only).
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
             Used together with table_id for resolving the dataset location and
             credentials vending in distributed workers.
@@ -791,7 +791,7 @@ def create_index(
         replace: Whether to replace existing index with the same name (default: True)
         num_workers: Number of Ray workers to use (keyword-only)
         storage_options: Storage options for the dataset (keyword-only)
-        block_size: Block size to use when loading the dataset (keyword-only)
+        block_size: Block size in bytes to use when loading the dataset (keyword-only)
         ray_remote_args: Options for Ray tasks (keyword-only)
         metric: Distance metric to use (default: "l2")
         num_partitions: Number of IVF partitions (optional)

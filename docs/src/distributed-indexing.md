@@ -66,7 +66,7 @@ def create_scalar_index(
 | `index_uuid` | `str`, optional | Optional fragment UUID for distributed indexing |
 | `num_workers` | `int`, optional | Number of Ray worker nodes to use, default is 4 |
 | `storage_options` | `Dict[str, str]`, optional | Storage options for the dataset |
-| `block_size` | `int`, optional | Block size to use when loading the dataset |
+| `block_size` | `int`, optional | Block size in bytes to use when loading the dataset |
 | `namespace_impl` | `str`, optional | The namespace implementation type (e.g., `"rest"`, `"dir"`) |
 | `namespace_properties` | `Dict[str, str]`, optional | Properties for connecting to the namespace |
 | `ray_remote_args` | `Dict[str, Any]`, optional | Ray task options (e.g., `num_cpus`, `resources`) |
@@ -126,7 +126,7 @@ def create_index(
 | `replace` | `bool`, optional | Whether to replace existing index, default is `True` |
 | `num_workers` | `int`, optional | Number of Ray workers to use, default is 4 |
 | `storage_options` | `Dict[str, str]`, optional | Storage options for the dataset. These are merged with the storage options returned by the namespace (if any). |
-| `block_size` | `int`, optional | Block size to use when loading the dataset |
+| `block_size` | `int`, optional | Block size in bytes to use when loading the dataset |
 | `namespace_impl` | `str`, optional | The namespace implementation type (e.g., `"rest"`, `"dir"`) |
 | `namespace_properties` | `Dict[str, str]`, optional | Properties for connecting to the namespace |
 | `table_id` | `list[str]`, optional | The table identifier as a list of strings. Must be provided together with `namespace_impl`. |
