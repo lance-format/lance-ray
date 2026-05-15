@@ -27,6 +27,7 @@ def _load_index_module_with_stubs():
     lance_indices.IndicesBuilder = object
 
     ray = ModuleType("ray")
+    ray.ObjectRef = type("ObjectRef", (), {})
     ray_util = ModuleType("ray.util")
     ray_multiprocessing = ModuleType("ray.util.multiprocessing")
     ray_multiprocessing.Pool = object
@@ -169,8 +170,13 @@ def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
         captured["fragment_handler_kwargs"] = kwargs
         return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
 
+    def fake_put_vector_index_artifacts(ivf_centroids, pq_codebook):
+        captured["put_artifacts"] = (ivf_centroids, pq_codebook)
+        return "ivf_ref", "pq_ref"
+
     def fake_map_async_with_pool(**kwargs):
         captured["map_kwargs"] = kwargs
+        kwargs["create_fragment_handler"]()
         return [
             {
                 "status": "success",
@@ -186,6 +192,11 @@ def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
         index_mod,
         "_handle_vector_fragment_index",
         fake_handle_vector_fragment_index,
+    )
+    monkeypatch.setattr(
+        index_mod,
+        "_put_vector_index_artifacts_in_object_store",
+        fake_put_vector_index_artifacts,
     )
     monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
 
@@ -203,8 +214,9 @@ def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
     assert updated_dataset is fake_dataset
     assert captured["train_ivf"]["sample_rate"] == 8
     assert captured["train_pq"]["sample_rate"] == 8
-    assert captured["fragment_handler_kwargs"]["ivf_centroids"] == "ivf_centroids"
-    assert captured["fragment_handler_kwargs"]["pq_codebook"] == "pq_codebook"
+    assert captured["put_artifacts"] == ("ivf_centroids", "pq_codebook")
+    assert captured["fragment_handler_kwargs"]["ivf_centroids"] == "ivf_ref"
+    assert captured["fragment_handler_kwargs"]["pq_codebook"] == "pq_ref"
     assert "sample_rate" not in captured["fragment_handler_kwargs"]
 
 
@@ -242,6 +254,7 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
 
     def fake_map_async_with_pool(**kwargs):
         captured["map_kwargs"] = kwargs
+        kwargs["create_fragment_handler"]()
         return [
             {
                 "status": "success",
@@ -315,8 +328,13 @@ def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
         captured["fragment_handler_kwargs"] = kwargs
         return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
 
+    def fake_put_vector_index_artifacts(ivf_centroids, pq_codebook):
+        captured["put_artifacts"] = (ivf_centroids, pq_codebook)
+        return "ivf_ref", "pq_ref"
+
     def fake_map_async_with_pool(**kwargs):
         captured["map_kwargs"] = kwargs
+        kwargs["create_fragment_handler"]()
         return [
             {
                 "status": "success",
@@ -332,6 +350,11 @@ def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
         index_mod,
         "_handle_vector_fragment_index",
         fake_handle_vector_fragment_index,
+    )
+    monkeypatch.setattr(
+        index_mod,
+        "_put_vector_index_artifacts_in_object_store",
+        fake_put_vector_index_artifacts,
     )
     monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
 
@@ -349,6 +372,7 @@ def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
     assert updated_dataset is fake_dataset
     assert [load["block_size"] for load in captured["loads"]] == [8192, 8192]
     assert captured["fragment_handler_kwargs"]["block_size"] == 8192
+    assert captured["put_artifacts"] == ("ivf_centroids", "pq_codebook")
 
 
 def test_fragment_handlers_pass_block_size_to_dataset_load(monkeypatch):
@@ -391,3 +415,43 @@ def test_fragment_handlers_pass_block_size_to_dataset_load(monkeypatch):
     assert scalar_handler([0])["status"] == "success"
     assert vector_handler([0])["status"] == "success"
     assert [load["block_size"] for load in captured["loads"]] == [4096, 8192]
+
+
+def test_vector_fragment_handler_resolves_shared_artifact_refs(monkeypatch):
+    """Workers should dereference shared training artifacts before Lance calls."""
+
+    class FakeObjectRef:
+        def __init__(self, value):
+            self.value = value
+
+    fake_dataset = _FakeDataset()
+    captured = {"gets": []}
+
+    def fake_get(ref):
+        captured["gets"].append(ref)
+        return ref.value
+
+    monkeypatch.setattr(index_mod.ray, "ObjectRef", FakeObjectRef, raising=False)
+    monkeypatch.setattr(index_mod.ray, "get", fake_get, raising=False)
+    monkeypatch.setattr(index_mod, "LanceDataset", lambda *args, **kwargs: fake_dataset)
+
+    ivf_ref = FakeObjectRef("ivf_centroids")
+    pq_ref = FakeObjectRef("pq_codebook")
+    vector_handler = index_mod._handle_vector_fragment_index(
+        dataset_uri="memory://fake",
+        column="vector",
+        index_type="IVF_PQ",
+        name="vector_idx",
+        index_uuid="vector-index",
+        replace=False,
+        metric="l2",
+        num_partitions=4,
+        num_sub_vectors=4,
+        ivf_centroids=ivf_ref,
+        pq_codebook=pq_ref,
+    )
+
+    assert vector_handler([0])["status"] == "success"
+    assert captured["gets"] == [ivf_ref, pq_ref]
+    assert fake_dataset.vector_index_kwargs["ivf_centroids"] == "ivf_centroids"
+    assert fake_dataset.vector_index_kwargs["pq_codebook"] == "pq_codebook"

@@ -3,10 +3,12 @@
 
 import logging
 import uuid
-from typing import Any, Literal, Optional, Union
+from collections.abc import Callable
+from typing import Any, Literal, Optional, TypeAlias, Union
 
 import lance
 import pyarrow as pa
+import ray
 from lance.dataset import Index, IndexConfig, LanceDataset
 from lance.indices import IndicesBuilder
 from packaging import version
@@ -19,6 +21,15 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_VectorIndexArtifact: TypeAlias = (
+    pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None
+)
+_VectorIndexArtifactRef: TypeAlias = _VectorIndexArtifact | ray.ObjectRef
+_VectorIndexArtifactRefs: TypeAlias = tuple[
+    _VectorIndexArtifactRef, _VectorIndexArtifactRef
+]
 
 
 def _dataset_load_kwargs(
@@ -115,7 +126,7 @@ def _distribute_fragments_balanced(
 
 
 def _map_async_with_pool(
-    fragment_handler: Any,
+    create_fragment_handler: Callable[[], Any],
     fragment_batches: list[list[int]],
     *,
     num_workers: int,
@@ -129,13 +140,13 @@ def _map_async_with_pool(
     the same implementation.
     """
     pool = Pool(processes=num_workers, ray_remote_args=ray_remote_args)
-    rst_futures = pool.map_async(
-        fragment_handler,
-        fragment_batches,
-        chunksize=1,
-    )
-
     try:
+        fragment_handler = create_fragment_handler()
+        rst_futures = pool.map_async(
+            fragment_handler,
+            fragment_batches,
+            chunksize=1,
+        )
         results = rst_futures.get()
     except Exception as exc:  # pragma: no cover - exercised via integration tests
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
@@ -143,6 +154,33 @@ def _map_async_with_pool(
         pool.close()
 
     return results
+
+
+def _is_ray_object_ref(value: Any) -> bool:
+    object_ref_type = getattr(ray, "ObjectRef", None)
+    return object_ref_type is not None and isinstance(value, object_ref_type)
+
+
+def _ray_put_index_artifact(value: Any) -> _VectorIndexArtifactRef:
+    if value is None or _is_ray_object_ref(value):
+        return value
+    return ray.put(value)
+
+
+def _ray_get_index_artifact(value: Any) -> _VectorIndexArtifact:
+    if _is_ray_object_ref(value):
+        return ray.get(value)
+    return value
+
+
+def _put_vector_index_artifacts_in_object_store(
+    ivf_centroids: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
+    pq_codebook: pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray | None,
+) -> _VectorIndexArtifactRefs:
+    return (
+        _ray_put_index_artifact(ivf_centroids),
+        _ray_put_index_artifact(pq_codebook),
+    )
 
 
 def _handle_fragment_index(
@@ -490,21 +528,22 @@ def create_scalar_index(
 
     fragment_batches = _distribute_fragments_balanced(fragments, num_workers, logger)
 
-    fragment_handler = _handle_fragment_index(
-        dataset_uri=uri,
-        column=column,
-        index_type=index_type,
-        name=name,
-        index_uuid=index_id,
-        replace=False,
-        train=train,
-        storage_options=merged_storage_options,
-        block_size=block_size,
-        namespace_impl=namespace_impl,
-        namespace_properties=namespace_properties,
-        table_id=table_id,
-        **kwargs,
-    )
+    def create_fragment_handler() -> Any:
+        return _handle_fragment_index(
+            dataset_uri=uri,
+            column=column,
+            index_type=index_type,
+            name=name,
+            index_uuid=index_id,
+            replace=False,
+            train=train,
+            storage_options=merged_storage_options,
+            block_size=block_size,
+            namespace_impl=namespace_impl,
+            namespace_properties=namespace_properties,
+            table_id=table_id,
+            **kwargs,
+        )
 
     logger.info(
         "Phase 1: Distributing scalar index build across %d workers for %d fragments",
@@ -513,7 +552,7 @@ def create_scalar_index(
     )
 
     results = _map_async_with_pool(
-        fragment_handler=fragment_handler,
+        create_fragment_handler=create_fragment_handler,
         fragment_batches=fragment_batches,
         num_workers=num_workers,
         ray_remote_args=ray_remote_args,
@@ -709,6 +748,9 @@ def _handle_vector_fragment_index(
                 fragment_ids,
             )
 
+            resolved_ivf_centroids = _ray_get_index_artifact(ivf_centroids)
+            resolved_pq_codebook = _ray_get_index_artifact(pq_codebook)
+
             segment_index = dataset.create_index_uncommitted(
                 column=column,
                 index_type=index_type,
@@ -716,8 +758,8 @@ def _handle_vector_fragment_index(
                 metric=metric,
                 replace=replace,
                 num_partitions=num_partitions,
-                ivf_centroids=ivf_centroids,
-                pq_codebook=pq_codebook,
+                ivf_centroids=resolved_ivf_centroids,
+                pq_codebook=resolved_pq_codebook,
                 num_sub_vectors=num_sub_vectors,
                 storage_options=storage_options,
                 train=True,
@@ -975,28 +1017,35 @@ def create_index(
         len(fragment_ids_to_use),
     )
 
-    fragment_handler = _handle_vector_fragment_index(
-        dataset_uri=dataset_uri,
-        column=column,
-        index_type=index_type_name,
-        name=name,
-        index_uuid=index_id,
-        replace=replace,
-        metric=metric_lower,
-        num_partitions=num_partitions,
-        num_sub_vectors=num_sub_vectors,
-        ivf_centroids=ivf_centroids_artifact,
-        pq_codebook=pq_codebook_artifact,
-        storage_options=merged_storage_options,
-        block_size=block_size,
-        namespace_impl=namespace_impl,
-        namespace_properties=namespace_properties,
-        table_id=table_id,
-        **kwargs,
-    )
+    def create_fragment_handler() -> Any:
+        shared_ivf_centroids, shared_pq_codebook = (
+            _put_vector_index_artifacts_in_object_store(
+                ivf_centroids_artifact,
+                pq_codebook_artifact,
+            )
+        )
+        return _handle_vector_fragment_index(
+            dataset_uri=dataset_uri,
+            column=column,
+            index_type=index_type_name,
+            name=name,
+            index_uuid=index_id,
+            replace=replace,
+            metric=metric_lower,
+            num_partitions=num_partitions,
+            num_sub_vectors=num_sub_vectors,
+            ivf_centroids=shared_ivf_centroids,
+            pq_codebook=shared_pq_codebook,
+            storage_options=merged_storage_options,
+            block_size=block_size,
+            namespace_impl=namespace_impl,
+            namespace_properties=namespace_properties,
+            table_id=table_id,
+            **kwargs,
+        )
 
     results = _map_async_with_pool(
-        fragment_handler=fragment_handler,
+        create_fragment_handler=create_fragment_handler,
         fragment_batches=fragment_batches,
         num_workers=num_workers,
         ray_remote_args=ray_remote_args,
