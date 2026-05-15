@@ -551,6 +551,7 @@ def add_columns(
         raise RuntimeError(f"Failed to add columns: {exc}") from exc
     finally:
         pool.close()
+        pool.join()
 
     commit_messages = []
     new_schema = None

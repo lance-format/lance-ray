@@ -185,6 +185,7 @@ def compact_files(
         raise RuntimeError(f"Failed to complete distributed compaction: {e}") from e
     finally:
         pool.close()
+        pool.join()
 
     # Check for failures
     failed_results = [r for r in results if r["status"] == "error"]

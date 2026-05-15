@@ -144,6 +144,53 @@ class _FakeDataset:
         return self
 
 
+def test_map_async_with_pool_closes_and_joins_pool(monkeypatch):
+    """The Ray Pool should be joined after close so actors finish cleanup."""
+
+    events = []
+
+    class FakeAsyncResult:
+        def get(self):
+            events.append("get")
+            return [{"status": "success"}]
+
+    class FakePool:
+        def __init__(self, processes, ray_remote_args):
+            events.append(("init", processes, ray_remote_args))
+
+        def map_async(self, fragment_handler, fragment_batches, chunksize):
+            events.append(("map_async", fragment_batches, chunksize))
+            return FakeAsyncResult()
+
+        def close(self):
+            events.append("close")
+
+        def join(self):
+            events.append("join")
+
+    def create_fragment_handler():
+        events.append("create_handler")
+        return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
+
+    monkeypatch.setattr(index_mod, "Pool", FakePool)
+
+    assert index_mod._map_async_with_pool(
+        create_fragment_handler=create_fragment_handler,
+        fragment_batches=[[0, 1]],
+        num_workers=2,
+        ray_remote_args={"num_cpus": 1},
+        error_prefix="failed",
+    ) == [{"status": "success"}]
+    assert events == [
+        ("init", 2, {"num_cpus": 1}),
+        "create_handler",
+        ("map_async", [[0, 1]], 1),
+        "get",
+        "close",
+        "join",
+    ]
+
+
 def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
     """The public sample_rate option should drive both IVF and PQ training."""
 
