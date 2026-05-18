@@ -141,7 +141,7 @@ def _map_async_with_pool(
     """
     pool = Pool(processes=num_workers, ray_remote_args=ray_remote_args)
     try:
-        fragment_handler = create_fragment_handler()
+        fragment_handler = _with_pool_run_batch_logging(create_fragment_handler())
         rst_futures = pool.map_async(
             fragment_handler,
             fragment_batches,
@@ -154,6 +154,28 @@ def _map_async_with_pool(
         pool.close()
 
     return results
+
+
+def _format_fragment_batch_for_log(fragment_batch: list[int]) -> str:
+    preview = fragment_batch[:10]
+    suffix = "..." if len(fragment_batch) > len(preview) else ""
+    return f"size={len(fragment_batch)}, fragment_ids={preview}{suffix}"
+
+
+def _with_pool_run_batch_logging(fragment_handler: Any) -> Any:
+    def logged_fragment_handler(fragment_batch: list[int]) -> dict[str, Any]:
+        batch_summary = _format_fragment_batch_for_log(fragment_batch)
+        logger.info("Starting Ray Pool run_batch for %s", batch_summary)
+        result = fragment_handler(fragment_batch)
+        status = result.get("status") if isinstance(result, dict) else None
+        logger.info(
+            "Finished Ray Pool run_batch for %s with status=%s",
+            batch_summary,
+            status,
+        )
+        return result
+
+    return logged_fragment_handler
 
 
 def _is_ray_object_ref(value: Any) -> bool:

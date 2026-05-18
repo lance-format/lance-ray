@@ -1,6 +1,7 @@
 """Tests for distributed vector index option handling."""
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -142,6 +143,64 @@ class _FakeDataset:
     def commit_existing_index_segments(self, **kwargs):
         self.commit_kwargs = kwargs
         return self
+
+
+def test_map_async_with_pool_logs_run_batch(monkeypatch, caplog):
+    """The Ray Pool helper should log each run_batch business batch."""
+
+    events = []
+
+    class FakeAsyncResult:
+        def __init__(self, result):
+            self.result = result
+
+        def get(self):
+            events.append("get")
+            return [self.result]
+
+    class FakePool:
+        def __init__(self, processes, ray_remote_args):
+            events.append(("init", processes, ray_remote_args))
+
+        def map_async(self, fragment_handler, fragment_batches, chunksize):
+            events.append(("map_async", fragment_batches, chunksize))
+            return FakeAsyncResult(fragment_handler(fragment_batches[0]))
+
+        def close(self):
+            events.append("close")
+
+    def create_fragment_handler():
+        events.append("create_handler")
+        return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
+
+    monkeypatch.setattr(index_mod, "Pool", FakePool)
+    caplog.set_level(logging.INFO, logger=index_mod.logger.name)
+
+    assert index_mod._map_async_with_pool(
+        create_fragment_handler=create_fragment_handler,
+        fragment_batches=[[0, 1]],
+        num_workers=2,
+        ray_remote_args={"num_cpus": 1},
+        error_prefix="failed",
+    ) == [{"status": "success", "fragment_ids": [0, 1]}]
+    assert events == [
+        ("init", 2, {"num_cpus": 1}),
+        "create_handler",
+        ("map_async", [[0, 1]], 1),
+        "get",
+        "close",
+    ]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Starting Ray Pool run_batch for size=2, fragment_ids=[0, 1]"
+        in message
+        for message in messages
+    )
+    assert any(
+        "Finished Ray Pool run_batch for size=2, fragment_ids=[0, 1] with status=success"
+        in message
+        for message in messages
+    )
 
 
 def test_create_index_uses_sample_rate_for_global_training(monkeypatch):
