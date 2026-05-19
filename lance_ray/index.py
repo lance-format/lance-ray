@@ -152,6 +152,7 @@ def _map_async_with_pool(
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
     finally:
         pool.close()
+        pool.join()
 
     return results
 
