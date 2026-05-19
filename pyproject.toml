@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0",
-    "pylance>=7.0.0b7",
+    "pylance>=7.0.0b14",
     "lance-namespace",
     "packaging",
     "pyarrow>=17.0.0",
