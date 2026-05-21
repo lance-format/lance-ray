@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0",
-    "pylance>=7.0.0b7",
+    "pylance>=7.0.0rc1",
     "lance-namespace",
     "packaging",
     "pyarrow>=17.0.0",
@@ -77,3 +77,6 @@ omit = ["*/tests/*", "*/__init__.py"]
 [tool.uv]
 extra-index-url = ["https://pypi.fury.io/lance-format"]
 index-strategy = "unsafe-best-match"
+
+[tool.uv.sources]
+pylance = { git = "https://github.com/lance-format/lance.git", tag = "v7.0.0-rc.1", subdirectory = "python" }
