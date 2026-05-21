@@ -313,7 +313,7 @@ def create_scalar_index(
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     **kwargs: Any,
-) -> "lance.LanceDataset":
+) -> lance.LanceDataset:
     """Build scalar indices with Ray in a distributed workflow.
 
     Args:
@@ -800,7 +800,7 @@ def _handle_vector_fragment_index(
 
 
 def create_index(
-    uri: Optional[str | "lance.LanceDataset"] = None,
+    uri: Optional[str | lance.LanceDataset] = None,
     column: str = "",
     index_type: str | Any = "",
     name: Optional[str] = None,
@@ -824,7 +824,7 @@ def create_index(
         pa.Array | pa.FixedSizeListArray | pa.FixedShapeTensorArray
     ] = None,
     **kwargs: Any,
-) -> "lance.LanceDataset":
+) -> lance.LanceDataset:
     """Build distributed vector indices with Ray.
 
     This function mirrors :func:`create_scalar_index` but targets the precise
@@ -1119,7 +1119,7 @@ def optimize_indices(
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     **kwargs: Any,
-) -> "lance.LanceDataset":
+) -> lance.LanceDataset:
     """Optimize indices for newly added data (incremental index update).
 
     As new data arrives it is not added to existing indexes automatically.

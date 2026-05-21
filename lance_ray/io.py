@@ -666,6 +666,126 @@ def _fill_null_fragment(
 
 def add_columns_from(
     uri: str,
+    *,
+    transform: "TransformType",
+    read_columns: Optional[list[str]] = None,
+    read_version: Optional[int | str] = None,
+    ray_remote_args: Optional[dict[str, Any]] = None,
+    storage_options: Optional[dict[str, Any]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
+    batch_size: int = 1024,
+) -> None:
+    """
+    Add columns to a Lance dataset by applying a transform via Ray Data.
+
+    Unlike :func:`add_columns` (which uses ``ray.util.multiprocessing.Pool``),
+    this function uses Ray Data's distributed ``groupby().map_groups()`` so
+    that per-fragment data stays on workers and the driver only collects small
+    per-fragment commit metadata. This avoids materializing the entire dataset
+    on the driver.
+
+    The transform receives the original columns (plus ``_rowaddr`` / ``_fragid``
+    for row alignment) and must return **only the new columns**. Row-address
+    columns are handled automatically — you do not need to forward them.
+
+    Examples:
+        >>> import lance_ray as lr
+        >>> import pyarrow as pa
+        >>> import pandas as pd
+        >>> ds = ray.data.from_pandas(pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]}))
+        >>> lr.write_lance(ds, "/tmp/data/", max_rows_per_file=2)
+        >>> def compute_name_len(batch):
+        ...     return {"name_len": [len(x) for x in batch["name"]]}
+        >>> lr.add_columns_from("/tmp/data/", transform=compute_name_len)
+
+    Args:
+        uri: The path to the destination Lance dataset.
+        transform: The transform to apply to each batch. It receives the
+            original columns and must return only the new columns as a dict
+            or ``pa.RecordBatch``. Supported types are the same as
+            :func:`add_columns`.
+        read_columns: The columns from the original dataset to read and pass
+            to the transform. If None, all columns are read.
+        read_version: The version to read. If None, uses the latest version.
+        ray_remote_args: kwargs passed to ``ray.remote`` for map_groups tasks.
+        storage_options: The storage options to use for the dataset.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+        namespace_properties: Properties for connecting to the namespace.
+        table_id: The table identifier as a list of strings.
+        batch_size: The batch size to use for the reader inside merge_columns.
+    """
+    ray_ds = read_lance(
+        uri,
+        columns=read_columns,
+        read_version=read_version,
+        storage_options=storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        table_id=table_id,
+        ray_remote_args=ray_remote_args,
+        with_metadata=True,
+    )
+
+    _metadata_cols = {"_rowaddr", "_fragid", "_rowid"}
+
+    def _wrap_transform(batch: pa.Table) -> pa.Table:
+        rowaddr = batch.column("_rowaddr") if "_rowaddr" in batch.column_names else None
+
+        if isinstance(transform, dict):
+            new_cols = transform
+        elif isinstance(transform, BatchUDF):
+            result_batches = []
+            for rb in batch.to_batches(max_chunksize=batch_size):
+                result_batches.append(transform(rb))
+            new_cols = pa.Table.from_batches(result_batches)
+        elif callable(transform):
+            result = transform(batch)
+            if isinstance(result, pa.RecordBatch):
+                new_cols = pa.Table.from_batches([result])
+            elif isinstance(result, (pa.Table, dict)):
+                new_cols = result
+            else:
+                new_cols = result
+        else:
+            reader = pa.RecordBatchReader.from_batches(
+                batch.schema, batch.to_batches(max_chunksize=batch_size)
+            )
+            result_batches = []
+            for rb in transform(reader):
+                result_batches.append(rb)
+            new_cols = pa.Table.from_batches(result_batches)
+
+        if isinstance(new_cols, dict):
+            new_table = pa.table(new_cols)
+        elif isinstance(new_cols, pa.RecordBatch):
+            new_table = pa.Table.from_batches([new_cols])
+        else:
+            new_table = new_cols
+
+        if rowaddr is not None:
+            new_table = new_table.append_column("_rowaddr", rowaddr)
+
+        return new_table
+
+    ray_ds = ray_ds.map_batches(_wrap_transform, batch_format="pyarrow")
+
+    merge_columns_from(
+        uri,
+        ray_ds,
+        read_version=read_version,
+        ray_remote_args=ray_remote_args,
+        storage_options=storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        table_id=table_id,
+        batch_size=batch_size,
+    )
+
+
+def merge_columns_from(
+    uri: str,
     ds: Dataset,
     *,
     read_version: Optional[int | str] = None,
@@ -678,41 +798,32 @@ def add_columns_from(
     require_full_coverage: bool = True,
 ) -> None:
     """
-    Add columns to a Lance dataset from a Ray Dataset containing ``_rowaddr``,
-    ``_fragid``, and the new column(s).
+    Merge new columns into a Lance dataset from a Ray Dataset that contains
+    ``_rowaddr`` and the new column(s).
 
-    This enables a "UDF first, merge later" workflow inspired by
-    lance-spark's ``ALTER TABLE ADD COLUMNS FROM``:
+    This is the low-level counterpart of :func:`add_columns_from`. Use it when
+    you need full control over the Ray Data pipeline (e.g. joins, filters,
+    multi-step transforms) and are willing to manage ``_rowaddr`` yourself.
 
-    1. :func:`read_lance` with ``with_metadata=True`` to get ``_rowaddr`` / ``_fragid``
-    2. Apply arbitrary UDF / join on the Ray Dataset
-    3. :func:`add_columns_from` to merge new columns back
-
-    The Ray Dataset **must** contain ``_rowaddr`` and ``_fragid`` columns.
-    Use :func:`read_lance` with ``with_metadata=True`` to include them.
+    The Ray Dataset **must** contain ``_rowaddr`` (and optionally ``_fragid``;
+    if absent it will be auto-derived). Every fragment in the target Lance
+    dataset must be represented unless ``require_full_coverage=False``.
 
     The implementation uses Ray's distributed ``groupby("_fragid").map_groups``
     so that per-fragment data stays on workers and the driver only collects
-    small per-fragment commit metadata. This avoids materializing the entire
-    Ray Dataset on the driver.
+    small per-fragment commit metadata.
 
     Examples:
         >>> import lance_ray as lr
-        >>> import pyarrow as pa
-        >>> import pandas as pd
-        >>> ds = ray.data.from_pandas(pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]}))
-        >>> lr.write_lance(ds, "/tmp/data/", max_rows_per_file=2)
         >>> ray_ds = lr.read_lance("/tmp/data/", with_metadata=True)
-        >>> def compute_hash(batch):
-        ...     return {"name_hash": [hash(x) for x in batch["name"]]}
-        >>> ray_ds = ray_ds.map_batches(compute_hash)
-        >>> lr.add_columns_from("/tmp/data/", ray_ds)
+        >>> ray_ds = ray_ds.map_batches(my_udf)  # must forward _rowaddr
+        >>> lr.merge_columns_from("/tmp/data/", ray_ds)
 
     Args:
         uri: The path to the destination Lance dataset.
-        ds: A Ray Dataset containing ``_rowaddr``, ``_fragid``, and the new
-            column(s) to add. Every fragment in the target Lance dataset must
-            be represented (unless ``require_full_coverage=False``).
+        ds: A Ray Dataset containing ``_rowaddr`` and the new column(s) to add.
+            Every fragment in the target Lance dataset must be represented
+            (unless ``require_full_coverage=False``).
         read_version: The version to read. If None, uses the latest version.
         ray_remote_args: kwargs passed to ``ray.remote`` for map_groups tasks.
         storage_options: The storage options to use for the dataset.
