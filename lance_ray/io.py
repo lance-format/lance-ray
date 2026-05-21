@@ -716,10 +716,14 @@ def add_columns_from(
         table_id: The table identifier as a list of strings.
         batch_size: The batch size to use for the reader inside merge_columns.
     """
+    dataset_options: dict[str, Any] = {}
+    if read_version is not None:
+        dataset_options["version"] = read_version
+
     ray_ds = read_lance(
         uri,
         columns=read_columns,
-        read_version=read_version,
+        dataset_options=dataset_options or None,
         storage_options=storage_options,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
@@ -744,7 +748,7 @@ def add_columns_from(
             result = transform(batch)
             if isinstance(result, pa.RecordBatch):
                 new_cols = pa.Table.from_batches([result])
-            elif isinstance(result, (pa.Table, dict)):
+            elif isinstance(result, pa.Table | dict):
                 new_cols = result
             else:
                 new_cols = result
