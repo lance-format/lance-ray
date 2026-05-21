@@ -702,9 +702,10 @@ def add_columns_from(
 
     Args:
         uri: The path to the destination Lance dataset.
-        transform: The transform to apply to each batch. It receives the
-            original columns and must return only the new columns as a dict
-            or ``pa.RecordBatch``. Supported types are the same as
+        transform: The transform to apply to each batch. It receives a dict
+            mapping column names to Python lists (metadata columns like
+            ``_rowaddr`` are excluded) and must return only the new columns
+            as a dict or ``pa.RecordBatch``. Supported types are the same as
             :func:`add_columns`.
         read_columns: The columns from the original dataset to read and pass
             to the transform. If None, all columns are read.
@@ -745,7 +746,12 @@ def add_columns_from(
                 result_batches.append(transform(rb))
             new_cols = pa.Table.from_batches(result_batches)
         elif callable(transform):
-            result = transform(batch)
+            batch_dict = {
+                col: batch.column(col).to_pylist()
+                for col in batch.column_names
+                if col not in _metadata_cols
+            }
+            result = transform(batch_dict)
             if isinstance(result, pa.RecordBatch):
                 new_cols = pa.Table.from_batches([result])
             elif isinstance(result, pa.Table | dict):
