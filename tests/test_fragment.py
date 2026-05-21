@@ -10,17 +10,6 @@ from lance_ray.datasink import LanceFragmentCommitter
 from lance_ray.fragment import LanceFragmentWriter
 
 
-@pytest.fixture(scope="module", autouse=True)
-def ray_context():
-    """Initialize Ray for testing."""
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(ignore_reinit_error=True)
-    yield
-    if ray.is_initialized():
-        ray.shutdown()
-
-
 class TestLanceFragmentWriterCommitter:
     """Test cases for LanceFragmentWriter and LanceCommitter."""
 

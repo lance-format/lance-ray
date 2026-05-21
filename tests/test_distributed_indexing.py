@@ -34,22 +34,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ray_context():
-    """Initialize Ray for testing."""
-    # Shutdown Ray if it's already running to avoid conflicts
-    if ray.is_initialized():
-        ray.shutdown()
-
-    # Initialize Ray with minimal configuration
-    ray.init(local_mode=False, ignore_reinit_error=True)
-    yield
-
-    # Clean shutdown
-    if ray.is_initialized():
-        ray.shutdown()
-
-
 @pytest.fixture
 def text_data():
     """Create sample text data for indexing tests."""

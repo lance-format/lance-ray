@@ -7,6 +7,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import pyarrow as pa
+import pyarrow.compute as pc
+import ray
 from lance.dataset import LanceDataset, LanceOperation
 from lance.udf import BatchUDF
 from ray.data import Dataset, read_datasource
@@ -49,6 +51,7 @@ def read_lance(
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     override_num_blocks: Optional[int] = None,
+    with_metadata: bool = False,
 ) -> Dataset:
     """
     Create a :class:`~ray.data.Dataset` from a
@@ -106,6 +109,10 @@ def read_lance(
             By default, the number of output blocks is dynamically decided based on
             input data size and available resources. You shouldn't manually set this
             value in most cases.
+        with_metadata: If True, include ``_rowaddr`` and ``_fragid`` columns in the
+            output. ``_rowaddr`` is a ``UInt64`` encoding ``(fragment_id << 32) |
+            row_offset``. ``_fragid`` is the fragment ID derived from ``_rowaddr``.
+            These columns are needed for :func:`add_columns_from`. Default is False.
 
     Returns:
         A :class:`~ray.data.Dataset` producing records read from the Lance dataset.
@@ -124,6 +131,7 @@ def read_lance(
         fragment_ids=fragment_ids,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
+        with_metadata=with_metadata,
     )
 
     return read_datasource(
@@ -573,6 +581,375 @@ def add_columns(
         read_version=lance_ds.version,
         storage_options=storage_options,
         **namespace_kwargs,
+    )
+
+
+def _derive_fragid_from_rowaddr(batch: pa.Table) -> pa.Table:
+    fragid = pc.cast(pc.shift_right(batch.column("_rowaddr"), 32), pa.uint64())
+    return batch.append_column("_fragid", fragid)
+
+
+_COMMIT_MAX_RETRIES = 3
+_COMMIT_RETRY_DELAY_S = 1.0
+
+
+def _commit_with_retry(
+    uri: str,
+    op: LanceOperation.Merge,
+    read_version: int,
+    storage_options: dict[str, str],
+    namespace_kwargs: dict[str, Any],
+    original_fragments: set[int],
+) -> None:
+    last_exc = None
+    for attempt in range(_COMMIT_MAX_RETRIES):
+        try:
+            LanceDataset.commit(
+                uri,
+                op,
+                read_version=read_version,
+                storage_options=storage_options,
+                **namespace_kwargs,
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt < _COMMIT_MAX_RETRIES - 1:
+                import time
+
+                time.sleep(_COMMIT_RETRY_DELAY_S * (2**attempt))
+                try:
+                    current_ds = LanceDataset(
+                        uri=uri, storage_options=storage_options, **namespace_kwargs
+                    )
+                    current_fragments = {
+                        f.metadata.id for f in current_ds.get_fragments()
+                    }
+                    if current_fragments != original_fragments:
+                        raise ValueError(
+                            f"Concurrent write detected: fragment set changed from "
+                            f"{sorted(original_fragments)} to {sorted(current_fragments)}. "
+                            f"Cannot safely retry commit."
+                        ) from exc
+                    read_version = current_ds.version
+                except ValueError:
+                    raise
+                except Exception:
+                    pass
+    raise last_exc
+
+
+@ray.remote
+def _fill_null_fragment(
+    uri: str,
+    storage_options: dict[str, str],
+    read_version: int,
+    namespace_impl: str | None,
+    namespace_properties: dict[str, str] | None,
+    table_id: list[str] | None,
+    frag_id: int,
+    null_udf: BatchUDF,
+    batch_size: int,
+) -> tuple[Any, Any]:
+    ns_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    local_ds = LanceDataset(
+        uri=uri,
+        storage_options=storage_options,
+        version=read_version,
+        **ns_kwargs,
+    )
+    fragment = local_ds.get_fragment(frag_id)
+    if fragment is None:
+        raise ValueError(f"Fragment {frag_id} not found in Lance dataset at {uri}")
+    return fragment.merge_columns(null_udf, columns=None, batch_size=batch_size)
+
+
+def add_columns_from(
+    uri: str,
+    ds: Dataset,
+    *,
+    read_version: Optional[int | str] = None,
+    ray_remote_args: Optional[dict[str, Any]] = None,
+    storage_options: Optional[dict[str, Any]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
+    batch_size: int = 1024,
+    require_full_coverage: bool = True,
+) -> None:
+    """
+    Add columns to a Lance dataset from a Ray Dataset containing ``_rowaddr``,
+    ``_fragid``, and the new column(s).
+
+    This enables a "UDF first, merge later" workflow inspired by
+    lance-spark's ``ALTER TABLE ADD COLUMNS FROM``:
+
+    1. :func:`read_lance` with ``with_metadata=True`` to get ``_rowaddr`` / ``_fragid``
+    2. Apply arbitrary UDF / join on the Ray Dataset
+    3. :func:`add_columns_from` to merge new columns back
+
+    The Ray Dataset **must** contain ``_rowaddr`` and ``_fragid`` columns.
+    Use :func:`read_lance` with ``with_metadata=True`` to include them.
+
+    The implementation uses Ray's distributed ``groupby("_fragid").map_groups``
+    so that per-fragment data stays on workers and the driver only collects
+    small per-fragment commit metadata. This avoids materializing the entire
+    Ray Dataset on the driver.
+
+    Examples:
+        >>> import lance_ray as lr
+        >>> import pyarrow as pa
+        >>> import pandas as pd
+        >>> ds = ray.data.from_pandas(pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Charlie"]}))
+        >>> lr.write_lance(ds, "/tmp/data/", max_rows_per_file=2)
+        >>> ray_ds = lr.read_lance("/tmp/data/", with_metadata=True)
+        >>> def compute_hash(batch):
+        ...     return {"name_hash": [hash(x) for x in batch["name"]]}
+        >>> ray_ds = ray_ds.map_batches(compute_hash)
+        >>> lr.add_columns_from("/tmp/data/", ray_ds)
+
+    Args:
+        uri: The path to the destination Lance dataset.
+        ds: A Ray Dataset containing ``_rowaddr``, ``_fragid``, and the new
+            column(s) to add. Every fragment in the target Lance dataset must
+            be represented (unless ``require_full_coverage=False``).
+        read_version: The version to read. If None, uses the latest version.
+        ray_remote_args: kwargs passed to ``ray.remote`` for map_groups tasks.
+        storage_options: The storage options to use for the dataset.
+        namespace_impl: The namespace implementation type (e.g., "rest", "dir").
+        namespace_properties: Properties for connecting to the namespace.
+        table_id: The table identifier as a list of strings.
+        batch_size: The batch size to use for the reader inside merge_columns.
+        require_full_coverage: If True (default), raise ValueError when the
+            input Ray Dataset does not contain rows for every fragment in the
+            target Lance dataset. Set to False to allow merging new columns
+            into a subset of fragments only.
+    """
+    storage_options = storage_options or {}
+    namespace_kwargs = get_namespace_kwargs(
+        namespace_impl, namespace_properties, table_id
+    )
+
+    ray_schema = ds.schema()
+    if "_rowaddr" not in ray_schema.names:
+        raise ValueError(
+            "Input Dataset must contain '_rowaddr' column. "
+            "Use read_lance(uri, with_metadata=True) to include it."
+        )
+
+    if "_fragid" not in ray_schema.names:
+        ds = ds.map_batches(
+            _derive_fragid_from_rowaddr,
+            batch_format="pyarrow",
+        )
+        ray_schema = ds.schema()
+
+    pa_schema = ray_schema.base_schema
+
+    lance_ds = LanceDataset(
+        uri=uri,
+        storage_options=storage_options,
+        version=read_version,
+        **namespace_kwargs,
+    )
+    resolved_read_version = lance_ds.version
+
+    original_columns = set(lance_ds.schema.names)
+    metadata_columns = {"_rowaddr", "_fragid", "_rowid"}
+    new_columns = [
+        name
+        for name in pa_schema.names
+        if name not in original_columns and name not in metadata_columns
+    ]
+    if not new_columns:
+        raise ValueError("No new columns found in the input Dataset.")
+
+    fragments_in_lance = {f.metadata.id for f in lance_ds.get_fragments()}
+
+    # Capture closure variables for worker tasks.
+    _uri = uri
+    _storage_options = storage_options
+    _namespace_impl = namespace_impl
+    _namespace_properties = namespace_properties
+    _table_id = table_id
+    _read_version = resolved_read_version
+    _new_columns = list(new_columns)
+    _batch_size = batch_size
+
+    _first_fragment = True
+
+    def _merge_one_fragment(group: pa.Table) -> pa.Table:
+        nonlocal _first_fragment
+        if group.num_rows == 0:
+            return pa.table(
+                {
+                    "frag_id": pa.array([], type=pa.int64()),
+                    "fragment_meta": pa.array([], type=pa.binary()),
+                    "result_schema": pa.array([], type=pa.binary()),
+                }
+            )
+
+        frag_id = int(group.column("_fragid")[0].as_py())
+
+        order = pc.sort_indices(group, sort_keys=[("_rowaddr", "ascending")])
+        sorted_group = group.take(order)
+        new_data = sorted_group.select(_new_columns).combine_chunks()
+
+        local_ns_kwargs = get_namespace_kwargs(
+            _namespace_impl, _namespace_properties, _table_id
+        )
+        local_ds = LanceDataset(
+            uri=_uri,
+            storage_options=_storage_options,
+            version=_read_version,
+            **local_ns_kwargs,
+        )
+        fragment = local_ds.get_fragment(frag_id)
+        if fragment is None:
+            raise ValueError(f"Fragment {frag_id} not found in Lance dataset at {_uri}")
+
+        frag_row_count = fragment.metadata.num_rows
+        new_data_schema = new_data.schema
+
+        if new_data.num_rows == frag_row_count:
+            reader = pa.RecordBatchReader.from_batches(
+                new_data_schema,
+                new_data.to_batches(max_chunksize=_batch_size),
+            )
+            fragment_meta, result_schema = fragment.merge_columns(
+                reader, columns=None, batch_size=_batch_size
+            )
+        elif new_data.num_rows < frag_row_count:
+            raise ValueError(
+                f"Fragment {frag_id} has {frag_row_count} rows but the "
+                f"input Dataset only contains {new_data.num_rows} rows for "
+                f"this fragment. Partial-row coverage of a fragment is not "
+                f"supported. Ensure the input Dataset includes all rows for "
+                f"each fragment it covers."
+            )
+        else:
+            raise ValueError(
+                f"Fragment {frag_id} has {frag_row_count} rows but the "
+                f"input Dataset contains {new_data.num_rows} rows for this "
+                f"fragment, which exceeds the fragment size. This indicates "
+                f"a data integrity issue."
+            )
+
+        schema_bytes = pickle.dumps(result_schema) if _first_fragment else b""
+        _first_fragment = False
+
+        return pa.table(
+            {
+                "frag_id": pa.array([frag_id], type=pa.int64()),
+                "fragment_meta": pa.array(
+                    [pickle.dumps(fragment_meta)], type=pa.binary()
+                ),
+                "result_schema": pa.array([schema_bytes], type=pa.binary()),
+            }
+        )
+
+    map_groups_kwargs: dict[str, Any] = {}
+    if ray_remote_args:
+        map_groups_kwargs["ray_remote_args"] = ray_remote_args
+
+    result_ds = ds.groupby("_fragid").map_groups(
+        _merge_one_fragment,
+        batch_format="pyarrow",
+        **map_groups_kwargs,
+    )
+
+    rows = result_ds.take_all()
+    if not rows:
+        raise ValueError("No fragments were processed")
+
+    commit_messages = []
+    new_schema = None
+    seen_frag_ids: set[int] = set()
+    for row in rows:
+        frag_id = int(row["frag_id"])
+        if frag_id not in fragments_in_lance:
+            raise ValueError(
+                f"_fragid {frag_id} from input Dataset is not present in the "
+                f"Lance dataset at {uri}"
+            )
+        if frag_id in seen_frag_ids:
+            raise ValueError(
+                f"Duplicate _fragid {frag_id} encountered in map_groups output"
+            )
+        seen_frag_ids.add(frag_id)
+
+        fragment_meta = pickle.loads(row["fragment_meta"])
+        commit_messages.append(fragment_meta)
+        schema_bytes = row["result_schema"]
+        if schema_bytes:
+            result_schema = pickle.loads(schema_bytes)
+            if new_schema is None:
+                new_schema = result_schema
+            elif new_schema != result_schema:
+                raise ValueError(f"Schema mismatch: {new_schema} vs {result_schema}")
+
+    if require_full_coverage:
+        missing = fragments_in_lance - seen_frag_ids
+        if missing:
+            raise ValueError(
+                "Input Ray Dataset does not cover all fragments. Missing "
+                f"fragment ids: {sorted(missing)}. Pass "
+                "require_full_coverage=False to allow merging into a subset "
+                "of fragments."
+            )
+    else:
+        missing_frag_ids = sorted(fragments_in_lance - seen_frag_ids)
+        if missing_frag_ids:
+            new_data_arrow_schema = pa.schema(
+                [pa.field(name, pa_schema.field(name).type) for name in _new_columns]
+            )
+
+            def _null_udf(in_batch: pa.RecordBatch) -> pa.RecordBatch:
+                return pa.RecordBatch.from_pydict(
+                    {
+                        name: pa.nulls(
+                            in_batch.num_rows,
+                            type=new_data_arrow_schema.field(name).type,
+                        )
+                        for name in new_data_arrow_schema.names
+                    },
+                    schema=new_data_arrow_schema,
+                )
+
+            null_udf = BatchUDF(_null_udf, output_schema=new_data_arrow_schema)
+
+            null_results = ray.get(
+                [
+                    _fill_null_fragment.remote(
+                        uri,
+                        storage_options,
+                        resolved_read_version,
+                        namespace_impl,
+                        namespace_properties,
+                        table_id,
+                        fid,
+                        null_udf,
+                        batch_size,
+                    )
+                    for fid in missing_frag_ids
+                ]
+            )
+            for fragment_meta, result_schema in null_results:
+                commit_messages.append(fragment_meta)
+                if new_schema is None:
+                    new_schema = result_schema
+
+    if new_schema is None:
+        raise ValueError("No fragments were processed")
+
+    op = LanceOperation.Merge(commit_messages, new_schema)
+    _commit_with_retry(
+        uri=uri,
+        op=op,
+        read_version=resolved_read_version,
+        storage_options=storage_options,
+        namespace_kwargs=namespace_kwargs,
+        original_fragments=fragments_in_lance,
     )
 
 

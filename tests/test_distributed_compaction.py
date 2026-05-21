@@ -13,22 +13,6 @@ from lance.optimize import CompactionOptions
 import pandas as pd
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ray_context():
-    """Initialize Ray for testing."""
-    # Shutdown Ray if it's already running to avoid conflicts
-    if ray.is_initialized():
-        ray.shutdown()
-
-    # Initialize Ray with minimal configuration
-    ray.init(local_mode=False, ignore_reinit_error=True)
-    yield
-
-    # Clean shutdown
-    if ray.is_initialized():
-        ray.shutdown()
-
-
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for testing."""

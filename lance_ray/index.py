@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
+from __future__ import annotations
+
 import logging
 import uuid
 from collections.abc import Callable
-from typing import Any, Literal, Optional, TypeAlias, Union
+from typing import Any, Literal, Optional, TypeAlias
 
 import lance
 import pyarrow as pa
@@ -471,7 +473,6 @@ def create_scalar_index(
                         f"index, got {value_type}"
                     )
             case _:
-                # For other index types, skip strict validation to maintain compatibility
                 pass
 
     if name is None:
@@ -799,7 +800,7 @@ def _handle_vector_fragment_index(
 
 
 def create_index(
-    uri: Optional[Union[str, "lance.LanceDataset"]] = None,
+    uri: Optional[str | "lance.LanceDataset"] = None,
     column: str = "",
     index_type: str | Any = "",
     name: Optional[str] = None,

@@ -3,7 +3,9 @@
 
 """Utility functions for lance-ray."""
 
-from typing import TYPE_CHECKING, Optional, Union
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
 
 import pyarrow as pa
 
@@ -12,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def pd_to_arrow(
-    df: Union[pa.Table, "pd.DataFrame", dict], schema: Optional[pa.Schema]
+    df: pa.Table | "pd.DataFrame" | dict, schema: Optional[pa.Schema]
 ) -> pa.Table:
     """Convert a pandas DataFrame to pyarrow Table."""
     from lance.dependencies import _PANDAS_AVAILABLE

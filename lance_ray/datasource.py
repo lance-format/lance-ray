@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Optional
 
 import pyarrow as pa
+import pyarrow.compute as pc
 from ray.data._internal.util import _check_import, call_with_retry
 from ray.data.block import BlockMetadata
 from ray.data.context import DataContext
@@ -42,6 +43,7 @@ class LanceDatasource(Datasource):
         fragment_ids: Optional[list[int]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
+        with_metadata: bool = False,
     ):
         _check_import(self, module="lance", package="pylance")
 
@@ -89,6 +91,7 @@ class LanceDatasource(Datasource):
             "max_backoff_s": self.READ_FRAGMENTS_RETRY_MAX_BACKOFF_SECONDS,
         }
         self._fragment_ids = set(fragment_ids) if fragment_ids else None
+        self._with_metadata = with_metadata
 
         self._lance_ds = None
         self._fragments = None
@@ -126,6 +129,21 @@ class LanceDatasource(Datasource):
                 ]
         return self._fragments
 
+    def _get_storage_options(self) -> dict[str, str] | None:
+        try:
+            return self.lance_dataset.initial_storage_options
+        except AttributeError:
+            try:
+                return self._lance_ds._storage_options
+            except AttributeError:
+                return None
+
+    def _get_serialized_manifest(self) -> bytes | None:
+        try:
+            return self._lance_ds._ds.serialized_manifest()
+        except AttributeError:
+            return None
+
     def get_read_tasks(self, parallelism: int, **kwargs) -> list[ReadTask]:
         if not self.fragments:
             return []
@@ -138,8 +156,8 @@ class LanceDatasource(Datasource):
         # the namespace and provider using these serializable parameters.
         dataset_uri = self.lance_dataset.uri
         dataset_version = self.lance_dataset.version
-        dataset_storage_options = self._lance_ds._storage_options
-        serialized_manifest = self._lance_ds._ds.serialized_manifest()
+        dataset_storage_options = self._get_storage_options()
+        serialized_manifest = self._get_serialized_manifest()
         namespace_impl = self._namespace_impl
         namespace_properties = self._namespace_properties
         table_id = self._table_id
@@ -183,7 +201,7 @@ class LanceDatasource(Datasource):
                 )
 
             read_task = ReadTask(
-                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, base_params=base_store_params, scanner_options=self._scanner_options, retry_params=self._retry_params: (
+                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, base_params=base_store_params, scanner_options=self._scanner_options, retry_params=self._retry_params, with_metadata=self._with_metadata: (
                     _read_fragments_with_retry(
                         fids,
                         uri,
@@ -196,6 +214,7 @@ class LanceDatasource(Datasource):
                         base_params,
                         scanner_options,
                         retry_params,
+                        with_metadata,
                     )
                 ),
                 metadata,
@@ -229,6 +248,7 @@ def _read_fragments_with_retry(
     base_store_params: Optional[dict[str, dict[str, Any]]],
     scanner_options: dict[str, Any],
     retry_params: dict[str, Any],
+    with_metadata: bool = False,
 ) -> Iterator[pa.Table]:
     namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
@@ -239,17 +259,20 @@ def _read_fragments_with_retry(
 
     import lance
 
-    lance_ds = lance.LanceDataset(
-        uri,
-        version=version,
-        storage_options=storage_options,
-        serialized_manifest=manifest,
-        **namespace_kwargs,
-        **base_store_params_kwargs,
-    )
+    ds_kwargs: dict[str, Any] = {
+        "uri": uri,
+        "version": version,
+        "storage_options": storage_options,
+    }
+    if manifest is not None:
+        ds_kwargs["serialized_manifest"] = manifest
+    ds_kwargs.update(namespace_kwargs)
+    ds_kwargs.update(base_store_params_kwargs)
+
+    lance_ds = lance.LanceDataset(**ds_kwargs)
 
     return call_with_retry(
-        lambda: _read_fragments(fragment_ids, lance_ds, scanner_options),
+        lambda: _read_fragments(fragment_ids, lance_ds, scanner_options, with_metadata),
         **retry_params,
     )
 
@@ -258,6 +281,7 @@ def _read_fragments(
     fragment_ids: list[int],
     lance_ds: "lance.LanceDataset",
     scanner_options: dict[str, Any],
+    with_metadata: bool = False,
 ) -> Iterator[pa.Table]:
     """Read Lance fragments in batches.
 
@@ -340,12 +364,27 @@ def _read_fragments(
     if blob_columns:
         scan_opts["with_row_id"] = True
 
+    if with_metadata:
+        scan_opts["with_row_address"] = True
+
     scanner = lance_ds.scanner(**scan_opts)
 
     for batch in scanner.to_reader():
         # Fast path: no blob columns requested in this scan
         if not blob_columns:
-            yield pa.Table.from_batches([batch])
+            table = pa.Table.from_batches([batch])
+
+            if with_metadata and "_rowaddr" in table.column_names:
+                rowaddr_col = table.column("_rowaddr")
+                fragid_values = pc.cast(pc.shift_right(rowaddr_col, 32), pa.uint64())
+                table = table.append_column("_fragid", fragid_values)
+
+            if not with_metadata:
+                for col in ("_rowaddr", "_fragid"):
+                    if col in table.column_names:
+                        table = table.drop_columns([col])
+
+            yield table
             continue
 
         # Build a table so we can manipulate columns easily
@@ -480,8 +519,18 @@ def _read_fragments(
                 pa.chunked_array([new_arr]),
             )
 
-        # Drop helper row ID column before returning
-        if "_rowid" in table.column_names:
-            table = table.drop_columns(["_rowid"])
+        if with_metadata and "_rowaddr" in table.column_names:
+            rowaddr_col = table.column("_rowaddr")
+            fragid_values = pc.cast(pc.shift_right(rowaddr_col, 32), pa.uint64())
+            table = table.append_column("_fragid", fragid_values)
+
+        for col in ("_rowid",):
+            if col in table.column_names:
+                table = table.drop_columns([col])
+
+        if not with_metadata:
+            for col in ("_rowaddr", "_fragid"):
+                if col in table.column_names:
+                    table = table.drop_columns([col])
 
         yield table

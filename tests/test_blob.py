@@ -34,17 +34,6 @@ pytest.importorskip("lance")
 import lance_ray.io as lr
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ray_context():
-    # Initialize Ray for testing
-    if ray.is_initialized():
-        ray.shutdown()
-    ray.init(local_mode=False, ignore_reinit_error=True)
-    yield
-    if ray.is_initialized():
-        ray.shutdown()
-
-
 @pytest.fixture
 def temp_dir():
     with tempfile.TemporaryDirectory() as d:
