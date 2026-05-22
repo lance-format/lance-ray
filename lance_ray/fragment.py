@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
-from __future__ import annotations
-
 import pickle
 import warnings
 from collections.abc import Callable, Generator, Iterable
@@ -11,6 +9,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Optional,
+    Union,
 )
 
 import pyarrow as pa
@@ -35,7 +34,7 @@ from .utils import (
 
 
 def write_fragment(
-    stream: Iterable[pa.Table | pd.DataFrame],
+    stream: Iterable[Union[pa.Table, "pd.DataFrame"]],
     uri: str,
     *,
     schema: Optional[pa.Schema] = None,
@@ -49,7 +48,7 @@ def write_fragment(
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
     retry_params: Optional[dict[str, Any]] = None,
-) -> list[tuple[FragmentMetadata, pa.Schema]]:
+) -> list[tuple["FragmentMetadata", pa.Schema]]:
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
     from lance.fragment import DEFAULT_MAX_BYTES_PER_FILE, write_fragments
@@ -139,7 +138,7 @@ class LanceFragmentWriter:
 
         Then use the returned location as the uri. This ensures all distributed workers
         write to the same resolved location.
-    transform : Callable[[pa.Table], pa.Table | Generator], optional
+    transform : Callable[[pa.Table], Union[pa.Table, Generator]], optional
         A callable to transform the input batch. Default is None.
     schema : pyarrow.Schema, optional
         The schema of the dataset.
@@ -222,7 +221,7 @@ class LanceFragmentWriter:
         self.table_id = table_id
         self.retry_params = retry_params
 
-    def __call__(self, batch: pa.Table | pd.DataFrame | dict) -> pa.Table:
+    def __call__(self, batch: Union[pa.Table, "pd.DataFrame", dict]) -> pa.Table:
         """Write a Batch to the Lance fragment."""
         # Convert dict/numpy arrays to pyarrow table if needed
         if isinstance(batch, dict):

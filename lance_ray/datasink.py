@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import pickle
 from collections.abc import Iterable
 from typing import (
@@ -7,6 +5,7 @@ from typing import (
     Any,
     Literal,
     Optional,
+    Union,
 )
 
 import pyarrow as pa
@@ -326,7 +325,7 @@ class LanceDatasink(_BaseLanceDatasink):
 
     def write(
         self,
-        blocks: Iterable[pa.Table | pd.DataFrame],
+        blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         ctx: Any,
     ):
         fragments_and_schema = write_fragment(
@@ -364,7 +363,7 @@ class LanceFragmentCommitter(_BaseLanceDatasink):
 
     def write(
         self,
-        blocks: Iterable[pa.Table | pd.DataFrame],
+        blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         _ctx: Any,
     ):
         """Passthrough the fragments to commit phase"""
