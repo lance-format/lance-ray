@@ -15,22 +15,54 @@ _PYLANCE_5 = (5, 0, 0)
 def normalize_initial_bases(
     initial_bases: Optional[list[Any]],
 ) -> Optional[list[dict[str, Any]]]:
-    """Convert Lance DatasetBasePath objects into Ray-serializable specs."""
+    """Convert Lance DatasetBasePath objects into Ray-serializable specs.
+
+    If a base path does not specify an ``id`` (or uses the pylance
+    default of 0), a unique id is auto-assigned starting from 1
+    (id 0 is reserved for the dataset root).  This mirrors the
+    auto-assignment that pylance's Rust layer performs inside
+    ``write_dataset`` / ``write_fragments(return_transaction=True)``,
+    which lance-ray bypasses by splitting write and commit into
+    separate steps.
+    """
     if not initial_bases:
         return None
-    return [
-        {
-            "path": base["path"] if isinstance(base, dict) else base.path,
-            "name": base.get("name") if isinstance(base, dict) else base.name,
-            "is_dataset_root": (
-                base.get("is_dataset_root", False)
-                if isinstance(base, dict)
-                else base.is_dataset_root
-            ),
-            "id": base.get("id", 0) if isinstance(base, dict) else base.id,
-        }
-        for base in initial_bases
-    ]
+
+    specs: list[dict[str, Any]] = []
+    next_auto_id = 1
+    for base in initial_bases:
+        raw_id = base.get("id", 0) if isinstance(base, dict) else base.id
+        is_root = (
+            base.get("is_dataset_root", False)
+            if isinstance(base, dict)
+            else base.is_dataset_root
+        )
+        if is_root:
+            assigned_id = 0
+        elif raw_id not in (0, None):
+            assigned_id = raw_id
+        else:
+            assigned_id = next_auto_id
+            next_auto_id += 1
+        specs.append(
+            {
+                "path": base["path"] if isinstance(base, dict) else base.path,
+                "name": base.get("name") if isinstance(base, dict) else base.name,
+                "is_dataset_root": is_root,
+                "id": assigned_id,
+            }
+        )
+
+    seen_ids: set[int] = set()
+    for spec in specs:
+        if spec["id"] in seen_ids:
+            raise ValueError(
+                f"Duplicate base path ID {spec['id']} detected. "
+                "Base path IDs must be unique."
+            )
+        seen_ids.add(spec["id"])
+
+    return specs
 
 
 def materialize_initial_bases(
@@ -46,12 +78,17 @@ def materialize_initial_bases(
     for base in initial_bases:
         if not isinstance(base, dict):
             raise TypeError("initial_bases must be normalized before materialization")
+        if "id" not in base:
+            raise ValueError(
+                "Normalized base spec is missing 'id'. "
+                "Ensure normalize_initial_bases() is called first."
+            )
         bases.append(
             DatasetBasePath(
                 base["path"],
                 name=base.get("name"),
                 is_dataset_root=base.get("is_dataset_root", False),
-                id=base.get("id", 0),
+                id=base["id"],
             )
         )
     return bases
