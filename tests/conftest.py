@@ -63,7 +63,7 @@ def ray_context():
     else:
         # Use an isolated temp dir so we don't pick up a stale
         # /tmp/ray/ray_current_cluster pointer from previous runs.
-        temp_dir = tempfile.mkdtemp(prefix="ray_lance_test_")
+        temp_dir = tempfile.mkdtemp(prefix="rl_", dir="/tmp")
         ray.init(
             num_cpus=4,
             ignore_reinit_error=True,

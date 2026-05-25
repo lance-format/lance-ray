@@ -44,6 +44,7 @@ def write_fragment(
     data_storage_version: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
     initial_bases: Optional[list[Any]] = None,
+    target_bases: Optional[list[str]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
@@ -113,6 +114,7 @@ def write_fragment(
             max_bytes_per_file=max_bytes_per_file,
             data_storage_version=data_storage_version,
             storage_options=storage_options,
+            target_bases=target_bases,
             **write_kwargs,
             **initial_bases_kwargs,
         ),
@@ -160,6 +162,10 @@ class LanceFragmentWriter:
             The storage options for the writer. Default is None.
     initial_bases : list, optional
         Lance DatasetBasePath objects to register when creating a new dataset.
+    target_bases : list of str, optional
+        References to base paths where data should be written. Each string
+        is resolved by matching base name or base path URI from registered
+        bases.
     namespace_impl : str, optional
         The namespace implementation type (e.g., "rest", "dir").
         Used together with namespace_properties and table_id for credentials
@@ -191,6 +197,7 @@ class LanceFragmentWriter:
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
         initial_bases: Optional[list[Any]] = None,
+        target_bases: Optional[list[str]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         table_id: Optional[list[str]] = None,
@@ -216,6 +223,7 @@ class LanceFragmentWriter:
         self.data_storage_version = data_storage_version
         self.storage_options = storage_options
         self.initial_bases = normalize_initial_bases(initial_bases)
+        self.target_bases = target_bases
         self.namespace_impl = namespace_impl
         self.namespace_properties = namespace_properties
         self.table_id = table_id
@@ -255,6 +263,7 @@ class LanceFragmentWriter:
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
             initial_bases=self.initial_bases,
+            target_bases=self.target_bases,
             namespace_impl=self.namespace_impl,
             namespace_properties=self.namespace_properties,
             table_id=self.table_id,

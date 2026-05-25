@@ -8,13 +8,13 @@ version = "0.4.2"
 description = "Ray integration for Lance"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = {file = "LICENSE"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "LanceDB Devs", email = "dev@lancedb.com" }]
 keywords = ["ray", "lance", "distributed", "columnar", "data"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

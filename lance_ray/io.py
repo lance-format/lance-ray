@@ -155,6 +155,7 @@ def write_lance(
     storage_options: Optional[dict[str, Any]] = None,
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     initial_bases: Optional[list[Any]] = None,
+    target_bases: Optional[list[str]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
@@ -210,6 +211,11 @@ def write_lance(
             dataset root.
         initial_bases: Lance DatasetBasePath objects to register when creating
             a new dataset.
+        target_bases: References to base paths where data should be written.
+            Each string is resolved by matching base name or base path URI
+            from registered bases.  In CREATE mode, references must match
+            bases in ``initial_bases``.  In APPEND/OVERWRITE modes,
+            references must match bases in the existing manifest.
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
             Used together with namespace_properties and table_id.
         namespace_properties: Properties for connecting to the namespace.
@@ -236,6 +242,7 @@ def write_lance(
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=initial_bases,
+            target_bases=target_bases,
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
         )
@@ -324,6 +331,7 @@ def write_lance(
             data_storage_version=data_storage_version,
             storage_options=storage_options,
             initial_bases=fragment_initial_bases,
+            target_bases=target_bases,
             namespace_impl=None,
             namespace_properties=None,
             table_id=None,

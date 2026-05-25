@@ -62,6 +62,7 @@ class _BaseLanceDatasink(Datasink):
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
+        target_bases: Optional[list[str]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         **kwargs: Any,
@@ -125,6 +126,7 @@ class _BaseLanceDatasink(Datasink):
         self.storage_options = merged_storage_options
         self.base_store_params = base_store_params
         self.initial_bases = normalize_initial_bases(initial_bases)
+        self.target_bases = target_bases
 
     @property
     def namespace_kwargs(self) -> dict[str, Any]:
@@ -274,6 +276,7 @@ class LanceDatasink(_BaseLanceDatasink):
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
+        target_bases: Optional[list[str]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         **kwargs: Any,
@@ -287,6 +290,7 @@ class LanceDatasink(_BaseLanceDatasink):
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=initial_bases,
+            target_bases=target_bases,
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
             **kwargs,
@@ -336,6 +340,7 @@ class LanceDatasink(_BaseLanceDatasink):
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
             initial_bases=self.initial_bases if self.mode == "create" else None,
+            target_bases=self.target_bases,
             namespace_impl=self._namespace_impl,
             namespace_properties=self._namespace_properties,
             table_id=self.table_id,
