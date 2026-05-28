@@ -44,15 +44,21 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.LANCE_RELEASE_TOKEN }}
+          LATEST_PYPI_VERSION: ${{ steps.check.outputs.latest_pypi_version }}
+          UPDATE_BRANCH: ${{ steps.check.outputs.update_branch_name }}
         run: |
           set -euo pipefail
-          TITLE="chore: update pylance dependency to v${{ steps.check.outputs.latest_version }}"
-          COUNT=$(gh pr list --search "\"$TITLE\" in:title" --state open --limit 1 --json number --jq 'length')
-          if [ "$COUNT" -gt 0 ]; then
-            echo "Open PR already exists for $TITLE"
+          TITLE="chore: update pylance dependency to v${LATEST_PYPI_VERSION}"
+          # Match by branch head (deterministic) OR by title (PEP 440 format,
+          # produced by codex-update-pylance-dependency.yml). Search both open
+          # and closed states so we don't reopen a manually-closed duplicate.
+          BRANCH_COUNT=$(gh pr list --head "$UPDATE_BRANCH" --state all --limit 1 --json number --jq 'length')
+          TITLE_COUNT=$(gh pr list --search "\"$TITLE\" in:title" --state all --limit 1 --json number --jq 'length')
+          if [ "$BRANCH_COUNT" -gt 0 ] || [ "$TITLE_COUNT" -gt 0 ]; then
+            echo "Existing PR found for branch=$UPDATE_BRANCH or title=$TITLE"
             echo "pr_exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No existing PR for $TITLE"
+            echo "No existing PR for branch=$UPDATE_BRANCH or title=$TITLE"
             echo "pr_exists=false" >> "$GITHUB_OUTPUT"
           fi
 

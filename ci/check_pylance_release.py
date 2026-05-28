@@ -30,6 +30,9 @@ PYPI_PRERELEASE_RE = re.compile(r"^(?P<base>\d+\.\d+\.\d+)(?P<pre>a|b|rc)(?P<num
 
 PYLANCE_DEP_RE = re.compile(r"^pylance[><=!~]+(.+)$")
 
+PYPI_TO_SEMVER_PRE = {"a": "alpha", "b": "beta", "rc": "rc"}
+SEMVER_TO_PYPI_PRE = {v: k for k, v in PYPI_TO_SEMVER_PRE.items()}
+
 
 def pypi_to_semver(version: str) -> str:
     """Convert PyPI version format to semver format.
@@ -46,8 +49,41 @@ def pypi_to_semver(version: str) -> str:
     base = match.group("base")
     pre = match.group("pre")
     num = match.group("num")
-    pre_map = {"a": "alpha", "b": "beta", "rc": "rc"}
-    return f"{base}-{pre_map[pre]}.{num}"
+    return f"{base}-{PYPI_TO_SEMVER_PRE[pre]}.{num}"
+
+
+def semver_to_pypi(version: str) -> str:
+    """Convert semver format to PyPI (PEP 440) version format.
+
+    Examples:
+        2.0.0-beta.8  -> 2.0.0b8
+        2.0.0-alpha.1 -> 2.0.0a1
+        2.0.0-rc.1    -> 2.0.0rc1
+        2.0.0         -> 2.0.0
+    """
+    match = SEMVER_RE.match(version.strip())
+    if not match:
+        return version
+    base = f"{match.group('major')}.{match.group('minor')}.{match.group('patch')}"
+    prerelease = match.group("prerelease")
+    if not prerelease:
+        return base
+    parts = prerelease.split(".")
+    if len(parts) == 2 and parts[0] in SEMVER_TO_PYPI_PRE and parts[1].isdigit():
+        return f"{base}{SEMVER_TO_PYPI_PRE[parts[0]]}{parts[1]}"
+    return version
+
+
+def update_branch_name(dependency_name: str, version: str) -> str:
+    """Return the deterministic codex branch name for a dependency update.
+
+    The codex update workflow creates branches named
+    ``codex/update-<dependency>-<sanitized version>`` so the timer workflow
+    must compute the same value when checking for an existing PR.
+    """
+    sanitized_dependency = re.sub(r"[^a-zA-Z0-9]", "-", dependency_name)
+    sanitized_version = re.sub(r"[^a-zA-Z0-9]", "-", version)
+    return f"codex/update-{sanitized_dependency}-{sanitized_version}"
 
 
 @dataclass(frozen=True)
@@ -220,11 +256,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     latest = determine_latest_tag(tags)
     needs_update = latest.semver > current_semver
 
+    latest_pypi_version = semver_to_pypi(latest.version)
     payload = {
         "current_version": current_version,
         "current_tag": f"v{current_version}",
         "latest_version": latest.version,
         "latest_tag": latest.tag,
+        "latest_pypi_version": latest_pypi_version,
+        "update_branch_name": update_branch_name("pylance", latest.version),
         "needs_update": "true" if needs_update else "false",
     }
 
