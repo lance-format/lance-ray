@@ -184,6 +184,63 @@ def optimize_indices(
 
 The function returns the Lance dataset instance (optimization is applied on storage).
 
+### Distributed Vector Search
+
+`vector_search()` - Run vector search with Ray workers and merge the global top-k on the driver.
+
+The driver opens one fixed dataset version, reads vector index segment metadata once, and plans work by index segment ownership.  Indexed worker tasks receive only their assigned `index_segments`, so a segment covering multiple fragments is never split across workers.  Fragments not covered by an index can be included as separate flat-search fallback work unless `fast_search=True`; fallback tasks use regular fragment scans and compute vector distances in Lance-Ray.
+
+#### `vector_search`
+
+```python
+def vector_search(
+    uri: Optional[Union[str, "lance.LanceDataset"]] = None,
+    *,
+    nearest: dict[str, Any],
+    index_name: Optional[str] = None,
+    columns: Optional[Union[list[str], dict[str, str]]] = None,
+    filter: Optional[Any] = None,
+    storage_options: Optional[dict[str, Any]] = None,
+    block_size: Optional[int] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
+    num_workers: int = 4,
+    ray_remote_args: Optional[dict[str, Any]] = None,
+    oversample_factor: float = 1.0,
+    include_unindexed: bool = True,
+    fast_search: bool = False,
+    analyze_plan: bool = False,
+    scanner_options: Optional[dict[str, Any]] = None,
+) -> Union[pyarrow.Table, str]:
+```
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `uri` | `str` or `lance.LanceDataset`, optional | Lance dataset object, or its URI. Either `uri` OR (`namespace_impl` + `table_id`) must be provided when using URI mode. If a `LanceDataset` object is provided, namespace parameters are ignored and workers reopen the same dataset URI/version. |
+| `nearest` | `dict[str, Any]` | Lance vector search options. Must include `column`, `q`, and `k`. Other Lance nearest options such as `minimum_nprobes`, `maximum_nprobes`, `refine_factor`, and distance range are forwarded to every worker. Lance-Ray raises worker-side `k` to at least `k * oversample_factor` before global merge. |
+| `index_name` | `str`, optional | Vector index name to use. If provided and not found, `vector_search()` raises `ValueError` instead of silently falling back. If omitted, Lance-Ray uses the first vector index covering `nearest["column"]`; if none exists, the search uses flat fallback plans unless `fast_search=True`. |
+| `columns` | `list[str]` or `dict[str, str]`, optional | Projection passed to the Lance scanner. When a list is provided and `_distance` is missing, Lance-Ray appends `_distance` automatically because the driver needs it for global top-k merge. |
+| `filter` | `Any`, optional | Filter passed unchanged to every worker scanner. |
+| `storage_options` | `Dict[str, Any]`, optional | Storage options for the dataset. These are merged with namespace storage options when available. |
+| `block_size` | `int`, optional | Block size in bytes to use when loading the dataset on the driver and workers. |
+| `namespace_impl` | `str`, optional | Namespace implementation type, such as `"dir"` or `"rest"`. |
+| `namespace_properties` | `Dict[str, str]`, optional | Namespace connection properties used with `namespace_impl`. |
+| `table_id` | `list[str]`, optional | Table identifier used with namespace parameters. Must be provided together with `namespace_impl` in namespace mode. |
+| `num_workers` | `int`, optional | Maximum number of Ray Pool workers to use. Lance-Ray may create fewer worker tasks when there are fewer search plans. |
+| `ray_remote_args` | `Dict[str, Any]`, optional | Ray task options for Pool workers, such as `num_cpus` or custom resources. |
+| `oversample_factor` | `float`, optional | Multiplier for local worker candidates. Each worker returns at least `nearest["k"] * oversample_factor` rows before driver-side merge. Must be greater than or equal to 1. |
+| `include_unindexed` | `bool`, optional | Include fragments not covered by vector index segments using separate flat-search fallback plans. Fallback plans use regular fragment scans and compute vector distance in Lance-Ray. Ignored when `fast_search=True`. |
+| `fast_search` | `bool`, optional | Search only indexed data. When enabled, Lance-Ray does not schedule flat-search fallback plans for fragments not covered by vector index segments. |
+| `analyze_plan` | `bool`, optional | If `True`, call `LanceScanner.analyze_plan()` for each planned shard and return a string containing the per-shard analysis instead of executing search and returning a table. |
+| `scanner_options` | `Dict[str, Any]`, optional | Extra Lance scanner options, such as `batch_size`, `prefilter`, `with_row_id`, or `late_materialization`. Lance-Ray manages `nearest`, `fragments`, `index_segments`, `fast_search`, `limit`, and `offset` internally, so those options cannot be supplied here. |
+
+#### Return Value
+
+The function returns a `pyarrow.Table` containing the global top-k rows sorted by `_distance`. If `analyze_plan=True`, it returns a `str` containing one Lance scanner analysis section per planned shard.
+
 ## Examples
 
 ### FTS Index (Scalar)
@@ -269,6 +326,31 @@ updated_dataset = lr.create_index(
     num_workers=4,
     num_partitions=256,
 )
+
+# Run distributed vector search against index-owned shards.
+results = lr.vector_search(
+    uri="path/to/dataset.lance",
+    nearest={
+        "column": "vector",
+        "q": query_vector,
+        "k": 10,
+        "minimum_nprobes": 20,
+    },
+    index_name="idx_ivf_flat",
+    columns=["id", "vector"],
+    num_workers=8,
+    oversample_factor=2,
+    fast_search=False,
+)
+
+# Inspect the per-shard Lance scanner plans instead of executing the search.
+plan = lr.vector_search(
+    uri="path/to/dataset.lance",
+    nearest={"column": "vector", "q": query_vector, "k": 10},
+    index_name="idx_ivf_flat",
+    analyze_plan=True,
+)
+print(plan)
 ```
 
 ### Custom Ray Options

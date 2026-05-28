@@ -23,10 +23,12 @@ from .io import (
     read_lance,
     write_lance,
 )
+from .search import vector_search
 
 __all__ = [
     "read_lance",
     "write_lance",
+    "vector_search",
     "add_columns",
     "add_columns_from",
     "merge_columns_from",
