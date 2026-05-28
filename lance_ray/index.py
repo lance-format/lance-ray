@@ -187,7 +187,7 @@ def _put_vector_index_artifacts_in_object_store(
 def _handle_fragment_index(
     dataset_uri: str,
     column: str,
-    index_type: str,
+    index_type: str | IndexConfig,
     name: str,
     index_uuid: str,
     replace: bool,
@@ -576,7 +576,10 @@ def create_scalar_index(
     )
 
     logger.info("Phase 2: Merging index metadata for index ID: %s", index_id)
-    merge_index_metadata_compat(dataset, index_id, index_type=index_type, **kwargs)
+    # Convert IndexConfig to string for merge_index_metadata which expects a string
+    # (lance's create_scalar_index converts IndexConfig to "scalar" internally)
+    index_type_str = "scalar" if isinstance(index_type, IndexConfig) else index_type
+    merge_index_metadata_compat(dataset, index_id, index_type=index_type_str, **kwargs)
 
     logger.info("Phase 3: Creating and committing scalar index '%s'", name)
 
