@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 import pyarrow as pa
 import pyarrow.compute as pc
 from lance.dataset import LanceDataset
-from ray.util.multiprocessing import Pool
 
+from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -679,14 +679,14 @@ def vector_search(
             analyze_plan=analyze_plan,
         )
 
-    pool = Pool(processes=min(num_workers, len(plans)), ray_remote_args=ray_remote_args)
     try:
-        results = pool.map_async(run_plan, plans, chunksize=1).get()
+        with get_or_create_pool(
+            processes=min(num_workers, len(plans)),
+            ray_remote_args=ray_remote_args,
+        ) as pool:
+            results = pool.map_async(run_plan, plans, chunksize=1).get()
     except Exception as exc:  # pragma: no cover - exercised via integration tests
         raise RuntimeError(f"Failed to complete distributed vector search: {exc}") from exc
-    finally:
-        pool.close()
-        pool.join()
 
     if analyze_plan:
         return _format_analyze_plan_results(results)

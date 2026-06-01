@@ -23,12 +23,17 @@ from .io import (
     read_lance,
     write_lance,
 )
+from .pool import clear_global_pool, get_global_pool, init_global_pool, set_global_pool
 from .search import vector_search
 
 __all__ = [
     "read_lance",
     "write_lance",
     "vector_search",
+    "init_global_pool",
+    "set_global_pool",
+    "get_global_pool",
+    "clear_global_pool",
     "add_columns",
     "add_columns_from",
     "merge_columns_from",

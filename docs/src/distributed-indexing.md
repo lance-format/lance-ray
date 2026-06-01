@@ -365,6 +365,38 @@ updated_dataset = lr.create_scalar_index(
 )
 ```
 
+### Reusing a Ray Pool
+
+Creating a Ray Pool can be expensive if you repeatedly run distributed vector searches in the same process.  You can explicitly initialize a process-wide Pool with `init_global_pool()`.  After that, Lance-Ray will reuse this global Pool for `vector_search()` calls instead of creating a new local Pool each time.
+
+Use this when the same driver process will call `vector_search()` multiple times in a serial workflow:
+
+```python
+import lance_ray as lr
+
+lr.init_global_pool(
+    processes=16,
+    ray_remote_args={"num_cpus": 2},
+)
+
+try:
+    results = lr.vector_search(
+        uri="path/to/dataset.lance",
+        nearest={"column": "vector", "q": query_vector, "k": 10},
+        num_workers=16,
+    )
+finally:
+    lr.clear_global_pool(close=True)
+```
+
+`init_global_pool()` is idempotent while a global Pool exists: later calls return the existing Pool instead of replacing it.  If a global Pool exists, `vector_search()` reuses it and does not close it after the operation.  In that case, the Pool's original `processes` and `ray_remote_args` control the workers; per-call `num_workers` and `ray_remote_args` are only used when Lance-Ray has to create a local Pool for that call.  Lance-Ray logs a warning when it can determine that the requested worker count differs from the configured global Pool size.
+
+Call `clear_global_pool(close=True)` when the driver is done with the shared Pool.  If you manage the Pool lifecycle yourself, use `set_global_pool(pool)` to register it and `clear_global_pool(close=False)` to clear Lance-Ray's reference without closing the Pool.
+
+The global Pool registry is protected for basic set/get/clear operations, but the intended usage is still a single driver process that reuses the Pool serially across operations.  Avoid concurrently mutating the global Pool while other threads are running Lance-Ray operations.
+
+The current global Pool integration is limited to `vector_search()`.  The same pattern can be applied to I/O, index building, and compaction in follow-up changes.
+
 ### Index Replacement Control
 
 ```python

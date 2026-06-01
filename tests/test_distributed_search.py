@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pyarrow as pa
 import pytest
+from lance_ray import pool as pool_mod
+from lance_ray import search as search_mod
 from lance_ray.search import (
     _execute_vector_search_plan,
     _format_analyze_plan_results,
@@ -378,3 +380,63 @@ def test_search_scanner_options_reject_managed_options():
 def test_search_scanner_options_reject_fast_search_override():
     with pytest.raises(ValueError, match="fast_search"):
         _validate_search_scanner_options({"fast_search": True})
+
+
+def test_vector_search_reuses_global_pool(monkeypatch):
+    events = []
+
+    class FakeAsyncResult:
+        def get(self):
+            events.append("get")
+            return [pa.table({"id": [1], "_distance": [0.1]})]
+
+    class FakeGlobalPool:
+        def map_async(self, func, plans, chunksize):
+            events.append(("map_async", plans, chunksize))
+            return FakeAsyncResult()
+
+        def close(self):
+            events.append("close")
+
+        def join(self):
+            events.append("join")
+
+    class FakeSchema:
+        def field(self, column):
+            return column
+
+    class FakeDataset:
+        uri = "dataset"
+        version = 1
+        schema = FakeSchema()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_fragments(self):
+            return [_FakeFragment(1)]
+
+    plan = _SearchPlan(fragment_ids=[1], index_segments=["S1"])
+    monkeypatch.setattr(search_mod, "LanceDataset", FakeDataset)
+    monkeypatch.setattr(
+        search_mod,
+        "_select_vector_index",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(search_mod, "_plan_vector_search", lambda **kwargs: [plan])
+
+    pool_mod.set_global_pool(FakeGlobalPool())
+    try:
+        result = search_mod.vector_search(
+            uri="dataset",
+            nearest={"column": "vector", "q": [0.0], "k": 1},
+            num_workers=4,
+        )
+    finally:
+        pool_mod.clear_global_pool()
+
+    assert result.column("id").to_pylist() == [1]
+    assert events == [
+        ("map_async", [plan], 1),
+        "get",
+    ]
