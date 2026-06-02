@@ -24,6 +24,11 @@ import pytest
 import ray
 from ray.exceptions import RayTaskError
 
+from _utils import (
+    fragment_write_options_skip_reason,
+    missing_fragment_write_options,
+)
+
 # Prefer the local Lance Python package when running in a monorepo layout
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "lance" / "python" / "python")
@@ -99,6 +104,36 @@ def _initial_bases(external_base: Path) -> list[DatasetBasePath]:
             id=1,
         )
     ]
+
+
+def _build_external_only_blob_v2_table(
+    tmp_path: Path,
+    filename: str,
+    payload: bytes = b"hello",
+) -> tuple[pa.Table, bytes, Path]:
+    blob_path = tmp_path / filename
+    blob_path.write_bytes(payload)
+
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            blob_field("blob"),
+        ]
+    )
+
+    sig = inspect.signature(Blob.from_uri)
+    blob_kwargs: dict[str, object] = {}
+    if "position" in sig.parameters and "size" in sig.parameters:
+        blob_kwargs = {"position": 0, "size": len(payload)}
+
+    table = pa.table(
+        {
+            "id": [1],
+            "blob": blob_array([Blob.from_uri(blob_path.as_uri(), **blob_kwargs)]),
+        },
+        schema=schema,
+    )
+    return table, payload, blob_path
 
 
 def test_blob_v2_roundtrip_with_projection_and_filter(tmp_path: Path) -> None:
@@ -196,9 +231,130 @@ def test_blob_v2_take_blobs_ids_and_indices(tmp_path: Path) -> None:
     assert values_by_ids == expected
 
 
+@pytest.mark.skipif(
+    bool(
+        missing_fragment_write_options(
+            "external_blob_mode",
+            "allow_external_blob_outside_bases",
+        )
+    ),
+    reason=fragment_write_options_skip_reason(
+        "external_blob_mode",
+        "allow_external_blob_outside_bases",
+    ),
+)
+def test_blob_v2_reference_outside_bases_write_lance(tmp_path: Path) -> None:
+    """write_lance can opt into absolute external blob references."""
+    table, payload, _ = _build_external_only_blob_v2_table(
+        tmp_path,
+        "external_reference.bin",
+    )
+    path = tmp_path / "blob_v2_external_reference.lance"
+
+    lr.write_lance(
+        ray.data.from_arrow(table),
+        str(path),
+        schema=table.schema,
+        data_storage_version="2.2",
+        external_blob_mode="reference",
+        allow_external_blob_outside_bases=True,
+    )
+
+    df = lr.read_lance(str(path)).to_pandas().sort_values("id").reset_index(drop=True)
+    assert df["blob"].tolist() == [payload]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.skipif(
+    bool(
+        missing_fragment_write_options(
+            "external_blob_mode",
+            "allow_external_blob_outside_bases",
+        )
+    ),
+    reason=fragment_write_options_skip_reason(
+        "external_blob_mode",
+        "allow_external_blob_outside_bases",
+    ),
+)
+def test_blob_v2_external_blob_ingest_write_lance(
+    tmp_path: Path,
+    stream: bool,
+) -> None:
+    """write_lance can ingest external blobs into Lance-managed storage."""
+    table, payload, blob_path = _build_external_only_blob_v2_table(
+        tmp_path,
+        f"external_ingest_{stream}.bin",
+    )
+    path = tmp_path / f"blob_v2_external_ingest_{stream}.lance"
+
+    stream_kwargs = {"stream": stream}
+    if stream:
+        stream_kwargs["batch_size"] = 1
+
+    lr.write_lance(
+        ray.data.from_arrow(table),
+        str(path),
+        schema=table.schema,
+        data_storage_version="2.2",
+        external_blob_mode="ingest",
+        **stream_kwargs,
+    )
+
+    blob_path.unlink()
+
+    df = lr.read_lance(str(path)).to_pandas().sort_values("id").reset_index(drop=True)
+    assert df["blob"].tolist() == [payload]
+
+
+@pytest.mark.skipif(
+    bool(
+        missing_fragment_write_options(
+            "external_blob_mode",
+            "allow_external_blob_outside_bases",
+        )
+    ),
+    reason=fragment_write_options_skip_reason(
+        "external_blob_mode",
+        "allow_external_blob_outside_bases",
+    ),
+)
+def test_blob_v2_reference_outside_bases_manual_fragment_writer(
+    tmp_path: Path,
+) -> None:
+    """Manual fragment writes can opt into base-outside external references."""
+    table, payload, _ = _build_external_only_blob_v2_table(
+        tmp_path,
+        "manual_external_reference.bin",
+    )
+    path = tmp_path / "blob_v2_manual_external_reference.lance"
+
+    (
+        ray.data.from_arrow(table)
+        .map_batches(
+            LanceFragmentWriter(
+                str(path),
+                schema=table.schema,
+                data_storage_version="2.2",
+                external_blob_mode="reference",
+                allow_external_blob_outside_bases=True,
+            ),
+            batch_size=1,
+            batch_format="pyarrow",
+        )
+        .write_datasink(LanceFragmentCommitter(str(path)))
+    )
+
+    df = lr.read_lance(str(path)).to_pandas().sort_values("id").reset_index(drop=True)
+    assert df["blob"].tolist() == [payload]
+
+
+@pytest.mark.skipif(
+    bool(missing_fragment_write_options("base_store_params")),
+    reason=fragment_write_options_skip_reason("base_store_params"),
+)
 def test_blob_v2_reference_multi_base_all_lance_ray_paths(tmp_path: Path) -> None:
     """Read/write BlobV2 references through all Lance-Ray base-store paths."""
-
     table, inline_payload, external_payload, external_base, _ = _build_blob_v2_table(
         tmp_path
     )
@@ -344,6 +500,10 @@ def _multi_initial_bases(base_a: Path, base_b: Path) -> list[DatasetBasePath]:
     ]
 
 
+@pytest.mark.skipif(
+    bool(missing_fragment_write_options("base_store_params", "target_bases")),
+    reason=fragment_write_options_skip_reason("base_store_params", "target_bases"),
+)
 def test_blob_v2_create_with_initial_bases_and_target_bases(tmp_path: Path) -> None:
     """Create can route initial fragment data to a named base path."""
     table, inline_payload, packed_payload, base_a, base_b = (
@@ -389,6 +549,10 @@ def test_blob_v2_create_with_initial_bases_and_target_bases(tmp_path: Path) -> N
     assert df["blob"].tolist() == [inline_payload, packed_payload]
 
 
+@pytest.mark.skipif(
+    bool(missing_fragment_write_options("base_store_params", "target_bases")),
+    reason=fragment_write_options_skip_reason("base_store_params", "target_bases"),
+)
 def test_blob_v2_target_bases_multi_base_routing(tmp_path: Path) -> None:
     """target_bases can route data across multiple base paths.
 
@@ -499,6 +663,10 @@ def test_blob_v2_target_bases_multi_base_routing(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.skipif(
+    bool(missing_fragment_write_options("base_store_params", "target_bases")),
+    reason=fragment_write_options_skip_reason("base_store_params", "target_bases"),
+)
 def test_blob_v2_append_with_target_bases_stream(tmp_path: Path) -> None:
     """Streaming append with target_bases should route data to the named base.
 

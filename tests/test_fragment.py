@@ -1,13 +1,184 @@
 """Test cases for lance_ray.fragment module."""
 
+import warnings
 from pathlib import Path
 
 import lance
+import lance_ray.io as lr
 import pyarrow as pa
 import pytest
 import ray
-from lance_ray.datasink import LanceFragmentCommitter
+from lance_ray.datasink import LanceDatasink, LanceFragmentCommitter
 from lance_ray.fragment import LanceFragmentWriter
+
+
+def _legacy_write_fragments(reader, uri, *, schema=None):
+    return []
+
+
+def _write_fragments_with_external_blob_options(
+    reader,
+    uri,
+    *,
+    external_blob_mode="reference",
+    allow_external_blob_outside_bases=False,
+):
+    return []
+
+
+def test_fragment_writer_external_blob_options_fail_fast(monkeypatch, tmp_path: Path):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+
+    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
+        LanceFragmentWriter(
+            str(tmp_path),
+            data_storage_version="stable",
+            external_blob_mode="ingest",
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="allow_external_blob_outside_bases.*write_fragments",
+    ):
+        LanceFragmentWriter(
+            str(tmp_path),
+            data_storage_version="stable",
+            allow_external_blob_outside_bases=True,
+        )
+
+
+def test_datasink_external_blob_options_fail_fast(monkeypatch, tmp_path: Path):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+
+    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
+        LanceDatasink(str(tmp_path), external_blob_mode="ingest")
+
+
+def test_write_lance_external_blob_options_fail_fast(monkeypatch, tmp_path: Path):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+
+    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
+        lr.write_lance(object(), str(tmp_path), external_blob_mode="ingest")
+
+
+def test_base_store_params_fail_fast_when_fragment_api_unsupported(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+    base_store_params = {tmp_path.as_uri(): {}}
+
+    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
+        LanceFragmentWriter(
+            str(tmp_path),
+            data_storage_version="stable",
+            base_store_params=base_store_params,
+        )
+
+    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
+        LanceDatasink(str(tmp_path), base_store_params=base_store_params)
+
+    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
+        lr.write_lance(object(), str(tmp_path), base_store_params=base_store_params)
+
+
+def test_target_bases_fail_fast_when_fragment_api_unsupported(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+    target_bases = ["archive"]
+
+    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
+        LanceFragmentWriter(
+            str(tmp_path),
+            data_storage_version="stable",
+            target_bases=target_bases,
+        )
+
+    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
+        LanceDatasink(str(tmp_path), target_bases=target_bases)
+
+    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
+        lr.write_lance(object(), str(tmp_path), target_bases=target_bases)
+
+
+def test_allow_external_blob_outside_bases_ignored_for_ingest(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _write_fragments_with_external_blob_options,
+    )
+
+    with pytest.warns(UserWarning, match="will be ignored"):
+        writer = LanceFragmentWriter(
+            str(tmp_path),
+            data_storage_version="stable",
+            external_blob_mode="ingest",
+            allow_external_blob_outside_bases=True,
+        )
+
+    assert writer.allow_external_blob_outside_bases is False
+
+
+def test_unsupported_ingest_with_allow_external_blob_outside_bases_does_not_warn(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import lance.fragment as lance_fragment
+
+    monkeypatch.setattr(
+        lance_fragment,
+        "write_fragments",
+        _legacy_write_fragments,
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
+            LanceFragmentWriter(
+                str(tmp_path),
+                data_storage_version="stable",
+                external_blob_mode="ingest",
+                allow_external_blob_outside_bases=True,
+            )
+
+    assert not any("will be ignored" in str(warning.message) for warning in caught)
 
 
 class TestLanceFragmentWriterCommitter:

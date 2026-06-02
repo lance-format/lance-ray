@@ -40,7 +40,8 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type d -name .pytest_cache -exec rm -rf {} +
 	find . -type d -name .ruff_cache -exec rm -rf {} +
-	rm -f .coverage
+	rm -f .coverage .coverage.* coverage.xml
+	find . -type d -name htmlcov -exec rm -rf {} +
 
 .PHONY: test
 test: lock

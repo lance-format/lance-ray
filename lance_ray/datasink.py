@@ -14,7 +14,7 @@ from ray.data import DataContext
 from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink
 
-from .fragment import write_fragment
+from .fragment import prepare_fragment_write_options, write_fragment
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -233,6 +233,9 @@ class LanceDatasink(_BaseLanceDatasink):
 
     Args:
         uri : the base URI of the dataset.
+        table_id : List[str], optional
+            The table identifier as a list of strings.
+            Used together with namespace_impl and namespace_properties.
         schema : pyarrow.Schema, optional.
             The schema of the dataset.
         mode : str, optional
@@ -249,6 +252,22 @@ class LanceDatasink(_BaseLanceDatasink):
             for more details.
         storage_options : Dict[str, Any], optional
             The storage options for the writer. Default is None.
+        base_store_params : dict, optional
+            Runtime-only storage options keyed by registered base path URI.
+            Used for BlobV2 references that live outside the dataset root.
+        initial_bases : list, optional
+            Lance DatasetBasePath objects to register when creating a new dataset.
+        target_bases : list of str, optional
+            References to base paths where data should be written. Each string
+            is resolved by matching base name or base path URI from registered
+            bases.
+        external_blob_mode : {"reference", "ingest"}, default "reference"
+            How external blob URIs are handled on write. ``"reference"`` stores
+            external blob references, while ``"ingest"`` reads external bytes
+            and writes them into Lance-managed storage.
+        allow_external_blob_outside_bases : bool, default False
+            Whether external blob references outside registered bases are allowed.
+            Only applies when ``external_blob_mode="reference"``.
         namespace_impl : str, optional
             The namespace implementation type (e.g., "rest", "dir").
             Used together with namespace_properties and table_id for credentials
@@ -277,10 +296,20 @@ class LanceDatasink(_BaseLanceDatasink):
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
         target_bases: Optional[list[str]] = None,
+        external_blob_mode: Literal["reference", "ingest"] = "reference",
+        allow_external_blob_outside_bases: bool = False,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         **kwargs: Any,
     ):
+        allow_external_blob_outside_bases = prepare_fragment_write_options(
+            target_bases=target_bases,
+            base_store_params=base_store_params,
+            external_blob_mode=external_blob_mode,
+            allow_external_blob_outside_bases=allow_external_blob_outside_bases,
+            stacklevel=2,
+        )
+
         super().__init__(
             uri,
             table_id,
@@ -307,6 +336,8 @@ class LanceDatasink(_BaseLanceDatasink):
         self.min_rows_per_file = min_rows_per_file
         self.max_rows_per_file = max_rows_per_file
         self.data_storage_version = data_storage_version
+        self.external_blob_mode = external_blob_mode
+        self.allow_external_blob_outside_bases = allow_external_blob_outside_bases
         # if mode is append, read_version is read from existing dataset.
         self.read_version: Optional[int] = None
 
@@ -339,8 +370,11 @@ class LanceDatasink(_BaseLanceDatasink):
             max_rows_per_file=self.max_rows_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
+            base_store_params=self.base_store_params,
             initial_bases=self.initial_bases if self.mode == "create" else None,
             target_bases=self.target_bases,
+            external_blob_mode=self.external_blob_mode,
+            allow_external_blob_outside_bases=self.allow_external_blob_outside_bases,
             namespace_impl=self._namespace_impl,
             namespace_properties=self._namespace_properties,
             table_id=self.table_id,
