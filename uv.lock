@@ -358,6 +358,8 @@ source = { editable = "." }
 dependencies = [
     { name = "lance-namespace" },
     { name = "more-itertools", marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "packaging" },
     { name = "pyarrow" },
     { name = "pylance" },
@@ -385,6 +387,7 @@ requires-dist = [
     { name = "mkdocs-awesome-pages-plugin", marker = "extra == 'docs'", specifier = ">=2.9.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
+    { name = "numpy", specifier = ">=1.24" },
     { name = "packaging" },
     { name = "pyarrow", specifier = ">=17.0.0" },
     { name = "pylance", specifier = ">=7.0.0b7" },
