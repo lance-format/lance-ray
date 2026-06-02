@@ -3,6 +3,8 @@
 
 import logging
 import math
+import pickle
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import pyarrow as pa
@@ -230,29 +232,21 @@ def _pack_search_plan_units(
     return plans
 
 
+@lru_cache(maxsize=16)
+def _load_pickled_dataset(pickled_dataset: bytes) -> LanceDataset:
+    return pickle.loads(pickled_dataset)
+
+
 def _execute_vector_search_plan(
     plan: _SearchPlan,
     *,
-    dataset_uri: str,
-    dataset_version: int,
-    storage_options: Optional[dict[str, Any]],
-    block_size: Optional[int],
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
+    pickled_dataset: bytes,
     base_scanner_options: dict[str, Any],
     nearest: dict[str, Any],
     candidate_k: int,
     analyze_plan: bool,
 ) -> pa.Table | _SearchPlanAnalysis:
-    namespace_kwargs = get_namespace_kwargs(
-        namespace_impl, namespace_properties, table_id
-    )
-    dataset = LanceDataset(
-        dataset_uri,
-        version=dataset_version,
-        **_dataset_load_kwargs(storage_options, namespace_kwargs, block_size),
-    )
+    dataset = _load_pickled_dataset(pickled_dataset)
 
     if not plan.index_segments:
         return _execute_flat_fallback_vector_search_plan(
@@ -613,22 +607,14 @@ def vector_search(
         namespace_kwargs = get_namespace_kwargs(
             namespace_impl, namespace_properties, table_id
         )
-        worker_namespace_impl = namespace_impl
-        worker_namespace_properties = namespace_properties
-        worker_table_id = table_id
         dataset = LanceDataset(
             dataset_uri,
             **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
         )
     else:
         dataset = uri
-        dataset_uri = dataset.uri
         if not merged_storage_options:
             merged_storage_options.update(_get_dataset_storage_options(dataset))
-        namespace_kwargs = {}
-        worker_namespace_impl = None
-        worker_namespace_properties = None
-        worker_table_id = None
 
     try:
         dataset.schema.field(column)
@@ -638,7 +624,6 @@ def vector_search(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from exc
 
-    dataset_version = dataset.version
     fragments = dataset.get_fragments()
     if not fragments:
         return pa.table({})
@@ -663,16 +648,12 @@ def vector_search(
     if not plans:
         return pa.table({})
 
-    def run_plan(plan: _SearchPlan) -> pa.Table:
+    pickled_dataset = pickle.dumps(dataset)
+
+    def run_plan(plan: _SearchPlan) -> pa.Table | _SearchPlanAnalysis:
         return _execute_vector_search_plan(
             plan,
-            dataset_uri=dataset_uri,
-            dataset_version=dataset_version,
-            storage_options=merged_storage_options,
-            block_size=block_size,
-            namespace_impl=worker_namespace_impl,
-            namespace_properties=worker_namespace_properties,
-            table_id=worker_table_id,
+            pickled_dataset=pickled_dataset,
             base_scanner_options=base_scanner_options,
             nearest=nearest,
             candidate_k=candidate_k,
