@@ -46,7 +46,9 @@ def set_global_pool(pool: Any | None) -> None:
     global _GLOBAL_POOL, _GLOBAL_POOL_PROCESSES
     with _GLOBAL_POOL_LOCK:
         _GLOBAL_POOL = pool
-        _GLOBAL_POOL_PROCESSES = _read_pool_processes(pool) if pool is not None else None
+        _GLOBAL_POOL_PROCESSES = (
+            _read_pool_processes(pool) if pool is not None else None
+        )
 
 
 def get_global_pool() -> Any | None:
