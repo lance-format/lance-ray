@@ -40,6 +40,7 @@ def write_fragment(
     uri: str,
     *,
     schema: Optional[pa.Schema] = None,
+    mode: Literal["create", "append", "overwrite"] = "append",
     max_rows_per_file: int = 64 * 1024 * 1024,
     max_bytes_per_file: Optional[int] = None,
     max_rows_per_group: int = 1024,  # Only useful for v1 writer.
@@ -55,6 +56,36 @@ def write_fragment(
     table_id: Optional[list[str]] = None,
     retry_params: Optional[dict[str, Any]] = None,
 ) -> list[tuple["FragmentMetadata", pa.Schema]]:
+    """Write a stream of blocks into one or more uncommitted Lance fragments.
+
+    The returned fragments are not yet part of any dataset version; callers
+    commit them via a ``LanceOperation`` (e.g. ``Append`` or ``Overwrite``).
+
+    Parameters
+    ----------
+    stream : iterable of pyarrow.Table or pandas.DataFrame
+        The blocks of data to write. An empty stream yields no fragments.
+    uri : str
+        The dataset URI the fragments are written for.
+    schema : pyarrow.Schema, optional
+        The schema of the data. If None, it is inferred from the first block.
+    mode : {"create", "append", "overwrite"}, default "append"
+        Fragment write mode passed to pylance. "append" validates fragments
+        against the existing dataset schema (rejecting columns not present in
+        it); "create" and "overwrite" assign new field ids for the incoming schema
+        (schema evolution). Note the high-level ``write_lance`` defaults to
+        "create", while this lower-level helper defaults to "append" to preserve
+        append-validation semantics for direct callers.
+
+    Returns
+    -------
+    list of (FragmentMetadata, pyarrow.Schema)
+        One entry per written fragment, paired with the schema to commit.
+
+    Notes
+    -----
+    The remaining parameters mirror :class:`LanceFragmentWriter`.
+    """
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
     from lance.fragment import DEFAULT_MAX_BYTES_PER_FILE, write_fragments
@@ -122,6 +153,7 @@ def write_fragment(
             reader,
             uri,
             schema=schema,
+            mode=mode,
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=max_rows_per_group,
             max_bytes_per_file=max_bytes_per_file,
@@ -280,6 +312,13 @@ class LanceFragmentWriter:
         The version of the data storage format to use. Newer versions are more
         efficient but require newer versions of lance to read.  The default
         (None) will use the 2.0 version.  See the user guide for more details.
+    mode : {"create", "append", "overwrite"}, default "append"
+        Fragment write mode passed to pylance. "append" validates fragments
+        against the existing dataset schema (rejecting columns not present in
+        it); "create" and "overwrite" assign new field ids for the incoming schema
+        (schema evolution). Note the high-level ``write_lance`` defaults to
+        "create"; this writer defaults to "append" to preserve append-validation
+        semantics for direct callers.
     use_legacy_format : optional, bool, default None
         Deprecated method for setting the data storage version. Use the
         `data_storage_version` parameter instead.
@@ -313,6 +352,15 @@ class LanceFragmentWriter:
         If provided, should contain keys like 'description', 'match',
         'max_attempts', and 'max_backoff_s'.
 
+    Notes
+    -----
+    When pairing this writer with :class:`LanceFragmentCommitter`, pass the
+    SAME ``mode`` to both: this writer assigns field ids (so "create"/
+    "overwrite" enable schema evolution), while the committer selects the
+    commit operation (append vs overwrite). Using the default ``mode="append"``
+    writer with a ``mode="overwrite"`` committer on an evolved schema raises a
+    schema-mismatch error rather than evolving the schema.
+
     """
 
     def __init__(
@@ -325,6 +373,7 @@ class LanceFragmentWriter:
         max_bytes_per_file: Optional[int] = None,
         max_rows_per_group: Optional[int] = None,  # Only useful for v1 writer.
         data_storage_version: Optional[str] = None,
+        mode: Literal["create", "append", "overwrite"] = "append",
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
@@ -363,6 +412,7 @@ class LanceFragmentWriter:
         self.max_rows_per_file = max_rows_per_file
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
+        self.mode = mode
         self.storage_options = storage_options
         self.base_store_params = base_store_params
         self.initial_bases = normalize_initial_bases(initial_bases)
@@ -402,6 +452,7 @@ class LanceFragmentWriter:
             transformed,
             self.uri,
             schema=self.schema,
+            mode=self.mode,
             max_rows_per_file=self.max_rows_per_file,
             max_rows_per_group=self.max_rows_per_group,
             max_bytes_per_file=self.max_bytes_per_file,

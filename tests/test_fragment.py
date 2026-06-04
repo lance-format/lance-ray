@@ -273,6 +273,33 @@ class TestLanceFragmentWriterCommitter:
         assert sorted(tbl["id"].to_pylist()) == list(range(10))
 
     @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    def test_fragment_writer_overwrite_mode_schema_change(self, tmp_path: Path):
+        """Writer+committer overwrite evolves the schema when the SAME mode is
+        passed to both (the matching mode is required; see class docs)."""
+        # Initial dataset with two columns.
+        (
+            ray.data.range(4)
+            .map(lambda x: {"id": x["id"], "value": x["id"] * 10})
+            .map_batches(LanceFragmentWriter(tmp_path))
+            .write_datasink(LanceFragmentCommitter(tmp_path, mode="create"))
+        )
+
+        # Overwrite with an added column, passing mode="overwrite" to BOTH the
+        # writer (assigns new field ids) and the committer (Overwrite op).
+        (
+            ray.data.range(4)
+            .map(lambda x: {"id": x["id"], "value": x["id"] * 10, "id_2": x["id"] * 2})
+            .map_batches(LanceFragmentWriter(tmp_path, mode="overwrite"))
+            .write_datasink(LanceFragmentCommitter(tmp_path, mode="overwrite"))
+        )
+
+        ds = lance.dataset(tmp_path)
+        assert ds.schema.names == ["id", "value", "id_2"]
+        tbl = ds.to_table().sort_by("id")
+        assert tbl["id"].to_pylist() == [0, 1, 2, 3]
+        assert tbl["id_2"].to_pylist() == [0, 2, 4, 6]
+
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
     def test_fragment_writer_empty_write(self, tmp_path: Path):
         """Test fragment writer with empty data."""
         schema = pa.schema([pa.field("id", pa.int64()), pa.field("str", pa.string())])
