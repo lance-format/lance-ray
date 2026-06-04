@@ -5,6 +5,7 @@ help:
 	@echo "Targets:"
 	@echo "  help   Show this help message"
 	@echo "  lint   Run linter and format checker (ruff check + ruff format --check)"
+	@echo "  typecheck Run mypy on the current typed baseline"
 	@echo "  fix    Auto-fix lint issues and format code (ruff check --fix + ruff format)"
 	@echo "  lock   Update uv.lock lockfile"
 	@echo "  build       Install the project with dev and docs dependencies"
@@ -16,6 +17,10 @@ help:
 lint: lock
 	uv run ruff check
 	uv run ruff format --check .
+
+.PHONY: typecheck
+typecheck: lock
+	uv run mypy
 
 .PHONY: fix
 fix: lock

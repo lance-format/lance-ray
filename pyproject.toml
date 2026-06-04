@@ -35,6 +35,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.10,<2",
+    "pandas-stubs",
+    "pathspec>=1.1.1",
+    "pyarrow-stubs",
     "pytest-asyncio>=1.0.0",
     "pytest-xdist>=3.6.0",
     "ruff>=0.8.0",
@@ -64,6 +68,16 @@ ignore = ["E501", "UP045"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+follow_imports = "skip"
+files = [
+    "lance_ray/pandas.py",
+    "lance_ray/pool.py",
+    "lance_ray/utils.py",
+]
 
 
 [tool.pytest.ini_options]

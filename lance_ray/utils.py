@@ -155,7 +155,7 @@ def validate_uri_or_namespace(
 def _get_cached_namespace(
     namespace_impl: str,
     namespace_properties_tuple: Optional[tuple[tuple[str, str], ...]],
-):
+) -> Any:
     """Internal cached namespace loader. Use get_or_create_namespace() instead."""
     import lance_namespace as ln
 
@@ -168,7 +168,7 @@ def _get_cached_namespace(
 def get_or_create_namespace(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
-):
+) -> Any | None:
     """Get or create a cached namespace client.
 
     This function loads a namespace client from cache or creates a new one.
@@ -197,7 +197,7 @@ def _create_storage_options_provider(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
-):
+) -> Any | None:
     """Create a LanceNamespaceStorageOptionsProvider (pylance 4.x only)."""
     if not has_namespace_params(namespace_impl, table_id):
         return None
