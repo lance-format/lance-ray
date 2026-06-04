@@ -56,6 +56,36 @@ def write_fragment(
     table_id: Optional[list[str]] = None,
     retry_params: Optional[dict[str, Any]] = None,
 ) -> list[tuple["FragmentMetadata", pa.Schema]]:
+    """Write a stream of blocks into one or more uncommitted Lance fragments.
+
+    The returned fragments are not yet part of any dataset version; callers
+    commit them via a ``LanceOperation`` (e.g. ``Append`` or ``Overwrite``).
+
+    Parameters
+    ----------
+    stream : iterable of pyarrow.Table or pandas.DataFrame
+        The blocks of data to write. An empty stream yields no fragments.
+    uri : str
+        The dataset URI the fragments are written for.
+    schema : pyarrow.Schema, optional
+        The schema of the data. If None, it is inferred from the first block.
+    mode : {"create", "append", "overwrite"}, default "append"
+        Fragment write mode passed to pylance. "append" validates fragments
+        against the existing dataset schema (rejecting columns not present in
+        it); "create" and "overwrite" assign new field ids for the incoming schema
+        (schema evolution). Note the high-level ``write_lance`` defaults to
+        "create", while this lower-level helper defaults to "append" to preserve
+        append-validation semantics for direct callers.
+
+    Returns
+    -------
+    list of (FragmentMetadata, pyarrow.Schema)
+        One entry per written fragment, paired with the schema to commit.
+
+    Notes
+    -----
+    The remaining parameters mirror :class:`LanceFragmentWriter`.
+    """
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
     from lance.fragment import DEFAULT_MAX_BYTES_PER_FILE, write_fragments
@@ -283,9 +313,12 @@ class LanceFragmentWriter:
         efficient but require newer versions of lance to read.  The default
         (None) will use the 2.0 version.  See the user guide for more details.
     mode : {"create", "append", "overwrite"}, default "append"
-        Fragment write mode passed to pylance. Append validates fragments against
-        the existing dataset schema; create and overwrite assign field ids for
-        the new schema before the final commit.
+        Fragment write mode passed to pylance. "append" validates fragments
+        against the existing dataset schema (rejecting columns not present in
+        it); "create" and "overwrite" assign new field ids for the incoming schema
+        (schema evolution). Note the high-level ``write_lance`` defaults to
+        "create"; this writer defaults to "append" to preserve append-validation
+        semantics for direct callers.
     use_legacy_format : optional, bool, default None
         Deprecated method for setting the data storage version. Use the
         `data_storage_version` parameter instead.
@@ -318,6 +351,15 @@ class LanceFragmentWriter:
         Retry parameters for write operations. Default is None.
         If provided, should contain keys like 'description', 'match',
         'max_attempts', and 'max_backoff_s'.
+
+    Notes
+    -----
+    When pairing this writer with :class:`LanceFragmentCommitter`, pass the
+    SAME ``mode`` to both: this writer assigns field ids (so "create"/
+    "overwrite" enable schema evolution), while the committer selects the
+    commit operation (append vs overwrite). Using the default ``mode="append"``
+    writer with a ``mode="overwrite"`` committer on an evolved schema raises a
+    schema-mismatch error rather than evolving the schema.
 
     """
 

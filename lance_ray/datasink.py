@@ -191,7 +191,26 @@ class _BaseLanceDatasink(Datasink):
             for fragment_str, schema_str in batch:
                 fragment = pickle.loads(fragment_str)
                 fragments.append(fragment)
-                schema = pickle.loads(schema_str)
+                frag_schema = pickle.loads(schema_str)
+                # In create/overwrite mode pylance assigns field ids by column
+                # position, so every block must share one column order. If
+                # blocks differ (e.g. a union of differently ordered sources),
+                # committing their fragments under a single schema would read
+                # the data back transposed. Fail loudly instead of silently
+                # corrupting; an explicit ``schema`` aligns every block by name.
+                if (
+                    schema is not None
+                    and self.mode in {"create", "overwrite"}
+                    and frag_schema.names != schema.names
+                ):
+                    raise ValueError(
+                        "Distributed create/overwrite received blocks with "
+                        f"inconsistent column order ({frag_schema.names} vs "
+                        f"{schema.names}); their fragments would be committed "
+                        "under a single schema and read back transposed. Pass "
+                        "an explicit `schema=` so every block is aligned by name."
+                    )
+                schema = frag_schema
         # Check weather writer has fragments or not.
         # Skip commit when there are no fragments.
         if not schema:
@@ -239,8 +258,11 @@ class LanceDatasink(_BaseLanceDatasink):
         schema : pyarrow.Schema, optional.
             The schema of the dataset.
         mode : str, optional
-            The write mode. Default is 'append'.
-            Choices are 'append', 'create', 'overwrite'.
+            The write mode. Default is 'create'.
+            Choices are 'create', 'append', 'overwrite'. "create" and "overwrite"
+            write data using the incoming schema (schema evolution), while
+            "append" validates against the existing dataset schema and drops
+            columns not present in it.
         min_rows_per_file : int, optional
             The minimum number of rows per file. Default is 1024 * 1024.
         max_rows_per_file : int, optional

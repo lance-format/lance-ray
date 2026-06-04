@@ -30,5 +30,12 @@ def pd_to_arrow(
         new_table = tbl.replace_schema_metadata(new_schema.metadata)
         return new_table
     elif isinstance(df, pa.Table) and df.num_rows > 0 and schema is not None:
+        # Align columns to the target schema by NAME before casting. A bare
+        # df.cast(schema) requires the table's field names to already match the
+        # schema's names in order and otherwise raises ValueError. Selecting by
+        # name first reorders/projects the columns so the cast lines the right
+        # data up with each field.
+        if df.schema.names != schema.names:
+            df = df.select(schema.names)
         return df.cast(schema)
     return df
