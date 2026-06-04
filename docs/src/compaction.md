@@ -95,7 +95,7 @@ planning and safety checks to Lance core.
 - `table_id`: Table identifier as a list of strings (requires `namespace_impl`)
 - `older_than`: Optional `datetime.timedelta`; versions older than this may be removed
 - `retain_versions`: Optional number of latest versions to retain
-- `delete_unverified`: Delete unverified files without the default age guard. Only use this when no other process is writing to the dataset.
+- `delete_unverified`: Delete unverified files without Lance's default (7-day) age guard. Only use this when no other process is writing to the dataset.
 - `error_if_tagged_old_versions`: Raise if tagged versions match the cleanup policy (default: `True`)
 - `delete_rate_limit`: Optional maximum delete operations per second
 - `storage_options`: Optional storage configuration dictionary
@@ -127,6 +127,18 @@ Clean old versions for all tables under a database (namespace). This function
 lists tables under `database` via the namespace API and runs one table cleanup
 task per table using a Ray Pool.
 
+Unlike `compact_database` (which processes tables serially and fails fast on the
+first error), cleanup runs tables **in parallel** and **aggregates** per-table
+errors: every table is attempted, and a single error summarizing all failures is
+raised only after the pool finishes. `num_workers` therefore bounds concurrency
+*across tables*, not within a single table.
+
+!!! warning
+
+    This operation is destructive and **not atomic**. Tables are cleaned eagerly
+    by workers, so when it raises for a failed table, other tables may already
+    have had old versions deleted.
+
 **Parameters:**
 
 - `database`: Database (namespace) identifier as a list of path segments, e.g. `['my_database']`
@@ -134,7 +146,7 @@ task per table using a Ray Pool.
 - `namespace_properties`: Properties for connecting to the namespace
 - `older_than`: Optional `datetime.timedelta`; versions older than this may be removed
 - `retain_versions`: Optional number of latest versions to retain
-- `delete_unverified`: Delete unverified files without the default age guard. Only use this when no other process is writing to the datasets.
+- `delete_unverified`: Delete unverified files without Lance's default (7-day) age guard. Only use this when no other process is writing to the datasets.
 - `error_if_tagged_old_versions`: Raise if tagged versions match the cleanup policy (default: `True`)
 - `delete_rate_limit`: Optional maximum delete operations per second per table
 - `num_workers`: Number of Ray workers across tables (default: 4)
@@ -143,7 +155,8 @@ task per table using a Ray Pool.
 
 **Returns:** A list of dictionaries, one per table, with keys `table_id` and
 `stats`. `stats` is a plain dictionary with the cleanup counters returned by
-Lance.
+Lance: `bytes_removed`, `old_versions`, `data_files_removed`,
+`transaction_files_removed`, `index_files_removed`, and `deletion_files_removed`.
 
 ## Examples
 

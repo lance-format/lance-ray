@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -23,8 +24,12 @@ CLEANUP_STATS_FIELDS = (
     "deletion_files_removed",
 )
 
+# Page size used when listing tables under a database via the namespace API.
+_LIST_TABLES_PAGE_SIZE = 500
 
-def _cleanup_stats_to_dict(stats: CleanupStats) -> dict[str, Any]:
+
+def _cleanup_stats_to_dict(stats: CleanupStats) -> dict[str, int]:
+    """Convert ``CleanupStats`` to a plain, Ray-serializable dict of counters."""
     return {field: getattr(stats, field) for field in CLEANUP_STATS_FIELDS}
 
 
@@ -74,11 +79,48 @@ def cleanup_old_versions(
 ) -> CleanupStats:
     """Clean up old versions in one Lance dataset.
 
-    This delegates file safety and deletion policy to Lance core.  Use
-    ``cleanup_database_old_versions`` to run cleanup across many namespace tables
-    with Ray workers.
+    This delegates file safety and deletion policy to Lance core. Use
+    :func:`cleanup_database_old_versions` to run cleanup across many namespace
+    tables with Ray workers.
+
+    Args:
+        uri: The URI of the Lance dataset to clean. Either ``uri`` OR
+            (``namespace_impl`` + ``table_id``) must be provided.
+        table_id: The table identifier as a list of strings. Must be provided
+            together with ``namespace_impl``.
+        older_than: Optional ``datetime.timedelta``; only versions older than
+            this are removed. Delegated to Lance core, which defaults to two
+            weeks only when both ``older_than`` and ``retain_versions`` are unset.
+        retain_versions: Optional number of latest versions to retain.
+        delete_unverified: Delete unverified files without Lance's default age
+            guard (which otherwise retains files leftover from a failed
+            transaction until they are at least 7 days old). Only set this when
+            no other process is writing to the dataset; otherwise in-flight files
+            of a concurrent writer may be deleted, corrupting the dataset.
+        error_if_tagged_old_versions: Raise if tagged versions match the cleanup
+            policy (default: ``True``).
+        delete_rate_limit: Optional maximum delete operations per second.
+        storage_options: Storage options for the dataset. Merged with any
+            options vended by the namespace (namespace values take precedence).
+            Pass credentials here rather than inline in ``uri``: ``uri`` is
+            logged and may appear in error messages.
+        namespace_impl: The namespace implementation type (e.g. ``"rest"``,
+            ``"dir"``). Used together with ``table_id`` to resolve the dataset
+            location and vend credentials.
+        namespace_properties: Properties for connecting to the namespace.
+
+    Returns:
+        :class:`~lance.lance.CleanupStats` with statistics from the cleanup.
+
+    Raises:
+        ValueError: If neither ``uri`` nor (``namespace_impl`` + ``table_id``)
+            is provided, if both are provided, if ``retain_versions`` is not
+            positive, or if namespace resolution does not return a dataset
+            location.
     """
     validate_uri_or_namespace(uri, namespace_impl, table_id)
+    if retain_versions is not None and retain_versions <= 0:
+        raise ValueError("'retain_versions' must be positive when provided.")
 
     dataset_uri, merged_storage_options, namespace_kwargs = _resolve_dataset(
         uri,
@@ -120,7 +162,21 @@ def _handle_cleanup_table(
     storage_options: Optional[dict[str, str]],
     namespace_impl: str,
     namespace_properties: Optional[dict[str, str]],
-):
+) -> Callable[[list[str]], dict[str, Any]]:
+    """Build the per-table cleanup task executed by Ray workers.
+
+    Returns a callable that runs :func:`cleanup_old_versions` for a single
+    ``table_id`` and never raises: every outcome is captured as a Ray-
+    serializable dict so failures can be aggregated across tables. The dict is
+    either::
+
+        {"status": "success", "table_id": list[str], "stats": dict[str, int]}
+
+    or::
+
+        {"status": "error", "table_id": list[str], "error": str}
+    """
+
     def func(table_id: list[str]) -> dict[str, Any]:
         try:
             logger.info("Cleaning up old versions for table %s", table_id)
@@ -167,7 +223,72 @@ def cleanup_database_old_versions(
     storage_options: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
-    """Clean up old versions for every table under a namespace database."""
+    """Clean up old versions for every table under a namespace database.
+
+    Lists all tables under ``database`` via the namespace API, then runs
+    :func:`cleanup_old_versions` on each table. Unlike :func:`compact_database`
+    (which compacts tables serially and fails fast on the first error), cleanup
+    runs tables **in parallel** across a Ray ``Pool`` and **aggregates** per-table
+    errors: every table is attempted, and a single ``RuntimeError`` summarizing
+    all failures is raised only after the pool finishes. Accordingly,
+    ``num_workers`` here bounds concurrency *across tables*, not within a single
+    table.
+
+    Args:
+        database: The database (namespace) identifier as a list of path segments,
+            e.g. ``["my_database"]``. All tables under this namespace are cleaned.
+        namespace_impl: The namespace implementation type (e.g. ``"rest"``,
+            ``"dir"``). Required for resolving table locations and credentials.
+        namespace_properties: Properties for connecting to the namespace.
+        older_than: Optional ``datetime.timedelta``; only versions older than
+            this are removed (applied to every table). Lance defaults to two
+            weeks only when both ``older_than`` and ``retain_versions`` are unset.
+        retain_versions: Optional number of latest versions to retain per table.
+        delete_unverified: Delete unverified files without Lance's default
+            (7-day) age guard. Only set this when no other process is writing to
+            the datasets; otherwise a concurrent writer's files may be deleted.
+        error_if_tagged_old_versions: Raise if tagged versions match the cleanup
+            policy (default: ``True``).
+        delete_rate_limit: Optional maximum delete operations per second *per
+            table* (each table runs in its own worker, so the aggregate rate may
+            be up to ``num_workers`` times this value).
+        num_workers: Maximum number of Ray workers across tables (default: 4).
+            Capped at the number of tables found.
+        storage_options: Storage options for the datasets.
+        ray_remote_args: Options for Ray tasks (e.g. ``num_cpus``, ``resources``).
+
+    Returns:
+        A list of dicts, one per table, with keys:
+        - ``"table_id"``: ``list[str]`` – full table identifier
+          (``database`` + table name).
+        - ``"stats"``: ``dict[str, int]`` – the cleanup counters returned by
+          Lance (see :data:`CLEANUP_STATS_FIELDS`).
+
+    Raises:
+        ValueError: If ``database`` is empty, ``namespace_impl`` is missing,
+            ``num_workers`` is not positive, or ``retain_versions`` is not
+            positive.
+        RuntimeError: If the namespace cannot be created, if the distributed
+            cleanup cannot complete, or if any table's cleanup fails (the message
+            aggregates every failed table).
+
+    Warning:
+        This operation is destructive and **not atomic**. Tables are cleaned
+        eagerly by workers, so when a ``RuntimeError`` is raised for a failed
+        table, other tables may already have had old versions deleted.
+
+    Example:
+        >>> results = cleanup_database_old_versions(
+        ...     database=["my_db"],
+        ...     namespace_impl="dir",
+        ...     namespace_properties={"root": "/path/to/tables"},
+        ...     older_than=timedelta(days=7),
+        ...     retain_versions=3,
+        ...     num_workers=4,
+        ... )
+        >>> for item in results:
+        ...     print(item["table_id"], item["stats"])
+    """
     if not database:
         raise ValueError("'database' must be a non-empty list of path segments.")
     if not namespace_impl:
@@ -176,6 +297,8 @@ def cleanup_database_old_versions(
         )
     if num_workers <= 0:
         raise ValueError("'num_workers' must be positive.")
+    if retain_versions is not None and retain_versions <= 0:
+        raise ValueError("'retain_versions' must be positive when provided.")
 
     from lance_namespace import ListTablesRequest
 
@@ -187,13 +310,12 @@ def cleanup_database_old_versions(
 
     all_tables: list[str] = []
     page_token: Optional[str] = None
-    limit = 500
 
     while True:
         request = ListTablesRequest(
             id=database,
             page_token=page_token,
-            limit=limit,
+            limit=_LIST_TABLES_PAGE_SIZE,
             include_declared=False,
         )
         response = namespace.list_tables(request)
