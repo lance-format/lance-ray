@@ -37,6 +37,19 @@ def _index_with_segments(*segments):
     )
 
 
+def _mock_pickled_dataset(monkeypatch, dataset):
+    search_mod._load_pickled_dataset.cache_clear()
+    search_mod._load_pickled_dataset_ref.cache_clear()
+    pickled_dataset = f"pickled-dataset-{id(dataset)}".encode()
+
+    def fake_loads(value):
+        assert value == pickled_dataset
+        return dataset
+
+    monkeypatch.setattr(search_mod.pickle, "loads", fake_loads)
+    return pickled_dataset
+
+
 def test_select_vector_index_raises_for_missing_explicit_index_name(monkeypatch):
     dataset = object()
     index = _index_with_segments(("S1", [1, 2]))
@@ -172,17 +185,9 @@ def test_execute_indexed_vector_search_plan_does_not_pass_fragments(monkeypatch)
                 to_table=lambda: pa.table({"id": [1], "_distance": [0.1]})
             )
 
-    monkeypatch.setattr("lance_ray.search.LanceDataset", FakeDataset)
-
     result = _execute_vector_search_plan(
         _SearchPlan(fragment_ids=[1, 2], index_segments=["S1"]),
-        dataset_uri="dataset",
-        dataset_version=1,
-        storage_options=None,
-        block_size=None,
-        namespace_impl=None,
-        namespace_properties=None,
-        table_id=None,
+        pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
         base_scanner_options={"fast_search": False},
         nearest={"column": "vector", "q": [0.0, 0.0], "k": 1},
         candidate_k=1,
@@ -215,17 +220,9 @@ def test_execute_fallback_vector_search_plan_computes_local_top_k(monkeypatch):
                 to_table=lambda: pa.table({"id": [1, 2, 3], "vector": vectors})
             )
 
-    monkeypatch.setattr("lance_ray.search.LanceDataset", FakeDataset)
-
     result = _execute_vector_search_plan(
         _SearchPlan(fragment_ids=[7], index_segments=[]),
-        dataset_uri="dataset",
-        dataset_version=1,
-        storage_options=None,
-        block_size=None,
-        namespace_impl=None,
-        namespace_properties=None,
-        table_id=None,
+        pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
         base_scanner_options={"columns": ["id", "_distance"], "fast_search": False},
         nearest={"column": "vector", "q": [0.0, 0.0], "k": 2},
         candidate_k=2,
@@ -261,17 +258,9 @@ def test_execute_indexed_vector_search_plan_can_analyze_plan(monkeypatch):
             scanner_options.update(kwargs)
             return FakeScanner()
 
-    monkeypatch.setattr("lance_ray.search.LanceDataset", FakeDataset)
-
     result = _execute_vector_search_plan(
         _SearchPlan(fragment_ids=[1], index_segments=["S1"]),
-        dataset_uri="dataset",
-        dataset_version=1,
-        storage_options=None,
-        block_size=None,
-        namespace_impl=None,
-        namespace_properties=None,
-        table_id=None,
+        pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
         base_scanner_options={"fast_search": False},
         nearest={"column": "vector", "q": [0.0, 0.0], "k": 1},
         candidate_k=1,
@@ -308,17 +297,9 @@ def test_execute_fallback_vector_search_plan_can_analyze_plan(monkeypatch):
             scanner_options.update(kwargs)
             return FakeScanner()
 
-    monkeypatch.setattr("lance_ray.search.LanceDataset", FakeDataset)
-
     result = _execute_vector_search_plan(
         _SearchPlan(fragment_ids=[7], index_segments=[]),
-        dataset_uri="dataset",
-        dataset_version=1,
-        storage_options=None,
-        block_size=None,
-        namespace_impl=None,
-        namespace_properties=None,
-        table_id=None,
+        pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
         base_scanner_options={"columns": ["id", "_distance"], "fast_search": False},
         nearest={"column": "vector", "q": [0.0, 0.0], "k": 2},
         candidate_k=2,
@@ -424,6 +405,8 @@ def test_vector_search_reuses_global_pool(monkeypatch):
         lambda *args, **kwargs: object(),
     )
     monkeypatch.setattr(search_mod, "_plan_vector_search", lambda **kwargs: [plan])
+    monkeypatch.setattr(search_mod.pickle, "dumps", lambda dataset: b"pickled-dataset")
+    monkeypatch.setattr(search_mod.ray, "is_initialized", lambda: False)
 
     pool_mod.set_global_pool(FakeGlobalPool())
     try:
@@ -438,5 +421,132 @@ def test_vector_search_reuses_global_pool(monkeypatch):
     assert result.column("id").to_pylist() == [1]
     assert events == [
         ("map_async", [plan], 1),
+        "get",
+    ]
+
+
+def test_vector_search_puts_pickled_dataset_in_ray_object_store(monkeypatch):
+    events = []
+
+    class FakeObjectRef:
+        def __init__(self, value):
+            self.value = value
+
+    class FakeAsyncResult:
+        def __init__(self, results):
+            self._results = results
+
+        def get(self):
+            events.append("get")
+            return self._results
+
+    class FakeGlobalPool:
+        def map_async(self, func, plans, chunksize):
+            events.append(("map_async", plans, chunksize))
+            return FakeAsyncResult([func(plan) for plan in plans])
+
+        def close(self):
+            events.append("close")
+
+        def join(self):
+            events.append("join")
+
+    class FakeSchema:
+        def field(self, column):
+            return column
+
+    class FakeDataset:
+        schema = FakeSchema()
+
+        def get_fragments(self):
+            return [_FakeFragment(1), _FakeFragment(2)]
+
+        def scanner(self, **kwargs):
+            events.append(("scanner", kwargs))
+            return SimpleNamespace(
+                to_table=lambda: pa.table({"id": [1], "_distance": [0.1]})
+            )
+
+    fake_dataset = FakeDataset()
+    pickled_dataset = b"pickled-dataset"
+
+    def fake_lance_dataset(*args, **kwargs):
+        events.append(("LanceDataset", args, kwargs))
+        return fake_dataset
+
+    def fake_dumps(dataset):
+        events.append(("pickle.dumps", dataset is fake_dataset))
+        return pickled_dataset
+
+    def fake_put(value):
+        events.append(("ray.put", value))
+        return FakeObjectRef(value)
+
+    def fake_get(ref):
+        events.append(("ray.get", ref.value))
+        return ref.value
+
+    def fake_loads(value):
+        events.append(("pickle.loads", value))
+        assert value == pickled_dataset
+        return fake_dataset
+
+    plans = [
+        _SearchPlan(fragment_ids=[1], index_segments=["S1"]),
+        _SearchPlan(fragment_ids=[2], index_segments=["S2"]),
+    ]
+
+    monkeypatch.setattr(search_mod, "LanceDataset", fake_lance_dataset)
+    monkeypatch.setattr(
+        search_mod,
+        "_select_vector_index",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(search_mod, "_plan_vector_search", lambda **kwargs: plans)
+    monkeypatch.setattr(search_mod.pickle, "dumps", fake_dumps)
+    monkeypatch.setattr(search_mod.pickle, "loads", fake_loads)
+    monkeypatch.setattr(search_mod.ray, "ObjectRef", FakeObjectRef, raising=False)
+    monkeypatch.setattr(search_mod.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(search_mod.ray, "put", fake_put)
+    monkeypatch.setattr(search_mod.ray, "get", fake_get)
+    search_mod._load_pickled_dataset.cache_clear()
+    search_mod._load_pickled_dataset_ref.cache_clear()
+
+    pool_mod.set_global_pool(FakeGlobalPool())
+    try:
+        result = search_mod.vector_search(
+            uri="dataset",
+            nearest={"column": "vector", "q": [0.0], "k": 1},
+            num_workers=4,
+        )
+    finally:
+        pool_mod.clear_global_pool()
+        search_mod._load_pickled_dataset.cache_clear()
+        search_mod._load_pickled_dataset_ref.cache_clear()
+
+    assert result.column("id").to_pylist() == [1]
+    assert events == [
+        ("LanceDataset", ("dataset",), {"storage_options": {}}),
+        ("pickle.dumps", True),
+        ("ray.put", pickled_dataset),
+        ("map_async", plans, 1),
+        ("ray.get", pickled_dataset),
+        ("pickle.loads", pickled_dataset),
+        (
+            "scanner",
+            {
+                "fast_search": True,
+                "nearest": {"column": "vector", "q": [0.0], "k": 1},
+                "index_segments": ["S1"],
+            },
+        ),
+        (
+            "scanner",
+            {
+                "fast_search": True,
+                "nearest": {"column": "vector", "q": [0.0], "k": 1},
+                "index_segments": ["S2"],
+            },
+        ),
         "get",
     ]
