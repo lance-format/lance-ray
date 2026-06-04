@@ -4,6 +4,8 @@
 import logging
 import math
 import pickle
+import threading
+from collections import OrderedDict
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
@@ -23,6 +25,11 @@ if TYPE_CHECKING:
     import lance
 
 logger = logging.getLogger(__name__)
+_VECTOR_SEARCH_PLAN_CACHE_MAX_SIZE = 8
+_VECTOR_SEARCH_PLAN_CACHE: OrderedDict[tuple[Any, ...], list["_SearchPlan"]] = (
+    OrderedDict()
+)
+_VECTOR_SEARCH_PLAN_CACHE_LOCK = threading.RLock()
 
 
 class _SearchPlan(NamedTuple):
@@ -60,6 +67,51 @@ def _get_dataset_storage_options(dataset: LanceDataset) -> dict[str, Any]:
         return dataset.initial_storage_options or {}
     except AttributeError:
         return getattr(dataset, "_storage_options", None) or {}
+
+
+def _freeze_cache_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        items = (
+            (_freeze_cache_value(key), _freeze_cache_value(item))
+            for key, item in value.items()
+        )
+        return tuple(sorted(items, key=repr))
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_cache_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted((_freeze_cache_value(item) for item in value), key=repr))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _get_dataset_version(dataset: LanceDataset) -> Any:
+    return getattr(dataset, "version", getattr(dataset, "_version", None))
+
+
+def _dataset_plan_cache_key(
+    dataset: LanceDataset,
+    *,
+    dataset_uri: Any,
+    storage_options: dict[str, Any],
+    namespace_kwargs: dict[str, Any],
+    block_size: Optional[int],
+) -> tuple[Any, ...]:
+    uri = dataset_uri if dataset_uri is not None else getattr(dataset, "uri", None)
+    version = _get_dataset_version(dataset)
+    if uri is None:
+        return ("dataset_object", id(dataset), version)
+
+    return (
+        "dataset_uri",
+        str(uri),
+        version,
+        block_size,
+        _freeze_cache_value(storage_options),
+        _freeze_cache_value(namespace_kwargs),
+    )
 
 
 def _get_fragment_id(fragment: Any) -> int:
@@ -101,6 +153,92 @@ def _segment_value(segment: Any, name: str, default: Any = None) -> Any:
     if isinstance(segment, dict):
         return segment.get(name, default)
     return getattr(segment, name, default)
+
+
+def _vector_index_signature(vector_index: Any | None) -> Any:
+    if vector_index is None:
+        return None
+
+    field_names = _index_value(vector_index, "field_names")
+    if field_names is None:
+        field_names = _index_value(vector_index, "fields", [])
+
+    return (
+        _index_value(vector_index, "name"),
+        _index_value(vector_index, "index_type"),
+        _freeze_cache_value(field_names),
+        tuple(
+            str(_segment_value(segment, "uuid"))
+            for segment in _index_value(vector_index, "segments", [])
+        ),
+    )
+
+
+def _copy_search_plans(plans: list[_SearchPlan]) -> list[_SearchPlan]:
+    return [
+        _SearchPlan(
+            fragment_ids=[*plan.fragment_ids],
+            index_segments=[*plan.index_segments],
+        )
+        for plan in plans
+    ]
+
+
+def _vector_search_plan_cache_key(
+    dataset: LanceDataset,
+    *,
+    dataset_uri: Any,
+    storage_options: dict[str, Any],
+    namespace_kwargs: dict[str, Any],
+    block_size: Optional[int],
+    column: str,
+    index_name: Optional[str],
+    vector_index: Any | None,
+    num_workers: int,
+    include_unindexed: bool,
+) -> tuple[Any, ...]:
+    return (
+        "vector_search_plan",
+        _dataset_plan_cache_key(
+            dataset,
+            dataset_uri=dataset_uri,
+            storage_options=storage_options,
+            namespace_kwargs=namespace_kwargs,
+            block_size=block_size,
+        ),
+        column,
+        index_name,
+        num_workers,
+        include_unindexed,
+        _vector_index_signature(vector_index),
+    )
+
+
+def _clear_vector_search_plan_cache() -> None:
+    with _VECTOR_SEARCH_PLAN_CACHE_LOCK:
+        _VECTOR_SEARCH_PLAN_CACHE.clear()
+
+
+def _get_cached_vector_search_plans(
+    cache_key: tuple[Any, ...],
+) -> tuple[list[_SearchPlan], bool]:
+    with _VECTOR_SEARCH_PLAN_CACHE_LOCK:
+        plans = _VECTOR_SEARCH_PLAN_CACHE.get(cache_key)
+        if plans is None:
+            return [], False
+        _VECTOR_SEARCH_PLAN_CACHE.move_to_end(cache_key)
+        return _copy_search_plans(plans), True
+
+
+def _put_cached_vector_search_plans(
+    cache_key: tuple[Any, ...],
+    plans: list[_SearchPlan],
+) -> None:
+    with _VECTOR_SEARCH_PLAN_CACHE_LOCK:
+        _VECTOR_SEARCH_PLAN_CACHE[cache_key] = _copy_search_plans(plans)
+        _VECTOR_SEARCH_PLAN_CACHE.move_to_end(cache_key)
+        while len(_VECTOR_SEARCH_PLAN_CACHE) > _VECTOR_SEARCH_PLAN_CACHE_MAX_SIZE:
+            _VECTOR_SEARCH_PLAN_CACHE.popitem(last=False)
 
 
 def _select_vector_index(
@@ -631,6 +769,8 @@ def vector_search(
         )
     else:
         dataset = uri
+        dataset_uri = getattr(dataset, "uri", None)
+        namespace_kwargs = {}
         if not merged_storage_options:
             merged_storage_options.update(_get_dataset_storage_options(dataset))
 
@@ -641,10 +781,6 @@ def vector_search(
         raise ValueError(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from exc
-
-    fragments = dataset.get_fragments()
-    if not fragments:
-        return pa.table({})
 
     vector_index = _select_vector_index(
         dataset,
@@ -657,11 +793,41 @@ def vector_search(
             column,
         )
 
-    plans = _plan_vector_search(
-        fragments=fragments,
+    effective_include_unindexed = include_unindexed and not fast_search
+    plan_cache_key = _vector_search_plan_cache_key(
+        dataset,
+        dataset_uri=dataset_uri,
+        storage_options=merged_storage_options,
+        namespace_kwargs=namespace_kwargs,
+        block_size=block_size,
+        column=column,
+        index_name=index_name,
         vector_index=vector_index,
         num_workers=num_workers,
-        include_unindexed=include_unindexed and not fast_search,
+        include_unindexed=effective_include_unindexed,
+    )
+    plans, plan_cache_hit = _get_cached_vector_search_plans(plan_cache_key)
+    if not plan_cache_hit:
+        fragments: list[Any] = []
+        if vector_index is not None or effective_include_unindexed:
+            fragments = dataset.get_fragments()
+
+        plans = (
+            _plan_vector_search(
+                fragments=fragments,
+                vector_index=vector_index,
+                num_workers=num_workers,
+                include_unindexed=effective_include_unindexed,
+            )
+            if fragments
+            else []
+        )
+        _put_cached_vector_search_plans(plan_cache_key, plans)
+
+    logger.info(
+        "Distributed vector search planning completed: tasks=%d, cache_hit=%s",
+        len(plans),
+        plan_cache_hit,
     )
     if not plans:
         return pa.table({})

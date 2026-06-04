@@ -407,6 +407,7 @@ def test_vector_search_reuses_global_pool(monkeypatch):
     monkeypatch.setattr(search_mod, "_plan_vector_search", lambda **kwargs: [plan])
     monkeypatch.setattr(search_mod.pickle, "dumps", lambda dataset: b"pickled-dataset")
     monkeypatch.setattr(search_mod.ray, "is_initialized", lambda: False)
+    search_mod._clear_vector_search_plan_cache()
 
     pool_mod.set_global_pool(FakeGlobalPool())
     try:
@@ -417,6 +418,7 @@ def test_vector_search_reuses_global_pool(monkeypatch):
         )
     finally:
         pool_mod.clear_global_pool()
+        search_mod._clear_vector_search_plan_cache()
 
     assert result.column("id").to_pylist() == [1]
     assert events == [
@@ -511,6 +513,7 @@ def test_vector_search_puts_pickled_dataset_in_ray_object_store(monkeypatch):
     monkeypatch.setattr(search_mod.ray, "get", fake_get)
     search_mod._load_pickled_dataset.cache_clear()
     search_mod._load_pickled_dataset_ref.cache_clear()
+    search_mod._clear_vector_search_plan_cache()
 
     pool_mod.set_global_pool(FakeGlobalPool())
     try:
@@ -523,6 +526,7 @@ def test_vector_search_puts_pickled_dataset_in_ray_object_store(monkeypatch):
         pool_mod.clear_global_pool()
         search_mod._load_pickled_dataset.cache_clear()
         search_mod._load_pickled_dataset_ref.cache_clear()
+        search_mod._clear_vector_search_plan_cache()
 
     assert result.column("id").to_pylist() == [1]
     assert events == [
@@ -550,3 +554,81 @@ def test_vector_search_puts_pickled_dataset_in_ray_object_store(monkeypatch):
         ),
         "get",
     ]
+
+
+def test_vector_search_reuses_driver_search_plan_cache(monkeypatch):
+    events = []
+
+    class FakeAsyncResult:
+        def get(self):
+            events.append("get")
+            return [pa.table({"id": [1], "_distance": [0.1]})]
+
+    class FakeGlobalPool:
+        def map_async(self, func, plans, chunksize):
+            events.append(("map_async", plans, chunksize))
+            return FakeAsyncResult()
+
+        def close(self):
+            events.append("close")
+
+        def join(self):
+            events.append("join")
+
+    class FakeSchema:
+        def field(self, column):
+            return column
+
+    index = _index_with_segments(("S1", [1]))
+
+    class FakeDataset:
+        uri = "dataset"
+        version = 11
+        schema = FakeSchema()
+
+        def __init__(self, *args, **kwargs):
+            events.append(("LanceDataset", args, kwargs))
+
+        def describe_indices(self):
+            return [index]
+
+        def get_fragments(self):
+            events.append("get_fragments")
+            return [_FakeFragment(1)]
+
+    plan = _SearchPlan(fragment_ids=[1], index_segments=["S1"])
+
+    def fake_plan_vector_search(**kwargs):
+        events.append(
+            (
+                "plan",
+                len(kwargs["fragments"]),
+                kwargs["vector_index"] is index,
+                kwargs["num_workers"],
+                kwargs["include_unindexed"],
+            )
+        )
+        return [plan]
+
+    monkeypatch.setattr(search_mod, "LanceDataset", FakeDataset)
+    monkeypatch.setattr(search_mod, "_plan_vector_search", fake_plan_vector_search)
+    monkeypatch.setattr(search_mod.pickle, "dumps", lambda dataset: b"pickled-dataset")
+    monkeypatch.setattr(search_mod.ray, "is_initialized", lambda: False)
+    search_mod._clear_vector_search_plan_cache()
+
+    pool_mod.set_global_pool(FakeGlobalPool())
+    try:
+        for _ in range(2):
+            result = search_mod.vector_search(
+                uri="dataset",
+                nearest={"column": "vector", "q": [0.0], "k": 1},
+                num_workers=4,
+            )
+            assert result.column("id").to_pylist() == [1]
+    finally:
+        pool_mod.clear_global_pool()
+        search_mod._clear_vector_search_plan_cache()
+
+    assert events.count("get_fragments") == 1
+    assert events.count(("plan", 1, True, 4, True)) == 1
+    assert events.count(("map_async", [plan], 1)) == 2
