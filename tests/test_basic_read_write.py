@@ -267,6 +267,60 @@ class TestReadWrite:
         overwritten_df = overwritten_dataset.to_pandas()
         assert len(overwritten_df) == 2  # Should have 2 rows after overwrite
 
+    def test_overwrite_mode_allows_schema_change(self, temp_dir):
+        """Overwrite writes fragments with the new schema, not append validation."""
+        path = Path(temp_dir) / "overwrite_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        ray_ds = lr.read_lance(str(path))
+        updated_ds = ray_ds.map_batches(
+            lambda batch: batch.assign(id_2=batch["id"] * 2),
+            batch_format="pandas",
+        )
+
+        lr.write_lance(updated_ds, str(path), mode="overwrite")
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [1, 2]
+        assert result["id_2"].tolist() == [2, 4]
+
+    def test_stream_overwrite_mode_allows_schema_change(self, temp_dir):
+        """Streaming overwrite also writes fragments with the new schema."""
+        path = Path(temp_dir) / "stream_overwrite_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        updated_data = pd.DataFrame({"id": [3, 4], "value": [30, 40], "id_2": [6, 8]})
+        lr.write_lance(
+            ray.data.from_pandas(updated_data),
+            str(path),
+            mode="overwrite",
+            stream=True,
+            batch_size=1,
+        )
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [3, 4]
+        assert result["id_2"].tolist() == [6, 8]
+
+    def test_append_mode_uses_existing_schema(self, temp_dir):
+        """Append keeps the existing schema instead of evolving it."""
+        path = Path(temp_dir) / "append_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        additional_data = pd.DataFrame({"id": [3], "value": [30], "id_2": [6]})
+        lr.write_lance(
+            ray.data.from_pandas(additional_data),
+            str(path),
+            mode="append",
+        )
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result.columns.tolist() == ["id", "value"]
+        assert result["id"].tolist() == [1, 2, 3]
+
     def test_read_lance_with_fragment_ids(self, sample_dataset, temp_dir):
         """Test reading with fragment IDs."""
         path = Path(temp_dir) / "fragment_ids_test.lance"
@@ -334,6 +388,47 @@ class TestNamespaceReadWrite:
         read_sorted = read_df.sort_values("id").reset_index(drop=True)
 
         pd.testing.assert_frame_equal(original_sorted, read_sorted)
+
+    def test_overwrite_with_directory_namespace_allows_schema_change(
+        self, sample_data, temp_dir
+    ):
+        """Namespace overwrite writes fragments with the new schema."""
+        table_id = ["schema_change_table"]
+
+        lr.write_lance(
+            ray.data.from_pandas(sample_data[["id", "score"]]),
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        ray_ds = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+        updated_ds = ray_ds.map_batches(
+            lambda batch: batch.assign(id_2=batch["id"] * 2),
+            batch_format="pandas",
+        )
+
+        lr.write_lance(
+            updated_ds,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+            mode="overwrite",
+        )
+
+        result = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        ).to_pandas()
+        result = result.sort_values("id").reset_index(drop=True)
+
+        assert result["id"].tolist() == sample_data["id"].tolist()
+        assert result["id_2"].tolist() == (sample_data["id"] * 2).tolist()
 
 
 class TestDatasetOptions:

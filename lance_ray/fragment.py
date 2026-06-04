@@ -40,6 +40,7 @@ def write_fragment(
     uri: str,
     *,
     schema: Optional[pa.Schema] = None,
+    mode: Literal["create", "append", "overwrite"] = "append",
     max_rows_per_file: int = 64 * 1024 * 1024,
     max_bytes_per_file: Optional[int] = None,
     max_rows_per_group: int = 1024,  # Only useful for v1 writer.
@@ -122,6 +123,7 @@ def write_fragment(
             reader,
             uri,
             schema=schema,
+            mode=mode,
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=max_rows_per_group,
             max_bytes_per_file=max_bytes_per_file,
@@ -280,6 +282,10 @@ class LanceFragmentWriter:
         The version of the data storage format to use. Newer versions are more
         efficient but require newer versions of lance to read.  The default
         (None) will use the 2.0 version.  See the user guide for more details.
+    mode : {"create", "append", "overwrite"}, default "append"
+        Fragment write mode passed to pylance. Append validates fragments against
+        the existing dataset schema; create and overwrite assign field ids for
+        the new schema before the final commit.
     use_legacy_format : optional, bool, default None
         Deprecated method for setting the data storage version. Use the
         `data_storage_version` parameter instead.
@@ -325,6 +331,7 @@ class LanceFragmentWriter:
         max_bytes_per_file: Optional[int] = None,
         max_rows_per_group: Optional[int] = None,  # Only useful for v1 writer.
         data_storage_version: Optional[str] = None,
+        mode: Literal["create", "append", "overwrite"] = "append",
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
@@ -363,6 +370,7 @@ class LanceFragmentWriter:
         self.max_rows_per_file = max_rows_per_file
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
+        self.mode = mode
         self.storage_options = storage_options
         self.base_store_params = base_store_params
         self.initial_bases = normalize_initial_bases(initial_bases)
@@ -402,6 +410,7 @@ class LanceFragmentWriter:
             transformed,
             self.uri,
             schema=self.schema,
+            mode=self.mode,
             max_rows_per_file=self.max_rows_per_file,
             max_rows_per_group=self.max_rows_per_group,
             max_bytes_per_file=self.max_bytes_per_file,

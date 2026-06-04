@@ -341,12 +341,14 @@ def write_lance(
         fragment_initial_bases = (
             initial_bases if mode == "create" and not first_commit_done else None
         )
+        fragment_mode = mode if not first_commit_done else "append"
         writer = LanceFragmentWriter(
             uri=dest_uri,
             schema=schema,  # if None, writer infers from first batch (preserves Arrow metadata)
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
             data_storage_version=data_storage_version,
+            mode=fragment_mode,
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=fragment_initial_bases,

@@ -367,6 +367,7 @@ class LanceDatasink(_BaseLanceDatasink):
             blocks,
             self.uri,
             schema=self.schema,
+            mode=self.mode,
             max_rows_per_file=self.max_rows_per_file,
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
