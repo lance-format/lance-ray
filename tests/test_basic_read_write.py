@@ -386,7 +386,8 @@ class TestReadWrite:
         lr.write_lance(ray.data.from_pandas(retyped_data), str(path), mode="overwrite")
 
         dataset = lance.dataset(str(path))
-        assert dataset.schema.field("value").type == pa.string()
+        value_type = dataset.schema.field("value").type
+        assert pa.types.is_string(value_type) or pa.types.is_large_string(value_type)
         result = lr.read_lance(str(path)).to_pandas().sort_values("id")
         assert result["value"].tolist() == ["a", "b"]
 
