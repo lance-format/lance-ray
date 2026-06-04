@@ -13,6 +13,10 @@ import ray
 from ray.data import Dataset
 
 import pandas as pd
+from _utils import (
+    fragment_write_options_skip_reason,
+    missing_fragment_write_options,
+)
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "lance" / "python" / "python")
@@ -438,6 +442,10 @@ class TestMultiBaseLayout:
             f"Base path IDs must be unique, got: {base_paths}"
         )
 
+    @pytest.mark.skipif(
+        bool(missing_fragment_write_options("base_store_params")),
+        reason=fragment_write_options_skip_reason("base_store_params"),
+    )
     def test_multiple_initial_bases_with_blob_v2(self, temp_dir):
         """Multi-base write/read with blob v2 columns and no explicit IDs.
 

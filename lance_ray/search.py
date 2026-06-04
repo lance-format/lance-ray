@@ -496,7 +496,9 @@ def _candidate_k(nearest: dict[str, Any], oversample_factor: float) -> tuple[int
     try:
         global_k = int(nearest["k"])
     except KeyError as exc:
-        raise ValueError("nearest must include 'k' for distributed vector search") from exc
+        raise ValueError(
+            "nearest must include 'k' for distributed vector search"
+        ) from exc
 
     if global_k <= 0:
         raise ValueError(f"nearest['k'] must be positive, got {global_k}")
@@ -627,7 +629,9 @@ def vector_search(
         )
         dataset = LanceDataset(
             dataset_uri,
-            **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
+            **_dataset_load_kwargs(
+                merged_storage_options, namespace_kwargs, block_size
+            ),
         )
     else:
         dataset = uri
@@ -689,7 +693,9 @@ def vector_search(
 
             results = pool.map_async(run_plan, plans, chunksize=1).get()
     except Exception as exc:  # pragma: no cover - exercised via integration tests
-        raise RuntimeError(f"Failed to complete distributed vector search: {exc}") from exc
+        raise RuntimeError(
+            f"Failed to complete distributed vector search: {exc}"
+        ) from exc
 
     if analyze_plan:
         return _format_analyze_plan_results(results)

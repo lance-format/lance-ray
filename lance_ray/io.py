@@ -16,6 +16,7 @@ from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
+from .fragment import prepare_fragment_write_options
 from .utils import (
     get_namespace_kwargs,
     has_namespace_params,
@@ -156,6 +157,8 @@ def write_lance(
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     initial_bases: Optional[list[Any]] = None,
     target_bases: Optional[list[str]] = None,
+    external_blob_mode: Literal["reference", "ingest"] = "reference",
+    allow_external_blob_outside_bases: bool = False,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
@@ -216,6 +219,12 @@ def write_lance(
             from registered bases.  In CREATE mode, references must match
             bases in ``initial_bases``.  In APPEND/OVERWRITE modes,
             references must match bases in the existing manifest.
+        external_blob_mode: How external blob URIs are handled on write.
+            ``"reference"`` stores external blob references, while ``"ingest"``
+            reads external bytes and writes them into Lance-managed storage.
+        allow_external_blob_outside_bases: Allow external blob references that
+            do not map to a registered non-dataset-root base path. Only applies
+            when ``external_blob_mode="reference"``.
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
             Used together with namespace_properties and table_id.
         namespace_properties: Properties for connecting to the namespace.
@@ -227,6 +236,13 @@ def write_lance(
     _validate_write_args(uri, namespace_impl, table_id, mode)
     if initial_bases and mode != "create":
         raise ValueError("'initial_bases' can only be used with mode='create'")
+    allow_external_blob_outside_bases = prepare_fragment_write_options(
+        target_bases=target_bases,
+        base_store_params=base_store_params,
+        external_blob_mode=external_blob_mode,
+        allow_external_blob_outside_bases=allow_external_blob_outside_bases,
+        stacklevel=2,
+    )
     initial_bases = normalize_initial_bases(initial_bases)
 
     # Fast path: non-streaming write using the Datasink API.
@@ -243,6 +259,8 @@ def write_lance(
             base_store_params=base_store_params,
             initial_bases=initial_bases,
             target_bases=target_bases,
+            external_blob_mode=external_blob_mode,
+            allow_external_blob_outside_bases=allow_external_blob_outside_bases,
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
         )
@@ -330,8 +348,11 @@ def write_lance(
             max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
             data_storage_version=data_storage_version,
             storage_options=storage_options,
+            base_store_params=base_store_params,
             initial_bases=fragment_initial_bases,
             target_bases=target_bases,
+            external_blob_mode=external_blob_mode,
+            allow_external_blob_outside_bases=allow_external_blob_outside_bases,
             namespace_impl=None,
             namespace_properties=None,
             table_id=None,
