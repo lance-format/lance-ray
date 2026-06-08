@@ -547,7 +547,10 @@ def create_scalar_index(
     if isinstance(index_type, str):
         match index_type:
             case "INVERTED" | "FTS":
-                if not pa.types.is_string(value_type):
+                if not (
+                    pa.types.is_string(value_type)
+                    or pa.types.is_large_string(value_type)
+                ):
                     raise TypeError(
                         f"Column {column} must be string type for {index_type} "
                         f"index, got {value_type}"
