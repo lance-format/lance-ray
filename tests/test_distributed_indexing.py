@@ -254,6 +254,42 @@ class TestDistributedIndexing:
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building"
 
+    def test_build_distributed_fts_index_list_large_utf8(self, temp_dir):
+        """Test distributed FTS index building on list<large_utf8> columns."""
+        search_term = "needlelarge"
+        table = pa.table(
+            {
+                "id": pa.array([1, 2, 3, 4], type=pa.int64()),
+                "tags": pa.array(
+                    [
+                        ["alpha", "beta"],
+                        ["distributed", search_term],
+                        ["search", "fts"],
+                        ["other", "tokens"],
+                    ],
+                    type=pa.list_(pa.large_string()),
+                ),
+            }
+        )
+        dataset = ray.data.from_arrow(table)
+        path = Path(temp_dir) / "list_large_utf8_text.lance"
+        lr.write_lance(dataset, str(path), min_rows_per_file=2, max_rows_per_file=2)
+
+        updated_dataset = lr.create_scalar_index(
+            uri=str(path),
+            column="tags",
+            index_type="INVERTED",
+            num_workers=2,
+        )
+
+        results = updated_dataset.scanner(
+            full_text_query=search_term,
+            columns=["id", "tags"],
+        ).to_table()
+
+        assert results.num_rows == 1
+        assert results.column("id").to_pylist() == [2]
+
     def test_build_distributed_index_large_dataset(self, temp_dir):
         """Test distributed indexing on a larger dataset with multiple fragments."""
         # Generate larger dataset
