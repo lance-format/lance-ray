@@ -7,7 +7,7 @@ Lance-Ray provides distributed index building functionality that leverages Ray's
 
 ### Scalar Indexing
 
-`create_scalar_index()` - Distributedly create scalar index using ray. Currently only Inverted/FTS/BTREE are supported. Will add more index type support in the future.
+`create_scalar_index()` - Distributedly create scalar index using ray. Currently only Inverted/FTS/BTREE/BITMAP are supported. Will add more index type support in the future.
 
 #### How It Works
 The `create_scalar_index` function allows you to create full-text search indices for Lance datasets using the Ray distributed computing framework. This function distributes the index building process across multiple Ray worker nodes, with each node responsible for building indices for a subset of dataset fragments. These indices are then merged and committed as a single index.
@@ -72,7 +72,7 @@ def create_scalar_index(
 | `ray_remote_args` | `Dict[str, Any]`, optional | Ray task options (e.g., `num_cpus`, `resources`) |
 | `**kwargs` | `Any` | Additional arguments passed to `create_scalar_index` |
 
-**Note:** For distributed scalar indexing, currently only `"INVERTED"`, `"FTS"` and `"BTREE"` index types are supported.
+**Note:** For distributed scalar indexing, currently only `"INVERTED"`, `"FTS"`, `"BTREE"` and `"BITMAP"` index types are supported.
 
 #### Return Value
 
@@ -444,7 +444,7 @@ except ValueError as e:
 
 ### Important Notes
 
-- **Index Type Support**: For distributed indexing, currently only `"INVERTED"`/`"FTS"`/`"BTREE"` index types are supported, even though the function signature accepts other index types.
+- **Index Type Support**: For distributed indexing, currently only `"INVERTED"`/`"FTS"`/`"BTREE"`/`"BITMAP"` index types are supported, even though the function signature accepts other index types.
 - **Default Behavior**: The `replace` parameter defaults to `True`, meaning existing indices with the same name will be replaced without warning. Set `replace=False` to prevent accidental overwrites.
 - **Fragment Selection**: Use `fragment_ids` parameter to build indices on specific fragments only. This is useful for incremental index building or testing.
 - **Error Handling**: When `replace=False` and an index with the same name exists, a `ValueError` or `RuntimeError` will be raised depending on the execution context.

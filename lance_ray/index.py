@@ -399,7 +399,7 @@ def create_scalar_index(
                 f"Index type must be one of {valid_index_types}, not '{index_type}'"
             )
 
-        supported_distributed_types = {"INVERTED", "FTS", "BTREE"}
+        supported_distributed_types = {"INVERTED", "FTS", "BTREE", "BITMAP"}
         if index_type not in supported_distributed_types:
             raise ValueError(
                 "Distributed indexing currently supports "
