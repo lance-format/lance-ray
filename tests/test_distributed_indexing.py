@@ -960,6 +960,55 @@ class TestDistributedBTreeIndexing:
         )
 
 
+class TestDistributedBitmapIndexing:
+    """Distributed BITMAP indexing tests."""
+
+    def test_distributed_bitmap_index_matches_baseline(self, temp_dir):
+        """Build a distributed BITMAP index and verify query results."""
+        with_index = generate_multi_fragment_dataset(
+            Path(temp_dir) / "with_bitmap",
+            num_fragments=3,
+            rows_per_fragment=250,
+        )
+        without_index = generate_multi_fragment_dataset(
+            Path(temp_dir) / "without_bitmap",
+            num_fragments=3,
+            rows_per_fragment=250,
+        )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=with_index.uri,
+            column="fragment_id",
+            index_type="BITMAP",
+            name="fragment_bitmap_idx",
+            replace=False,
+            num_workers=3,
+        )
+
+        indices = updated_dataset.list_indices()
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "fragment_bitmap_idx"),
+            None,
+        )
+
+        assert our_index is not None, "BITMAP index not found by name"
+        assert our_index["type"] == "Bitmap"
+
+        indexed = updated_dataset.scanner(
+            filter="fragment_id = 1",
+            columns=["id", "fragment_id"],
+        ).to_table()
+        baseline = without_index.scanner(
+            filter="fragment_id = 1",
+            columns=["id", "fragment_id"],
+        ).to_table()
+
+        assert indexed.num_rows == baseline.num_rows
+        assert sorted(indexed.column("id").to_pylist()) == sorted(
+            baseline.column("id").to_pylist()
+        )
+
+
 class TestOptimizeIndices:
     """Test cases for optimize_indices (incremental index optimization)."""
 
