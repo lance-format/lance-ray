@@ -960,6 +960,96 @@ class TestDistributedBTreeIndexing:
         )
 
 
+class TestZonemapIndexing:
+    """ZONEMAP indexing tests for native fallback behavior."""
+
+    def test_zonemap_index_matches_baseline(self, temp_dir):
+        """Build a ZONEMAP index and verify query results."""
+        with_index = generate_multi_fragment_dataset(
+            Path(temp_dir) / "with_zonemap",
+            num_fragments=3,
+            rows_per_fragment=250,
+        )
+        without_index = generate_multi_fragment_dataset(
+            Path(temp_dir) / "without_zonemap",
+            num_fragments=3,
+            rows_per_fragment=250,
+        )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=with_index.uri,
+            column="id",
+            index_type="ZONEMAP",
+            name="id_zonemap_idx",
+            replace=False,
+            num_workers=3,
+        )
+
+        indices = updated_dataset.list_indices()
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "id_zonemap_idx"),
+            None,
+        )
+
+        assert our_index is not None, "ZONEMAP index not found by name"
+        assert our_index["type"] == "ZoneMap"
+
+        indexed = updated_dataset.scanner(
+            filter="id >= 250 AND id < 750",
+            columns=["id", "fragment_id"],
+        ).to_table()
+        baseline = without_index.scanner(
+            filter="id >= 250 AND id < 750",
+            columns=["id", "fragment_id"],
+        ).to_table()
+
+        assert indexed.num_rows == baseline.num_rows
+        assert sorted(indexed.column("id").to_pylist()) == sorted(
+            baseline.column("id").to_pylist()
+        )
+
+    def test_zonemap_fragment_ids_rejection_does_not_drop_existing_index(
+        self, temp_dir
+    ):
+        """Reject unsupported ZONEMAP fragment_ids before mutating existing indices."""
+        ds = generate_multi_fragment_dataset(
+            temp_dir,
+            num_fragments=3,
+            rows_per_fragment=250,
+        )
+        index_name = "id_zonemap_idx"
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="id",
+            index_type="ZONEMAP",
+            name=index_name,
+            replace=False,
+            num_workers=3,
+        )
+        assert any(idx["name"] == index_name for idx in updated_dataset.list_indices())
+
+        fragment_id = next(iter(updated_dataset.get_fragments())).fragment_id
+        with pytest.raises(ValueError, match="ZONEMAP indexing does not support"):
+            lr.create_scalar_index(
+                uri=ds.uri,
+                column="id",
+                index_type="ZONEMAP",
+                name=index_name,
+                replace=True,
+                fragment_ids=[fragment_id],
+                num_workers=3,
+            )
+
+        indices_after_error = lance.dataset(ds.uri).list_indices()
+        existing_index = next(
+            (idx for idx in indices_after_error if idx["name"] == index_name),
+            None,
+        )
+        assert existing_index is not None
+        assert existing_index["type"] == "ZoneMap"
+
+
 class TestOptimizeIndices:
     """Test cases for optimize_indices (incremental index optimization)."""
 

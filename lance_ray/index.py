@@ -400,10 +400,12 @@ def create_scalar_index(
             )
 
         supported_distributed_types = {"INVERTED", "FTS", "BTREE"}
-        if index_type not in supported_distributed_types:
+        supported_driver_types = {"ZONEMAP"}
+        if index_type not in supported_distributed_types | supported_driver_types:
             raise ValueError(
-                "Distributed indexing currently supports "
-                f"{sorted(supported_distributed_types)} index types, "
+                "Scalar indexing currently supports "
+                f"{sorted(supported_distributed_types | supported_driver_types)} "
+                "index types, "
                 f"not '{index_type}'"
             )
     elif not isinstance(index_type, IndexConfig):
@@ -478,6 +480,12 @@ def create_scalar_index(
     if name is None:
         name = f"{column}_idx"
 
+    if index_type == "ZONEMAP" and fragment_ids is not None:
+        raise ValueError(
+            "ZONEMAP indexing does not support fragment_ids in the current "
+            "pylance distributed metadata merge API"
+        )
+
     if replace:
         try:
             existing_indices = dataset.list_indices()
@@ -510,6 +518,26 @@ def create_scalar_index(
                 f"Index with name '{name}' already exists. Set replace=True "
                 "to replace it."
             )
+
+    if index_type == "ZONEMAP":
+        logger.info(
+            "Creating ZONEMAP scalar index '%s' with Lance's native index builder",
+            name,
+        )
+        dataset.create_scalar_index(
+            column=column,
+            index_type=index_type,
+            name=name,
+            replace=False,
+            train=train,
+            **kwargs,
+        )
+        return LanceDataset(
+            uri,
+            **_dataset_load_kwargs(
+                merged_storage_options, namespace_kwargs, block_size
+            ),
+        )
 
     fragments = dataset.get_fragments()
     if not fragments:
