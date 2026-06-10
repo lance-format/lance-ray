@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
+import inspect
 import logging
 import math
 import pickle
@@ -12,6 +13,7 @@ import pyarrow.compute as pc
 import ray
 from lance.dataset import LanceDataset
 
+from .field_path import canonical_field_path, resolve_arrow_field_path
 from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
@@ -121,7 +123,7 @@ def _select_vector_index(
                 return index
             continue
 
-        if column in field_names:
+        if column in _canonical_index_field_names(field_names):
             return index
 
     if index_name is not None:
@@ -132,6 +134,16 @@ def _select_vector_index(
         )
 
     return None
+
+
+def _canonical_index_field_names(field_names: Any) -> set[str]:
+    canonical_names = set()
+    for field_name in field_names or []:
+        try:
+            canonical_names.add(canonical_field_path(str(field_name)))
+        except ValueError:
+            canonical_names.add(str(field_name))
+    return canonical_names
 
 
 def _plan_vector_search(
@@ -276,6 +288,13 @@ def _execute_vector_search_plan(
             analyze_plan=analyze_plan,
         )
 
+    if not _scanner_accepts_index_segments(dataset):
+        raise RuntimeError(
+            "The installed pylance scanner does not support index_segments, "
+            "which is required for distributed indexed vector search plans. "
+            "Upgrade pylance or run without an indexed plan."
+        )
+
     scanner_options = dict(base_scanner_options)
     search_nearest = dict(nearest)
     search_nearest["k"] = candidate_k
@@ -294,6 +313,17 @@ def _execute_vector_search_plan(
     if analyze_plan:
         return _SearchPlanAnalysis(plan=plan, analysis=scanner.analyze_plan())
     return scanner.to_table()
+
+
+def _scanner_accepts_index_segments(dataset: LanceDataset) -> bool:
+    try:
+        parameters = inspect.signature(dataset.scanner).parameters
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return True
+    return "index_segments" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 def _execute_flat_fallback_vector_search_plan(
@@ -639,12 +669,14 @@ def vector_search(
             merged_storage_options.update(_get_dataset_storage_options(dataset))
 
     try:
-        dataset.schema.field(column)
+        resolved_column = resolve_arrow_field_path(dataset.schema, column)
     except KeyError as exc:
         available_columns = [field.name for field in dataset.schema]
         raise ValueError(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from exc
+    column = resolved_column.path
+    nearest = {**nearest, "column": column}
 
     fragments = dataset.get_fragments()
     if not fragments:

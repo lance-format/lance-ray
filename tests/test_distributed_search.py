@@ -67,6 +67,30 @@ def test_select_vector_index_raises_for_missing_explicit_index_name(monkeypatch)
         )
 
 
+def test_select_vector_index_matches_canonical_lance_field_path(monkeypatch):
+    dataset = object()
+    index = SimpleNamespace(
+        name="hyphen_idx",
+        field_names=["`meta-data`.`user-id`"],
+        index_type="IVF_PQ",
+        segments=[],
+    )
+
+    monkeypatch.setattr(
+        "lance_ray.search._get_index_descriptions",
+        lambda _: [index],
+    )
+
+    assert (
+        _select_vector_index(
+            dataset,
+            column="`meta-data`.`user-id`",
+            index_name=None,
+        )
+        is index
+    )
+
+
 def test_plan_vector_search_keeps_segment_fragments_together():
     fragments = [_FakeFragment(fragment_id) for fragment_id in range(1, 6)]
     index = _index_with_segments(
@@ -198,6 +222,25 @@ def test_execute_indexed_vector_search_plan_does_not_pass_fragments(monkeypatch)
     assert "fragments" not in scanner_options
     assert scanner_options["index_segments"] == ["S1"]
     assert scanner_options["fast_search"] is True
+
+
+def test_execute_indexed_vector_search_plan_without_index_segments_support(monkeypatch):
+    class FakeDataset:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def scanner(self, columns=None):
+            return SimpleNamespace(to_table=lambda: pa.table({"id": [1]}))
+
+    with pytest.raises(RuntimeError, match="index_segments"):
+        _execute_vector_search_plan(
+            _SearchPlan(fragment_ids=[1, 2], index_segments=["S1"]),
+            pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
+            base_scanner_options={"columns": ["id"], "fast_search": True},
+            nearest={"column": "vector", "q": [0.0, 0.0], "k": 1},
+            candidate_k=1,
+            analyze_plan=False,
+        )
 
 
 def test_execute_fallback_vector_search_plan_computes_local_top_k(monkeypatch):

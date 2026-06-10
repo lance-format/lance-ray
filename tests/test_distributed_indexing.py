@@ -10,6 +10,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import ray
+from lance_ray.search import _scanner_accepts_index_segments
 from packaging import version
 
 import pandas as pd
@@ -149,6 +150,71 @@ def generate_mixed_schema_dataset(
     path = Path(tmp_path) / "mixed_schema.lance"
     lr.write_lance(
         dataset,
+        str(path),
+        min_rows_per_file=rows_per_fragment,
+        max_rows_per_file=rows_per_fragment,
+    )
+    return str(path)
+
+
+def generate_nested_contract_dataset(tmp_path, rows_per_fragment: int = 2):
+    """Generate a multi-fragment dataset with nested field-path edge cases."""
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field(
+                "meta",
+                pa.struct(
+                    [
+                        pa.field("text", pa.string()),
+                        pa.field("a.b", pa.string()),
+                    ]
+                ),
+            ),
+            pa.field(
+                "meta-data",
+                pa.struct([pa.field("user-id", pa.int64())]),
+            ),
+            pa.field("outer", pa.struct([pa.field("leaf", pa.int64())])),
+            pa.field("other", pa.struct([pa.field("leaf", pa.int64())])),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array([1, 2, 3, 4], type=pa.int64()),
+            pa.array(
+                [
+                    {"text": "nestedone", "a.b": "literalone"},
+                    {"text": "nestedtwo", "a.b": "literaltwo"},
+                    {"text": "nestedthree", "a.b": "literalthree"},
+                    {"text": "nestedfour", "a.b": "literalfour"},
+                ],
+                type=schema.field("meta").type,
+            ),
+            pa.array(
+                [
+                    {"user-id": 101},
+                    {"user-id": 102},
+                    {"user-id": 103},
+                    {"user-id": 104},
+                ],
+                type=schema.field("meta-data").type,
+            ),
+            pa.array(
+                [{"leaf": 10}, {"leaf": 20}, {"leaf": 30}, {"leaf": 40}],
+                type=schema.field("outer").type,
+            ),
+            pa.array(
+                [{"leaf": 40}, {"leaf": 30}, {"leaf": 20}, {"leaf": 10}],
+                type=schema.field("other").type,
+            ),
+        ],
+        schema=schema,
+    )
+
+    path = Path(tmp_path) / "nested_contract.lance"
+    lr.write_lance(
+        ray.data.from_arrow(table),
         str(path),
         min_rows_per_file=rows_per_fragment,
         max_rows_per_file=rows_per_fragment,
@@ -429,6 +495,93 @@ class TestDistributedIndexing:
         # Verify the index was created
         indices = updated_dataset.list_indices()
         assert len(indices) > 0, "No indices found after building"
+
+    def test_build_distributed_nested_scalar_indexes(self, temp_dir):
+        """Nested field paths should pass driver validation and reach workers."""
+        dataset_uri = generate_nested_contract_dataset(temp_dir)
+
+        updated_dataset = lr.create_scalar_index(
+            uri=dataset_uri,
+            column="`meta`.`text`",
+            index_type="INVERTED",
+            name="nested_text_idx",
+            num_workers=2,
+        )
+        updated_dataset = lr.create_scalar_index(
+            uri=updated_dataset.uri,
+            column="meta.`a.b`",
+            index_type="INVERTED",
+            name="literal_dot_text_idx",
+            num_workers=2,
+        )
+        updated_dataset = lr.create_scalar_index(
+            uri=updated_dataset.uri,
+            column="`meta-data`.`user-id`",
+            index_type="BTREE",
+            name="hyphen_user_id_idx",
+            num_workers=2,
+        )
+
+        indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
+        assert indices["nested_text_idx"]["fields"] == ["meta.text"]
+        assert indices["literal_dot_text_idx"]["fields"] == ["meta.`a.b`"]
+        assert indices["hyphen_user_id_idx"]["fields"] == ["`meta-data`.`user-id`"]
+
+        nested_results = updated_dataset.scanner(
+            full_text_query="nestedthree",
+            columns=["id", "meta.text"],
+        ).to_table()
+        literal_dot_results = updated_dataset.scanner(
+            full_text_query="literaltwo",
+            columns=["id", "meta.`a.b`"],
+        ).to_table()
+
+        assert nested_results.column("id").to_pylist() == [3]
+        assert literal_dot_results.column("id").to_pylist() == [2]
+
+    def test_build_distributed_nested_same_leaf_scalar_indexes(self, temp_dir):
+        """Same leaf names must resolve through their full nested paths."""
+        dataset_uri = generate_nested_contract_dataset(temp_dir)
+
+        with pytest.raises(ValueError, match="Column 'leaf' not found"):
+            lr.create_scalar_index(
+                uri=dataset_uri,
+                column="leaf",
+                index_type="BTREE",
+                name="ambiguous_leaf_idx",
+                num_workers=2,
+            )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=dataset_uri,
+            column="outer.leaf",
+            index_type="BTREE",
+            name="outer_leaf_idx",
+            num_workers=2,
+        )
+        updated_dataset = lr.create_scalar_index(
+            uri=updated_dataset.uri,
+            column="other.leaf",
+            index_type="BTREE",
+            name="other_leaf_idx",
+            num_workers=2,
+        )
+
+        indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
+        assert indices["outer_leaf_idx"]["fields"] == ["outer.leaf"]
+        assert indices["other_leaf_idx"]["fields"] == ["other.leaf"]
+
+        outer_results = updated_dataset.scanner(
+            filter="outer.leaf = 20",
+            columns=["id", "outer.leaf"],
+        ).to_table()
+        other_results = updated_dataset.scanner(
+            filter="other.leaf = 20",
+            columns=["id", "other.leaf"],
+        ).to_table()
+
+        assert outer_results.column("id").to_pylist() == [2]
+        assert other_results.column("id").to_pylist() == [3]
 
     def test_scalar_index_on_mixed_schema_list_indices(self, temp_dir):
         """Create scalar index on schema with both scalar and vector columns; verify list_indices."""
@@ -1295,6 +1448,37 @@ def generate_multi_fragment_vector_dataset(
     return str(path)
 
 
+def generate_nested_vector_dataset(
+    tmp_path, num_fragments: int = 2, rows_per_fragment: int = 256, dim: int = 8
+) -> str:
+    """Generate a Lance dataset with a nested vector column."""
+    num_rows = num_fragments * rows_per_fragment
+    values = pa.array(
+        [
+            float(row_idx) + (dim_idx / 100.0)
+            for row_idx in range(num_rows)
+            for dim_idx in range(dim)
+        ],
+        type=pa.float32(),
+    )
+    vector_array = pa.FixedSizeListArray.from_arrays(values, dim)
+    meta_type = pa.struct([pa.field("vector", vector_array.type)])
+    meta_array = pa.StructArray.from_arrays([vector_array], fields=list(meta_type))
+    tbl = pa.Table.from_arrays(
+        [pa.array(range(num_rows), type=pa.int64()), meta_array],
+        names=["id", "meta"],
+    )
+
+    path = Path(tmp_path) / "nested_vector.lance"
+    lance.write_dataset(
+        tbl,
+        str(path),
+        max_rows_per_file=rows_per_fragment,
+    )
+
+    return str(path)
+
+
 @pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_SQ", "IVF_PQ"])
 def test_build_distributed_vector_index(tmp_path, index_type):
     """Build a distributed vector index and verify nearest search works."""
@@ -1350,3 +1534,59 @@ def test_build_distributed_vector_index(tmp_path, index_type):
     )
 
     assert result.num_rows == 5
+
+
+@pytest.mark.parametrize("index_type", ["IVF_FLAT", "IVF_PQ"])
+def test_distributed_nested_vector_index_and_search(tmp_path, index_type):
+    """Distributed vector index and search should accept nested canonical paths."""
+    dataset_uri = generate_nested_vector_dataset(tmp_path)
+    query = [dim_idx / 100.0 for dim_idx in range(8)]
+    index_kwargs = {"num_sub_vectors": 2} if index_type == "IVF_PQ" else {}
+
+    try:
+        updated_dataset = lr.create_index(
+            uri=dataset_uri,
+            column="meta.vector",
+            index_type=index_type,
+            name=f"nested_vector_{index_type.lower()}_idx",
+            num_workers=2,
+            num_partitions=1,
+            sample_rate=2,
+            **index_kwargs,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        if (
+            "Creating empty vector indices with train=False is not yet implemented"
+            in msg
+        ):
+            pytest.skip(f"Skipping: lance version limitation: {exc}")
+        raise
+
+    indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
+    index_name = f"nested_vector_{index_type.lower()}_idx"
+    assert indices[index_name]["fields"] == ["meta.vector"]
+
+    if not _scanner_accepts_index_segments(updated_dataset):
+        with pytest.raises(RuntimeError, match="does not support index_segments"):
+            lr.vector_search(
+                uri=updated_dataset.uri,
+                nearest={"column": "`meta`.`vector`", "q": query, "k": 5},
+                index_name=index_name,
+                columns=["id"],
+                num_workers=2,
+                fast_search=True,
+            )
+        return
+
+    result = lr.vector_search(
+        uri=updated_dataset.uri,
+        nearest={"column": "`meta`.`vector`", "q": query, "k": 5},
+        index_name=index_name,
+        columns=["id"],
+        num_workers=2,
+        fast_search=True,
+    )
+
+    assert result.num_rows == 5
+    assert result.column("id").to_pylist()[0] == 0

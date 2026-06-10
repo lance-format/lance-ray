@@ -126,6 +126,54 @@ class TestWriteLance:
         tbl = ds.to_table()
         assert set(data["name"].tolist()) == set(tbl["name"].to_pylist())
 
+    def test_write_lance_preserves_nested_struct_fields(self, temp_dir):
+        path = Path(temp_dir) / "nested_struct.lance"
+        schema = pa.schema(
+            [
+                pa.field("id", pa.int64()),
+                pa.field(
+                    "meta",
+                    pa.struct(
+                        [
+                            pa.field("userId", pa.string()),
+                            pa.field("a.b", pa.string()),
+                        ]
+                    ),
+                ),
+            ]
+        )
+        table = pa.Table.from_arrays(
+            [
+                pa.array([1, 2], type=pa.int64()),
+                pa.array(
+                    [
+                        {"userId": "u1", "a.b": "literal dot one"},
+                        {"userId": "u2", "a.b": "literal dot two"},
+                    ],
+                    type=schema.field("meta").type,
+                ),
+            ],
+            schema=schema,
+        )
+
+        lr.write_lance(
+            ray.data.from_arrow(table),
+            str(path),
+            min_rows_per_file=1,
+            max_rows_per_file=1,
+        )
+
+        ds = lance.dataset(str(path))
+        assert ds.schema == schema
+        projected = lr.read_lance(str(path), columns=["meta.userId"]).take_all()
+        literal_dot = lr.read_lance(str(path), columns=["meta.`a.b`"]).take_all()
+
+        assert projected == [{"meta.userId": "u1"}, {"meta.userId": "u2"}]
+        assert literal_dot == [
+            {"meta.`a.b`": "literal dot one"},
+            {"meta.`a.b`": "literal dot two"},
+        ]
+
 
 class TestReadLance:
     """Test cases for read_lance function."""
