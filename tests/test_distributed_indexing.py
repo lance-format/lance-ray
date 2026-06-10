@@ -1350,3 +1350,109 @@ def test_build_distributed_vector_index(tmp_path, index_type):
     )
 
     assert result.num_rows == 5
+
+
+def test_build_distributed_vector_index_with_distributed_training(tmp_path):
+    """Build IVF/PQ with Ray-distributed IVF and PQ training enabled."""
+
+    dataset_uri = generate_multi_fragment_vector_dataset(
+        tmp_path, num_fragments=2, rows_per_fragment=64, dim=16
+    )
+
+    try:
+        updated_dataset = lr.create_index(
+            uri=dataset_uri,
+            column="vector",
+            index_type="IVF_PQ",
+            name="idx_ivf_pq_distributed_training",
+            num_workers=2,
+            num_partitions=2,
+            num_sub_vectors=4,
+            sample_rate=4,
+            training_mode="distributed",
+            training_max_iters=2,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        if (
+            "Creating empty vector indices with train=False is not yet implemented"
+            in msg
+        ):
+            pytest.skip(
+                "Current pylance build does not yet support distributed vector "
+                "indices with train=False; skipping functional test."
+            )
+        raise
+
+    indices = updated_dataset.list_indices()
+    vec_index = next(
+        (idx for idx in indices if idx["name"] == "idx_ivf_pq_distributed_training"),
+        None,
+    )
+
+    assert vec_index is not None
+    assert vec_index["type"] == "IVF_PQ"
+
+    q = [random.gauss(0, 1) for _ in range(16)]
+    result = updated_dataset.to_table(
+        nearest={"column": "vector", "q": q, "k": 5},
+        columns=["id", "vector"],
+    )
+
+    assert result.num_rows == 5
+
+
+def test_build_distributed_vector_index_with_provided_ivf_training_pq(tmp_path):
+    """Build IVF/PQ by reusing IVF centroids and distributed-training PQ only."""
+
+    dataset_uri = generate_multi_fragment_vector_dataset(
+        tmp_path, num_fragments=2, rows_per_fragment=64, dim=16
+    )
+    centroids = np.asarray(
+        [[-1.0] * 16, [1.0] * 16],
+        dtype=np.float32,
+    )
+    ivf_values = pa.array(centroids.reshape(-1), type=pa.float32())
+    ivf_centroids = pa.FixedSizeListArray.from_arrays(ivf_values, 16)
+
+    try:
+        updated_dataset = lr.create_index(
+            uri=dataset_uri,
+            column="vector",
+            index_type="IVF_PQ",
+            name="idx_ivf_pq_provided_ivf",
+            num_workers=2,
+            num_partitions=2,
+            num_sub_vectors=4,
+            sample_rate=4,
+            training_mode="distributed",
+            training_max_iters=2,
+            ivf_centroids=ivf_centroids,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        if (
+            "Creating empty vector indices with train=False is not yet implemented"
+            in msg
+        ):
+            pytest.skip(
+                "Current pylance build does not yet support distributed vector "
+                "indices with train=False; skipping functional test."
+            )
+        raise
+
+    indices = updated_dataset.list_indices()
+    vec_index = next(
+        (idx for idx in indices if idx["name"] == "idx_ivf_pq_provided_ivf"), None
+    )
+
+    assert vec_index is not None
+    assert vec_index["type"] == "IVF_PQ"
+
+    q = [random.gauss(0, 1) for _ in range(16)]
+    result = updated_dataset.to_table(
+        nearest={"column": "vector", "q": q, "k": 5},
+        columns=["id", "vector"],
+    )
+
+    assert result.num_rows == 5
