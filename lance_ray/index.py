@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
 import logging
+import math
 import uuid
 from collections.abc import Callable
 from typing import Any, Literal, Optional, TypeAlias, Union
@@ -14,6 +15,7 @@ from lance.indices import IndicesBuilder
 from packaging import version
 from ray.util.multiprocessing import Pool
 
+from .field_path import resolve_arrow_field_path, resolve_dataset_field_path
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -245,10 +247,7 @@ def _handle_fragment_index(
                 **kwargs,
             )
 
-            lance_field = dataset.lance_schema.field(column)
-            if lance_field is None:
-                raise KeyError(f"{column} not found in schema")
-            field_id = lance_field.id()
+            field_id = resolve_dataset_field_path(dataset, column).field_id
 
             logger.info(
                 "Fragment scalar index created successfully for fragments %s",
@@ -440,12 +439,14 @@ def create_scalar_index(
     )
 
     try:
-        field = dataset.schema.field(column)
+        resolved_column = resolve_dataset_field_path(dataset, column)
     except KeyError as exc:
         available_columns = [field.name for field in dataset.schema]
         raise ValueError(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from exc
+    column = resolved_column.path
+    field = resolved_column.field
 
     # Check column type according to index type
     value_type = field.type
@@ -637,6 +638,228 @@ _VECTOR_INDEX_TYPES = {
     "IVF_HNSW_PQ",
     "IVF_HNSW_SQ",
 }
+
+
+def _vector_dimension(field: pa.Field) -> int:
+    if pa.types.is_fixed_size_list(field.type):
+        return field.type.list_size
+    if isinstance(field.type, pa.FixedShapeTensorType) and len(field.type.shape) == 1:
+        return field.type.shape[0]
+    raise TypeError(
+        f"Vector column must be FixedSizeListArray or 1-dimensional "
+        f"FixedShapeTensorArray, got {field.type}"
+    )
+
+
+def _validate_vector_value_type(field: pa.Field) -> None:
+    value_type = field.type.value_type
+    if not (
+        pa.types.is_floating(value_type) or pa.types.is_unsigned_integer(value_type)
+    ):
+        raise TypeError(
+            "Vector column must have floating or unsigned integer value type, "
+            f"got {value_type}"
+        )
+
+
+def _schema_names(schema: pa.Schema) -> list[str]:
+    names = getattr(schema, "names", None)
+    if names is not None:
+        return list(names)
+    return [field.name for field in schema]
+
+
+class _NestedVectorIndicesBuilder:
+    def __init__(self, dataset: LanceDataset, column: str, field: pa.Field):
+        self.dataset = dataset
+        self.column = column
+        self.dimension = _vector_dimension(field)
+        _validate_vector_value_type(field)
+
+    def train_ivf(
+        self,
+        num_partitions: Optional[int] = None,
+        *,
+        distance_type: str = "l2",
+        sample_rate: int = 256,
+        max_iters: int = 50,
+        fragment_ids: Optional[list[int]] = None,
+        **kwargs: Any,
+    ) -> Any:
+        if kwargs.get("accelerator") is not None:
+            raise NotImplementedError(
+                "Nested vector IVF training does not support accelerator training"
+            )
+
+        from lance.indices.ivf import IvfModel
+        from lance.lance import indices
+
+        num_rows = _count_rows_for_fragments(self.dataset, fragment_ids)
+        partition_count = _determine_num_partitions(num_partitions, num_rows)
+        _verify_ivf_sample_rate(sample_rate, partition_count, num_rows)
+        distance_type = _normalize_distance_type(distance_type)
+        _verify_num_partitions(partition_count)
+
+        centroids = indices.train_ivf_model(
+            self.dataset._ds,
+            self.column,
+            self.dimension,
+            partition_count,
+            distance_type,
+            sample_rate,
+            max_iters,
+            fragment_ids,
+        )
+        return IvfModel(centroids, distance_type)
+
+    def train_pq(
+        self,
+        ivf_model: Any,
+        num_subvectors: Optional[int] = None,
+        *,
+        sample_rate: int = 256,
+        max_iters: int = 50,
+        fragment_ids: Optional[list[int]] = None,
+    ) -> Any:
+        from lance.indices.pq import PqModel
+        from lance.lance import indices
+
+        num_rows = _count_rows_for_fragments(self.dataset, fragment_ids)
+        num_subvectors = _normalize_pq_params(num_subvectors, self.dimension)
+        _verify_pq_sample_rate(num_rows, sample_rate)
+        codebook = indices.train_pq_model(
+            self.dataset._ds,
+            self.column,
+            self.dimension,
+            num_subvectors,
+            ivf_model.distance_type,
+            sample_rate,
+            max_iters,
+            ivf_model.centroids,
+            fragment_ids,
+        )
+        return PqModel(num_subvectors, codebook)
+
+
+def _count_rows_for_fragments(
+    dataset: LanceDataset,
+    fragment_ids: Optional[list[int]],
+) -> int:
+    if fragment_ids is None:
+        return dataset.count_rows()
+
+    row_count = 0
+    for fragment_id in fragment_ids:
+        fragment = dataset.get_fragment(fragment_id)
+        if fragment is None:
+            raise ValueError(f"Fragment id does not exist: {fragment_id}")
+        row_count += fragment.count_rows()
+    return row_count
+
+
+def _determine_num_partitions(num_partitions: Optional[int], num_rows: int) -> int:
+    if num_partitions is None:
+        return round(math.sqrt(num_rows))
+    return num_partitions
+
+
+def _verify_base_sample_rate(sample_rate: int) -> None:
+    if not isinstance(sample_rate, int) or sample_rate < 2:
+        raise ValueError(
+            f"The sample_rate must be an int greater than 1, got {sample_rate}"
+        )
+
+
+def _verify_ivf_sample_rate(
+    sample_rate: int,
+    num_partitions: int,
+    num_rows: int,
+) -> None:
+    _verify_base_sample_rate(sample_rate)
+    if num_partitions * sample_rate > num_rows:
+        raise ValueError(
+            "There are not enough rows in the dataset to create IVF centroids with"
+            f" {num_partitions} partitions and a sample rate of {sample_rate}."
+            f" {sample_rate * num_partitions} rows needed and there are {num_rows}"
+        )
+
+
+def _verify_num_partitions(num_partitions: int) -> None:
+    if not isinstance(num_partitions, int):
+        raise TypeError(f"num_partitions must be int, got {type(num_partitions)}")
+
+
+def _normalize_distance_type(distance_type: str) -> str:
+    if not isinstance(distance_type, str) or distance_type.lower() not in [
+        "l2",
+        "cosine",
+        "euclidean",
+        "dot",
+        "hamming",
+    ]:
+        raise ValueError(f"Distance type {distance_type} not supported.")
+    return distance_type.lower()
+
+
+def _normalize_pq_params(num_subvectors: Optional[int], dimension: int) -> int:
+    if num_subvectors is None:
+        if dimension % 16 == 0:
+            return dimension // 16
+        if dimension % 8 == 0:
+            return dimension // 8
+        raise ValueError(
+            f"vector dimension {dimension} is not divisible by 16 or 8."
+            " PQ performance will be poor.  Please specify num_subvectors manually."
+        )
+    if not isinstance(num_subvectors, int):
+        raise ValueError("num_subvectors must be an int")
+    if num_subvectors < 1:
+        raise ValueError("num_subvectors must be greater than 0")
+    if num_subvectors > dimension:
+        raise ValueError(
+            "num_subvectors must be less than or equal to the dimension of the vectors"
+        )
+    if dimension % num_subvectors != 0:
+        raise ValueError(
+            f"dimension ({dimension}) must be divisible by num_subvectors "
+            f"({num_subvectors}) without remainder"
+        )
+    return num_subvectors
+
+
+def _verify_pq_sample_rate(num_rows: int, sample_rate: int) -> None:
+    _verify_base_sample_rate(sample_rate)
+    if 256 * sample_rate > num_rows:
+        raise ValueError(
+            "There are not enough rows in the dataset to create PQ codebook with "
+            f"a sample rate of {sample_rate}. {sample_rate * 256} rows needed and "
+            f"there are {num_rows}"
+        )
+
+
+def _indices_builder_for_field_path(
+    dataset: LanceDataset,
+    column: str,
+    field: pa.Field,
+) -> IndicesBuilder | _NestedVectorIndicesBuilder:
+    if column in _schema_names(dataset.schema):
+        return IndicesBuilder(dataset, column)
+
+    return _NestedVectorIndicesBuilder(dataset, column, field)
+
+
+def _train_pq_for_field_path(
+    builder: IndicesBuilder | _NestedVectorIndicesBuilder,
+    ivf_model: Any,
+    *,
+    num_subvectors: Optional[int],
+    sample_rate: int,
+) -> Any:
+    return builder.train_pq(
+        ivf_model,
+        num_subvectors=num_subvectors,
+        sample_rate=sample_rate,
+    )
 
 
 def _normalize_index_type(index_type: Any) -> str:
@@ -916,12 +1139,14 @@ def create_index(
         namespace_kwargs = {}
 
     try:
-        dataset_obj.schema.field(column)
+        resolved_column = resolve_arrow_field_path(dataset_obj.schema, column)
     except KeyError as exc:
         available_columns = [field.name for field in dataset_obj.schema]
         raise ValueError(
             f"Column '{column}' not found. Available: {available_columns}"
         ) from exc
+    column = resolved_column.path
+    field = resolved_column.field
 
     if name is None:
         name = f"{column}_idx"
@@ -966,7 +1191,7 @@ def create_index(
         index_type_name,
         metric_lower,
     )
-    builder = IndicesBuilder(dataset_obj, column)
+    builder = _indices_builder_for_field_path(dataset_obj, column, field)
     num_rows = dataset_obj.count_rows()
     dimension = builder.dimension
 
@@ -998,7 +1223,8 @@ def create_index(
             requested_num_sub_vectors,
             sample_rate,
         )
-        pq_model = builder.train_pq(
+        pq_model = _train_pq_for_field_path(
+            builder,
             ivf_model,
             num_subvectors=requested_num_sub_vectors,
             sample_rate=sample_rate,
