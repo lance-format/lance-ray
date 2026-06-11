@@ -589,6 +589,8 @@ def add_columns(
         batch_size: The batch size to use for the reader.
         concurrency: The number of processes to use for the pool.
     """
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
+
     uri, storage_options = _resolve_namespace_table(
         uri,
         storage_options,
@@ -796,19 +798,16 @@ def add_columns_from(
     if read_version is not None:
         dataset_options["version"] = read_version
 
-    uri, storage_options = _resolve_namespace_table(
-        uri,
-        storage_options,
-        namespace_impl,
-        namespace_properties,
-        table_id,
-    )
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     ray_ds = read_lance(
         uri,
         columns=read_columns,
         dataset_options=dataset_options or None,
         storage_options=storage_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        table_id=table_id,
         ray_remote_args=ray_remote_args,
         with_metadata=True,
     )
@@ -930,6 +929,8 @@ def merge_columns_from(
     """
     if ds is None:
         raise ValueError("'ds' must be provided")
+
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     uri, storage_options = _resolve_namespace_table(
         uri,
