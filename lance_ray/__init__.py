@@ -8,6 +8,7 @@ columnar data processing.
 __version__ = "0.4.2"
 __author__ = "LanceDB Devs"
 __email__ = "dev@lancedb.com"
+from .cleanup import cleanup_database_old_versions, cleanup_old_versions
 from .compaction import compact_database, compact_files
 
 # Main imports
@@ -42,6 +43,8 @@ __all__ = [
     "optimize_indices",
     "compact_files",
     "compact_database",
+    "cleanup_old_versions",
+    "cleanup_database_old_versions",
     "LanceFragmentWriter",
     "LanceFragmentCommitter",
 ]
