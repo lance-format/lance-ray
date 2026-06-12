@@ -1,7 +1,7 @@
 
 # Distributed Index Building
 
-Lance-Ray provides distributed index building functionality that leverages Ray's distributed computing capabilities to efficiently create text indices for Lance datasets. This is particularly useful for large-scale datasets as it can distribute index building work across multiple Ray worker nodes.
+Lance-Ray provides distributed index building functionality that leverages Ray's distributed computing capabilities to efficiently create indices for Lance datasets. This is particularly useful for large-scale datasets as it can distribute index building work across multiple Ray worker nodes.
 
 ## Distributed APIs
 
@@ -10,12 +10,7 @@ Lance-Ray provides distributed index building functionality that leverages Ray's
 `create_scalar_index()` - Distributedly create scalar index using ray. Currently only Inverted/FTS/BTREE/BITMAP are supported. Will add more index type support in the future.
 
 #### How It Works
-The `create_scalar_index` function allows you to create full-text search indices for Lance datasets using the Ray distributed computing framework. This function distributes the index building process across multiple Ray worker nodes, with each node responsible for building indices for a subset of dataset fragments. These indices are then merged and committed as a single index.
-
-**Backward Compatibility**:
-   - Automatically detect availability of new APIs across different Lance versions
-   - Gracefully fallback to raise tips when new APIs are unavailable
-
+The `create_scalar_index` function allows you to create scalar indices for Lance datasets using the Ray distributed computing framework. This function distributes the index building process across multiple Ray worker nodes, with each node responsible for creating uncommitted index segments for a subset of dataset fragments. These segments are then committed as a single index.
 
 **`create_scalar_index`**
 

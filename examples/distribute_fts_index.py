@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Demonstration of distributed text indexing with PR #4578 enhancements.
-This example shows how to use the enhanced distributed text indexing functionality
-that leverages the new API
+Demonstration of distributed text indexing with Lance scalar segment workflow.
+This example shows how to use distributed text indexing across multiple Lance
+fragments with Ray workers.
 
 Requirements:
 - ray
 - lance_ray
-- lance (with PR #4578 changes)
+- lance with scalar segment index API support
 """
 
 import logging
@@ -69,32 +69,32 @@ def create_multi_fragment_dataset(data_df, output_path, max_rows_per_file):
     return dataset
 
 
-def demonstrate_new_api_features(dataset, column="content"):
-    """Demonstrate the new distributed indexing API features from PR #4578."""
-    logger.info("=== Demonstrating New API Features (PR #4578) ===")
+def demonstrate_segment_indexing(dataset, column="content"):
+    """Demonstrate distributed FTS indexing with segment commits."""
+    logger.info("=== Demonstrating Distributed Segment Indexing ===")
 
     try:
-        # Build distributed index using the enhanced API
-        logger.info("Building distributed index with new API features...")
+        # Build distributed index using the scalar segment workflow.
+        logger.info("Building distributed index with segment commits...")
 
         updated_dataset = lr.create_scalar_index(
-            dataset=dataset,
+            uri=dataset.uri,
             column=column,
             index_type="INVERTED",
-            name="pr4578_enhanced_idx",
+            name="distributed_fts_segment_idx",
             num_workers=4,
             remove_stop_words=False,
             with_position=True,  # Enable phrase queries
         )
 
-        logger.info("✅ Successfully created distributed index with new API")
+        logger.info("✅ Successfully created distributed segment index")
 
         # Verify index creation
         indices = updated_dataset.list_indices()
         logger.info(f"Total indices: {len(indices)}")
 
         for idx in indices:
-            if idx["name"] == "pr4578_enhanced_idx":
+            if idx["name"] == "distributed_fts_segment_idx":
                 logger.info(f"✅ Found our index: {idx['name']} (type: {idx['type']})")
                 break
         else:
@@ -103,8 +103,7 @@ def demonstrate_new_api_features(dataset, column="content"):
         return updated_dataset
 
     except Exception as e:
-        logger.error(f"❌ Error with new API: {e}")
-        logger.info("This is expected if PR #4578 changes are not available")
+        logger.error(f"❌ Error with segment indexing: {e}")
         return None
 
 
@@ -144,7 +143,7 @@ def demonstrate_search_functionality(dataset, search_queries=None):
 
 def main():
     """Main demonstration function."""
-    logger.info("🚀 Starting Distributed Text Indexing Demo (PR #4578)")
+    logger.info("🚀 Starting Distributed Text Indexing Demo")
 
     # Initialize Ray
     if not ray.is_initialized():
@@ -157,7 +156,7 @@ def main():
             data_df = generate_sample_dataset(num_fragments=4, rows_per_fragment=500)
 
             # Create multi-fragment dataset
-            dataset_path = Path(temp_dir) / "pr4578_demo_dataset.lance"
+            dataset_path = Path(temp_dir) / "distributed_fts_demo_dataset.lance"
             dataset = create_multi_fragment_dataset(
                 data_df, str(dataset_path), max_rows_per_file=500
             )
@@ -166,17 +165,15 @@ def main():
                 f"Dataset created with {len(dataset.get_fragments())} fragments"
             )
 
-            # Demonstrate new API features
-            enhanced_dataset = demonstrate_new_api_features(dataset)
+            # Demonstrate distributed segment indexing
+            enhanced_dataset = demonstrate_segment_indexing(dataset)
 
             if enhanced_dataset:
-                # Test search functionality with new API
+                # Test search functionality with the built index
                 demonstrate_search_functionality(enhanced_dataset)
                 logger.info("🎉 Demo completed successfully!")
             else:
-                logger.error(
-                    "❌ New API features not available - PR #4578 may not be merged"
-                )
+                logger.error("❌ Segment index creation failed")
 
     except Exception as e:
         logger.error(f"❌ Demo failed: {e}")

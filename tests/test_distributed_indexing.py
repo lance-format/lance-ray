@@ -745,8 +745,7 @@ class TestDistributedIndexing:
 
     def test_distributed_fts_index_new_api(self, temp_dir):
         """
-        Test distributed FTS index building using the new API from PR #4578.
-        This test demonstrates the new workflow with execute_uncommitted() and merge_index_metadata().
+        Test distributed FTS index building with the segment workflow.
         """
         # Generate test dataset with multiple fragments
         ds = generate_multi_fragment_dataset(
@@ -797,8 +796,7 @@ class TestDistributedIndexing:
 
     def test_distributed_index_with_index_uuid(self, temp_dir):
         """
-        Test distributed index building with explicit fragment UUID handling.
-        This tests the new index_uuid parameter from PR #4578.
+        Test distributed FTS index creation records the requested index name.
         """
         # Generate test dataset
         ds = generate_multi_fragment_dataset(
@@ -832,7 +830,7 @@ class TestDistributedIndexing:
 
     def test_distributed_index_error_handling_new_api(self, temp_dir):
         """
-        Test error handling in the new distributed indexing API.
+        Test error handling in the distributed indexing API.
         """
         # Generate test dataset
         ds = generate_multi_fragment_dataset(
@@ -915,6 +913,13 @@ class TestDistributedBTreeIndexing:
             filter=f"id = {eq_id}", columns=["id", "text"]
         ).to_table()
         assert eq_tbl.num_rows == 1
+        eq_plan = updated_dataset.scanner(
+            filter=f"id = {eq_id}",
+            columns=["id"],
+            use_scalar_index=True,
+        ).explain_plan()
+        assert "ScalarIndexQuery" in eq_plan
+        assert "btree_multiple_fragment_idx" in eq_plan
 
         rg_tbl = updated_dataset.scanner(
             filter="id >= 200 AND id < 800",
@@ -1160,6 +1165,14 @@ class TestDistributedBitmapIndexing:
         assert sorted(indexed.column("id").to_pylist()) == sorted(
             baseline.column("id").to_pylist()
         )
+
+        plan = updated_dataset.scanner(
+            filter="fragment_id = 1",
+            columns=["id"],
+            use_scalar_index=True,
+        ).explain_plan()
+        assert "ScalarIndexQuery" in plan
+        assert "fragment_bitmap_idx" in plan
 
 
 class TestOptimizeIndices:

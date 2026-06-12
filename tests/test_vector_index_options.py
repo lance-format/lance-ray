@@ -69,7 +69,7 @@ class _FakeLanceField:
 
 class _FakeLanceSchema:
     def field(self, column):
-        if column != "value":
+        if column not in {"value", "text"}:
             raise KeyError(column)
         return _FakeLanceField()
 
@@ -80,6 +80,8 @@ class _FakeSchema:
             return _FakeField(column)
         if column == "value":
             return _FakeField(column, index_mod.pa.int64())
+        if column == "text":
+            return _FakeField(column, index_mod.pa.string())
         else:
             raise KeyError(column)
 
@@ -88,6 +90,7 @@ class _FakeSchema:
             [
                 _FakeField("vector"),
                 _FakeField("value", index_mod.pa.int64()),
+                _FakeField("text", index_mod.pa.string()),
             ]
         )
 
@@ -266,8 +269,9 @@ def test_create_index_rejects_non_positive_sample_rate(monkeypatch):
         )
 
 
-def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch):
-    """The scalar index path should use block_size whenever it loads a dataset."""
+@pytest.mark.parametrize("index_type", ["BTREE", "BITMAP", "INVERTED", "FTS"])
+def test_create_scalar_index_uses_segment_path(monkeypatch, index_type):
+    """Migrated scalar indexes should use Lance's segment workflow."""
 
     captured = {"loads": []}
     fake_dataset = _FakeDataset()
@@ -276,12 +280,12 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
         captured["loads"].append(kwargs)
         return fake_dataset
 
-    def fake_handle_fragment_index(**kwargs):
+    def fake_handle_scalar_segment_index(**kwargs):
         captured["fragment_handler_kwargs"] = kwargs
         return lambda fragment_ids: {
             "status": "success",
             "fragment_ids": fragment_ids,
-            "fields": [7],
+            "segment_index": "segment",
         }
 
     def fake_map_async_with_pool(**kwargs):
@@ -291,43 +295,32 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
             {
                 "status": "success",
                 "fragment_ids": [0, 1],
-                "fields": [7],
+                "segment_index": "segment",
             }
         ]
 
     monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
     monkeypatch.setattr(
         index_mod,
-        "_handle_fragment_index",
-        fake_handle_fragment_index,
+        "_handle_scalar_segment_index",
+        fake_handle_scalar_segment_index,
     )
     monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
-    monkeypatch.setattr(index_mod, "merge_index_metadata_compat", lambda *a, **k: None)
-    monkeypatch.setattr(index_mod, "Index", SimpleNamespace)
-    monkeypatch.setattr(
-        index_mod.lance,
-        "LanceDataset",
-        SimpleNamespace(commit=lambda *args, **kwargs: fake_dataset),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        index_mod.lance,
-        "LanceOperation",
-        SimpleNamespace(CreateIndex=SimpleNamespace),
-        raising=False,
-    )
 
+    column = "text" if index_type in {"INVERTED", "FTS"} else "value"
     updated_dataset = index_mod.create_scalar_index(
         uri="memory://fake",
-        column="value",
-        index_type="BTREE",
+        column=column,
+        index_type=index_type,
         num_workers=2,
         block_size=4096,
     )
 
     assert updated_dataset is fake_dataset
     assert [load["block_size"] for load in captured["loads"]] == [4096, 4096]
+    assert captured["fragment_handler_kwargs"]["index_type"] == index_type
     assert captured["fragment_handler_kwargs"]["block_size"] == 4096
+    assert fake_dataset.commit_kwargs["segments"] == ["segment"]
 
 
 def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
@@ -423,7 +416,7 @@ def test_fragment_handlers_pass_block_size_to_dataset_load(monkeypatch):
     scalar_handler = index_mod._handle_fragment_index(
         dataset_uri="memory://fake",
         column="value",
-        index_type="BTREE",
+        index_type="LABEL_LIST",
         name="value_idx",
         index_uuid="scalar-index",
         replace=False,
