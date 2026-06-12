@@ -3,7 +3,8 @@
 
 """Utility functions for lance-ray."""
 
-from typing import TYPE_CHECKING, Optional, Union
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import pyarrow as pa
 
@@ -12,13 +13,14 @@ if TYPE_CHECKING:
 
 
 def pd_to_arrow(
-    df: Union[pa.Table, "pd.DataFrame", dict], schema: Optional[pa.Schema]
+    df: Union[pa.Table, "pd.DataFrame", Mapping[str, Any]],
+    schema: Optional[pa.Schema],
 ) -> pa.Table:
     """Convert a pandas DataFrame to pyarrow Table."""
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
 
-    if isinstance(df, dict):
+    if isinstance(df, Mapping):
         return pa.Table.from_pydict(df, schema=schema)
     elif _PANDAS_AVAILABLE and isinstance(df, pd.DataFrame):
         tbl = pa.Table.from_pandas(df, schema=schema)
@@ -31,4 +33,4 @@ def pd_to_arrow(
         return new_table
     elif isinstance(df, pa.Table) and df.num_rows > 0 and schema is not None:
         return df.cast(schema)
-    return df
+    return cast(pa.Table, df)
