@@ -2,11 +2,13 @@
 
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import lance
 import lance_ray as lr
 import pyarrow as pa
 import pytest
+import ray
 
 import pandas as pd
 
@@ -142,6 +144,180 @@ class TestAddColumnsFrom:
         )
         assert result["id"].tolist() == list(range(n_rows))
         assert result["doubled"].tolist() == [x * 20 for x in range(n_rows)]
+
+    def test_namespace_only_resolves_uri(self, temp_dir):
+        table_id = ["acf_namespace_only"]
+        data = pd.DataFrame(
+            {
+                "id": [1, 2, 3, 4],
+                "value": [10, 20, 30, 40],
+            }
+        )
+        lr.write_lance(
+            ray.data.from_pandas(data),
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+            min_rows_per_file=1,
+            max_rows_per_file=2,
+        )
+
+        def add_double(batch):
+            return {"doubled": [int(x) * 2 for x in batch["value"]]}
+
+        lr.add_columns_from(
+            transform=add_double,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        result = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+        df = result.to_pandas().sort_values("id").reset_index(drop=True)
+        assert df["doubled"].tolist() == [20, 40, 60, 80]
+
+    def test_namespace_storage_options_override_local_options(self, monkeypatch):
+        from lance_ray.utils import resolve_namespace_table
+
+        class FakeNamespace:
+            def describe_table(self, request):
+                assert request.id == ["lance_catalog", "sales", "orders"]
+                return SimpleNamespace(
+                    location="s3://contacts/raw/lance/sales/orders.lance",
+                    storage_options={
+                        "endpoint": "http://127.0.0.1:9000",
+                        "access_key_id": "namespace-ak",
+                        "secret_access_key": "namespace-sk",
+                        "allow_http": "true",
+                    },
+                )
+
+        monkeypatch.setattr(
+            "lance_ray.utils.get_or_create_namespace",
+            lambda namespace_impl, namespace_properties: FakeNamespace(),
+        )
+
+        uri, storage_options = resolve_namespace_table(
+            None,
+            {"access_key_id": "local-ak", "region": "us-east-1"},
+            "rest",
+            {"uri": "http://127.0.0.1:9101/lance"},
+            ["lance_catalog", "sales", "orders"],
+        )
+
+        assert uri == "s3://contacts/raw/lance/sales/orders.lance"
+        assert storage_options == {
+            "endpoint": "http://127.0.0.1:9000",
+            "access_key_id": "namespace-ak",
+            "secret_access_key": "namespace-sk",
+            "allow_http": "true",
+            "region": "us-east-1",
+        }
+
+    def test_resolve_namespace_table_prefers_explicit_uri(self, monkeypatch):
+        """An explicit uri must not trigger describe_table or pull foreign creds."""
+        from lance_ray.utils import resolve_namespace_table
+
+        class ExplodingNamespace:
+            def describe_table(self, request):  # pragma: no cover - must not run
+                raise AssertionError(
+                    "describe_table must not be called when uri is provided"
+                )
+
+        monkeypatch.setattr(
+            "lance_ray.utils.get_or_create_namespace",
+            lambda namespace_impl, namespace_properties: ExplodingNamespace(),
+        )
+
+        uri, storage_options = resolve_namespace_table(
+            "s3://bucket-a/table-a.lance",
+            {"access_key_id": "local-ak"},
+            "rest",
+            {"uri": "http://127.0.0.1:9101/lance"},
+            ["lance_catalog", "sales", "orders"],
+        )
+
+        assert uri == "s3://bucket-a/table-a.lance"
+        assert storage_options == {"access_key_id": "local-ak"}
+
+    def test_namespace_args_preserved_for_read_lance(self, monkeypatch):
+        calls = {}
+
+        class FakeRayDataset:
+            def map_batches(self, fn, batch_format=None):
+                calls["map_batches"] = {
+                    "fn": fn,
+                    "batch_format": batch_format,
+                }
+                return self
+
+        def fake_read_lance(*args, **kwargs):
+            calls["read_lance"] = {"args": args, "kwargs": kwargs}
+            return FakeRayDataset()
+
+        def fake_merge_columns_from(*args, **kwargs):
+            calls["merge_columns_from"] = {"args": args, "kwargs": kwargs}
+
+        monkeypatch.setattr("lance_ray.io.read_lance", fake_read_lance)
+        monkeypatch.setattr("lance_ray.io.merge_columns_from", fake_merge_columns_from)
+
+        def add_double(batch):
+            return {"doubled": [int(x) * 2 for x in batch["value"]]}
+
+        lr.add_columns_from(
+            transform=add_double,
+            storage_options={"region": "us-east-1"},
+            namespace_impl="rest",
+            namespace_properties={"uri": "http://127.0.0.1:9101/lance"},
+            table_id=["lance_catalog", "sales", "orders"],
+        )
+
+        read_kwargs = calls["read_lance"]["kwargs"]
+        assert calls["read_lance"]["args"] == (None,)
+        assert read_kwargs["namespace_impl"] == "rest"
+        assert read_kwargs["namespace_properties"] == {
+            "uri": "http://127.0.0.1:9101/lance"
+        }
+        assert read_kwargs["table_id"] == ["lance_catalog", "sales", "orders"]
+        assert read_kwargs["storage_options"] == {"region": "us-east-1"}
+        assert read_kwargs["with_metadata"] is True
+
+        merge_kwargs = calls["merge_columns_from"]["kwargs"]
+        assert calls["merge_columns_from"]["args"][0] is None
+        assert merge_kwargs["namespace_impl"] == "rest"
+        assert merge_kwargs["table_id"] == ["lance_catalog", "sales", "orders"]
+
+    def test_uri_and_namespace_are_mutually_exclusive(self):
+        def add_double(batch):
+            return {"doubled": [1]}
+
+        with pytest.raises(ValueError, match="Cannot provide both 'uri'"):
+            lr.add_columns_from(
+                "/tmp/table.lance",
+                transform=add_double,
+                namespace_impl="dir",
+                table_id=["table"],
+            )
+
+        with pytest.raises(ValueError, match="Cannot provide both 'uri'"):
+            lr.add_columns(
+                "/tmp/table.lance",
+                transform=add_double,
+                namespace_impl="dir",
+                table_id=["table"],
+            )
+
+        with pytest.raises(ValueError, match="Cannot provide both 'uri'"):
+            lr.merge_columns_from(
+                "/tmp/table.lance",
+                object(),
+                namespace_impl="dir",
+                table_id=["table"],
+            )
 
 
 class TestMergeColumnsFrom:

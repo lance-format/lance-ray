@@ -22,6 +22,7 @@ from .utils import (
     has_namespace_params,
     materialize_initial_bases,
     normalize_initial_bases,
+    resolve_namespace_table,
     validate_uri_or_namespace,
 )
 
@@ -496,7 +497,7 @@ def _handle_fragment(
 
 
 def add_columns(
-    uri: str,
+    uri: Optional[str] = None,
     *,
     transform: "TransformType",
     filter: Optional[str] = None,
@@ -530,7 +531,9 @@ def add_columns(
         >>> lr.add_columns("/tmp/data/", transform=double_score, concurrency=2)
 
     Args:
-        uri: The path to the destination Lance dataset.
+        uri: The path to the destination Lance dataset. If omitted, provide
+            ``namespace_impl`` and ``table_id`` to resolve the location from
+            the namespace.
         transform: The transform to apply to the dataset. It support a lot of types,
             see `LanceDB API doc https://lancedb.github.io/lance-python-doc/data-evolution.html ` for more details.
         filter: The filter to apply to the dataset. It is not supported yet, will be
@@ -552,7 +555,15 @@ def add_columns(
         batch_size: The batch size to use for the reader.
         concurrency: The number of processes to use for the pool.
     """
-    storage_options = storage_options or {}
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+    uri, storage_options = resolve_namespace_table(
+        uri,
+        storage_options,
+        namespace_impl,
+        namespace_properties,
+        table_id,
+    )
 
     namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
@@ -695,7 +706,7 @@ def _fill_null_fragment(
 
 
 def add_columns_from(
-    uri: str,
+    uri: Optional[str] = None,
     *,
     transform: "TransformType",
     read_columns: Optional[list[str]] = None,
@@ -731,7 +742,9 @@ def add_columns_from(
         >>> lr.add_columns_from("/tmp/data/", transform=compute_name_len)
 
     Args:
-        uri: The path to the destination Lance dataset.
+        uri: The path to the destination Lance dataset. If omitted, provide
+            ``namespace_impl`` and ``table_id`` to resolve the location from
+            the namespace.
         transform: The transform to apply to each batch. It receives a dict
             mapping column names to Python lists (metadata columns like
             ``_rowaddr`` are excluded) and must return only the new columns
@@ -750,6 +763,8 @@ def add_columns_from(
     dataset_options: dict[str, Any] = {}
     if read_version is not None:
         dataset_options["version"] = read_version
+
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     ray_ds = read_lance(
         uri,
@@ -825,8 +840,8 @@ def add_columns_from(
 
 
 def merge_columns_from(
-    uri: str,
-    ds: Dataset,
+    uri: Optional[str] = None,
+    ds: Optional[Dataset] = None,
     *,
     read_version: Optional[int | str] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
@@ -860,7 +875,9 @@ def merge_columns_from(
         >>> lr.merge_columns_from("/tmp/data/", ray_ds)
 
     Args:
-        uri: The path to the destination Lance dataset.
+        uri: The path to the destination Lance dataset. If omitted, provide
+            ``namespace_impl`` and ``table_id`` to resolve the location from
+            the namespace.
         ds: A Ray Dataset containing ``_rowaddr`` and the new column(s) to add.
             Every fragment in the target Lance dataset must be represented
             (unless ``require_full_coverage=False``).
@@ -876,7 +893,18 @@ def merge_columns_from(
             target Lance dataset. Set to False to allow merging new columns
             into a subset of fragments only.
     """
-    storage_options = storage_options or {}
+    if ds is None:
+        raise ValueError("'ds' must be provided")
+
+    validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+    uri, storage_options = resolve_namespace_table(
+        uri,
+        storage_options,
+        namespace_impl,
+        namespace_properties,
+        table_id,
+    )
     namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
     )
