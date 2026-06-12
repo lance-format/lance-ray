@@ -276,12 +276,12 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
         captured["loads"].append(kwargs)
         return fake_dataset
 
-    def fake_handle_fragment_index(**kwargs):
+    def fake_handle_scalar_segment_index(**kwargs):
         captured["fragment_handler_kwargs"] = kwargs
         return lambda fragment_ids: {
             "status": "success",
             "fragment_ids": fragment_ids,
-            "fields": [7],
+            "segment_index": "segment",
         }
 
     def fake_map_async_with_pool(**kwargs):
@@ -291,18 +291,248 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
             {
                 "status": "success",
                 "fragment_ids": [0, 1],
-                "fields": [7],
+                "segment_index": "segment",
             }
         ]
 
     monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
     monkeypatch.setattr(
         index_mod,
-        "_handle_fragment_index",
-        fake_handle_fragment_index,
+        "_handle_scalar_segment_index",
+        fake_handle_scalar_segment_index,
     )
     monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
-    monkeypatch.setattr(index_mod, "merge_index_metadata_compat", lambda *a, **k: None)
+
+    updated_dataset = index_mod.create_scalar_index(
+        uri="memory://fake",
+        column="value",
+        index_type="BTREE",
+        num_workers=2,
+        block_size=4096,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert [load["block_size"] for load in captured["loads"]] == [4096, 4096]
+    assert captured["fragment_handler_kwargs"]["block_size"] == 4096
+
+
+def test_create_scalar_index_uses_segment_path_for_bitmap(monkeypatch):
+    """BITMAP should use the segment workflow in pylance 8.0."""
+
+    captured = {"loads": []}
+    fake_dataset = _FakeDataset()
+
+    def fake_lance_dataset(*args, **kwargs):
+        captured["loads"].append(kwargs)
+        return fake_dataset
+
+    def fake_handle_scalar_segment_index(**kwargs):
+        captured["fragment_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {
+            "status": "success",
+            "fragment_ids": fragment_ids,
+            "segment_index": "segment",
+        }
+
+    def fake_map_async_with_pool(**kwargs):
+        kwargs["create_fragment_handler"]()
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "segment_index": "segment",
+            }
+        ]
+
+    monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
+    monkeypatch.setattr(
+        index_mod,
+        "_handle_scalar_segment_index",
+        fake_handle_scalar_segment_index,
+    )
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+
+    updated_dataset = index_mod.create_scalar_index(
+        uri="memory://fake",
+        column="value",
+        index_type="BITMAP",
+        num_workers=2,
+        block_size=4096,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert captured["fragment_handler_kwargs"]["index_type"] == "BITMAP"
+    assert captured["fragment_handler_kwargs"]["block_size"] == 4096
+    assert fake_dataset.commit_kwargs["segments"] == ["segment"]
+
+
+def test_create_scalar_index_uses_segment_path_for_supported_index_config(monkeypatch):
+    """IndexConfig should use segment workflow when its index type supports it."""
+
+    captured = {}
+    fake_dataset = _FakeDataset()
+    index_config = index_mod.IndexConfig("BTREE", {})
+
+    def fake_handle_scalar_segment_index(**kwargs):
+        captured["fragment_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {
+            "status": "success",
+            "fragment_ids": fragment_ids,
+            "segment_index": "segment",
+        }
+
+    def fake_map_async_with_pool(**kwargs):
+        kwargs["create_fragment_handler"]()
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "segment_index": "segment",
+            }
+        ]
+
+    monkeypatch.setattr(index_mod, "LanceDataset", lambda *a, **k: fake_dataset)
+    monkeypatch.setattr(
+        index_mod,
+        "_handle_scalar_segment_index",
+        fake_handle_scalar_segment_index,
+    )
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+
+    updated_dataset = index_mod.create_scalar_index(
+        uri="memory://fake",
+        column="value",
+        index_type=index_config,
+        num_workers=2,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert captured["fragment_handler_kwargs"]["index_type"] is index_config
+    assert fake_dataset.commit_kwargs["segments"] == ["segment"]
+
+
+@pytest.mark.parametrize("index_type", ["LABEL_LIST", "NGRAM", "ZONEMAP"])
+def test_create_scalar_index_uses_legacy_path_for_non_segment_types(
+    monkeypatch, index_type
+):
+    """Non-segment scalar types should keep the legacy distributed workflow."""
+
+    captured = {"loads": []}
+    fake_dataset = _FakeDataset()
+
+    def fake_lance_dataset(*args, **kwargs):
+        captured["loads"].append(kwargs)
+        return fake_dataset
+
+    def fake_handle_fragment_index(**kwargs):
+        captured["legacy_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {
+            "status": "success",
+            "fragment_ids": fragment_ids,
+            "fields": [7],
+        }
+
+    def fake_map_async_with_pool(**kwargs):
+        kwargs["create_fragment_handler"]()
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "fields": [7],
+            }
+        ]
+
+    def fake_merge_index_metadata(dataset, index_id, index_type, **kwargs):
+        captured["merge"] = {
+            "dataset": dataset,
+            "index_id": index_id,
+            "index_type": index_type,
+            "kwargs": kwargs,
+        }
+
+    def fake_commit(*args, **kwargs):
+        captured["commit"] = {"args": args, "kwargs": kwargs}
+        return fake_dataset
+
+    monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
+    monkeypatch.setattr(index_mod, "_handle_fragment_index", fake_handle_fragment_index)
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+    monkeypatch.setattr(
+        index_mod,
+        "merge_index_metadata_compat",
+        fake_merge_index_metadata,
+    )
+    monkeypatch.setattr(index_mod, "Index", SimpleNamespace)
+    monkeypatch.setattr(
+        index_mod.lance,
+        "LanceDataset",
+        SimpleNamespace(commit=fake_commit),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        index_mod.lance,
+        "LanceOperation",
+        SimpleNamespace(CreateIndex=SimpleNamespace),
+        raising=False,
+    )
+
+    updated_dataset = index_mod.create_scalar_index(
+        uri="memory://fake",
+        column="value",
+        index_type=index_type,
+        num_workers=2,
+        block_size=4096,
+    )
+
+    assert updated_dataset is fake_dataset
+    assert captured["legacy_handler_kwargs"]["index_type"] == index_type
+    assert captured["legacy_handler_kwargs"]["block_size"] == 4096
+    assert captured["merge"]["index_type"] == index_type
+    assert "commit" in captured
+    assert not hasattr(fake_dataset, "commit_kwargs")
+
+
+def test_create_scalar_index_uses_legacy_path_for_index_config(monkeypatch):
+    """Non-segment IndexConfig should keep the legacy distributed workflow."""
+
+    captured = {}
+    fake_dataset = _FakeDataset()
+    index_config = index_mod.IndexConfig("ZONEMAP", {})
+
+    def fake_handle_fragment_index(**kwargs):
+        captured["legacy_handler_kwargs"] = kwargs
+        return lambda fragment_ids: {
+            "status": "success",
+            "fragment_ids": fragment_ids,
+            "fields": [7],
+        }
+
+    def fake_map_async_with_pool(**kwargs):
+        kwargs["create_fragment_handler"]()
+        return [
+            {
+                "status": "success",
+                "fragment_ids": [0, 1],
+                "fields": [7],
+            }
+        ]
+
+    def fake_merge_index_metadata(dataset, index_id, index_type, **kwargs):
+        captured["merge"] = {
+            "dataset": dataset,
+            "index_id": index_id,
+            "index_type": index_type,
+            "kwargs": kwargs,
+        }
+
+    monkeypatch.setattr(index_mod, "LanceDataset", lambda *a, **k: fake_dataset)
+    monkeypatch.setattr(index_mod, "_handle_fragment_index", fake_handle_fragment_index)
+    monkeypatch.setattr(index_mod, "_map_async_with_pool", fake_map_async_with_pool)
+    monkeypatch.setattr(
+        index_mod,
+        "merge_index_metadata_compat",
+        fake_merge_index_metadata,
+    )
     monkeypatch.setattr(index_mod, "Index", SimpleNamespace)
     monkeypatch.setattr(
         index_mod.lance,
@@ -320,14 +550,14 @@ def test_create_scalar_index_passes_block_size_to_loads_and_handler(monkeypatch)
     updated_dataset = index_mod.create_scalar_index(
         uri="memory://fake",
         column="value",
-        index_type="BTREE",
+        index_type=index_config,
         num_workers=2,
-        block_size=4096,
     )
 
     assert updated_dataset is fake_dataset
-    assert [load["block_size"] for load in captured["loads"]] == [4096, 4096]
-    assert captured["fragment_handler_kwargs"]["block_size"] == 4096
+    assert captured["legacy_handler_kwargs"]["index_type"] is index_config
+    assert captured["merge"]["index_type"] == "scalar"
+    assert not hasattr(fake_dataset, "commit_kwargs")
 
 
 def test_create_index_passes_block_size_to_loads_and_handler(monkeypatch):
@@ -420,13 +650,11 @@ def test_fragment_handlers_pass_block_size_to_dataset_load(monkeypatch):
 
     monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
 
-    scalar_handler = index_mod._handle_fragment_index(
+    scalar_handler = index_mod._handle_scalar_segment_index(
         dataset_uri="memory://fake",
         column="value",
         index_type="BTREE",
         name="value_idx",
-        index_uuid="scalar-index",
-        replace=False,
         train=True,
         block_size=4096,
     )

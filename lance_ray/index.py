@@ -186,6 +186,97 @@ def _put_vector_index_artifacts_in_object_store(
     )
 
 
+_SCALAR_SEGMENT_INDEX_TYPES = {"BTREE", "BITMAP", "INVERTED", "FTS"}
+
+
+def _scalar_index_type_name(index_type: str | IndexConfig) -> str | None:
+    if isinstance(index_type, str):
+        return index_type.upper()
+    if isinstance(index_type, IndexConfig):
+        return index_type.index_type.upper()
+    return None
+
+
+def _handle_scalar_segment_index(
+    dataset_uri: str,
+    column: str,
+    index_type: str | IndexConfig,
+    name: str,
+    train: bool,
+    storage_options: Optional[dict[str, str]] = None,
+    block_size: Optional[int] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[dict[str, str]] = None,
+    table_id: Optional[list[str]] = None,
+    **kwargs: Any,
+):
+    """Create a fragment handler closure for scalar segment index builds."""
+
+    def func(fragment_ids: list[int]) -> dict[str, Any]:
+        try:
+            if not fragment_ids:
+                raise ValueError("fragment_ids cannot be empty")
+
+            for fragment_id in fragment_ids:
+                if fragment_id < 0 or fragment_id > 0xFFFFFFFF:
+                    raise ValueError(f"Invalid fragment_id: {fragment_id}")
+
+            namespace_kwargs = get_namespace_kwargs(
+                namespace_impl, namespace_properties, table_id
+            )
+            dataset = LanceDataset(
+                dataset_uri,
+                **_dataset_load_kwargs(storage_options, namespace_kwargs, block_size),
+            )
+
+            available_fragments = {f.fragment_id for f in dataset.get_fragments()}
+            invalid_fragments = set(fragment_ids) - available_fragments
+            if invalid_fragments:
+                raise ValueError(f"Fragment IDs {invalid_fragments} do not exist")
+
+            logger.info(
+                "Building distributed scalar segment index for fragments %s using "
+                "create_index_uncommitted",
+                fragment_ids,
+            )
+
+            segment_index = dataset.create_index_uncommitted(
+                column=column,
+                index_type=index_type,
+                name=name,
+                replace=False,
+                train=train,
+                storage_options=storage_options,
+                fragment_ids=fragment_ids,
+                **kwargs,
+            )
+
+            logger.info(
+                "Fragment scalar segment index created successfully for fragments %s",
+                fragment_ids,
+            )
+
+            return {
+                "status": "success",
+                "fragment_ids": fragment_ids,
+                "segment_index": segment_index,
+            }
+
+        except Exception as exc:  # pragma: no cover - exercised via integration tests
+            logger.error(
+                "Fragment scalar segment index task failed for fragments %s: %s",
+                fragment_ids,
+                exc,
+            )
+            return {
+                "status": "error",
+                "fragment_ids": fragment_ids,
+                "error": str(exc),
+            }
+
+    return func
+
+
 def _handle_fragment_index(
     dataset_uri: str,
     column: str,
@@ -398,13 +489,6 @@ def create_scalar_index(
                 f"Index type must be one of {valid_index_types}, not '{index_type}'"
             )
 
-        supported_distributed_types = {"INVERTED", "FTS", "BTREE", "BITMAP"}
-        if index_type not in supported_distributed_types:
-            raise ValueError(
-                "Distributed indexing currently supports "
-                f"{sorted(supported_distributed_types)} index types, "
-                f"not '{index_type}'"
-            )
     elif not isinstance(index_type, IndexConfig):
         raise ValueError(
             "index_type must be a string literal or IndexConfig object, got "
@@ -476,6 +560,10 @@ def create_scalar_index(
                 # For other index types, skip strict validation to maintain compatibility
                 pass
 
+    use_segment_workflow = (
+        _scalar_index_type_name(index_type) in _SCALAR_SEGMENT_INDEX_TYPES
+    )
+
     if name is None:
         name = f"{column}_idx"
 
@@ -535,6 +623,21 @@ def create_scalar_index(
     fragment_batches = _distribute_fragments_balanced(fragments, num_workers, logger)
 
     def create_fragment_handler() -> Any:
+        if use_segment_workflow:
+            return _handle_scalar_segment_index(
+                dataset_uri=uri,
+                column=column,
+                index_type=index_type,
+                name=name,
+                train=train,
+                storage_options=merged_storage_options,
+                block_size=block_size,
+                namespace_impl=namespace_impl,
+                namespace_properties=namespace_properties,
+                table_id=table_id,
+                **kwargs,
+            )
+
         return _handle_fragment_index(
             dataset_uri=uri,
             column=column,
@@ -576,6 +679,33 @@ def create_scalar_index(
         **_dataset_load_kwargs(merged_storage_options, namespace_kwargs, block_size),
     )
 
+    successful_results = [r for r in results if r["status"] == "success"]
+    if not successful_results:
+        raise RuntimeError("No successful index creation results found")
+
+    if use_segment_workflow:
+        logger.info(
+            "Phase 2: Committing scalar distributed index segments for index '%s'",
+            name,
+        )
+
+        updated_dataset = dataset.commit_existing_index_segments(
+            index_name=name,
+            column=column,
+            segments=[r["segment_index"] for r in successful_results],
+        )
+
+        logger.info(
+            "Successfully created distributed scalar segment index '%s'",
+            name,
+        )
+        logger.info(
+            "Fragments: %d, Workers: %d",
+            len(fragment_ids_to_use),
+            len(fragment_batches),
+        )
+        return updated_dataset
+
     logger.info("Phase 2: Merging index metadata for index ID: %s", index_id)
     # Convert IndexConfig to string for merge_index_metadata which expects a string
     # (lance's create_scalar_index converts IndexConfig to "scalar" internally)
@@ -583,10 +713,6 @@ def create_scalar_index(
     merge_index_metadata_compat(dataset, index_id, index_type=index_type_str, **kwargs)
 
     logger.info("Phase 3: Creating and committing scalar index '%s'", name)
-
-    successful_results = [r for r in results if r["status"] == "success"]
-    if not successful_results:
-        raise RuntimeError("No successful index creation results found")
 
     fields = successful_results[0]["fields"]
 

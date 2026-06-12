@@ -745,8 +745,9 @@ class TestDistributedIndexing:
 
     def test_distributed_fts_index_new_api(self, temp_dir):
         """
-        Test distributed FTS index building using the new API from PR #4578.
-        This test demonstrates the new workflow with execute_uncommitted() and merge_index_metadata().
+        Test distributed FTS index building using Lance's segment FTS API.
+        This test demonstrates the segment workflow with create_index_uncommitted()
+        and commit_existing_index_segments().
         """
         # Generate test dataset with multiple fragments
         ds = generate_multi_fragment_dataset(
@@ -915,12 +916,54 @@ class TestDistributedBTreeIndexing:
             filter=f"id = {eq_id}", columns=["id", "text"]
         ).to_table()
         assert eq_tbl.num_rows == 1
+        eq_plan = updated_dataset.scanner(
+            filter=f"id = {eq_id}",
+            columns=["id"],
+            use_scalar_index=True,
+        ).explain_plan()
+        assert "ScalarIndexQuery" in eq_plan
+        assert "btree_multiple_fragment_idx" in eq_plan
 
         rg_tbl = updated_dataset.scanner(
             filter="id >= 200 AND id < 800",
             columns=["id", "text"],
         ).to_table()
         assert rg_tbl.num_rows > 0
+
+    def test_distributed_bitmap_index_basic(self, temp_dir):
+        """Build a distributed BITMAP index and verify equality search uses it."""
+        ds = generate_multi_fragment_dataset(
+            temp_dir, num_fragments=3, rows_per_fragment=500
+        )
+
+        updated_dataset = lr.create_scalar_index(
+            uri=ds.uri,
+            column="fragment_id",
+            index_type="BITMAP",
+            name="bitmap_fragment_idx",
+            replace=False,
+            num_workers=3,
+        )
+
+        indices = updated_dataset.list_indices()
+        our_index = next(
+            (idx for idx in indices if idx["name"] == "bitmap_fragment_idx"),
+            None,
+        )
+        assert our_index is not None, "BITMAP index not found by name"
+
+        tbl = updated_dataset.scanner(
+            filter="fragment_id = 1", columns=["id", "fragment_id"]
+        ).to_table()
+        assert tbl.num_rows == 500
+
+        plan = updated_dataset.scanner(
+            filter="fragment_id = 1",
+            columns=["id"],
+            use_scalar_index=True,
+        ).explain_plan()
+        assert "ScalarIndexQuery" in plan
+        assert "bitmap_fragment_idx" in plan
 
     @pytest.fixture
     def btree_comp_datasets(self, tmp_path):
