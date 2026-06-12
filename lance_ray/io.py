@@ -19,10 +19,10 @@ from .datasource import LanceDatasource
 from .fragment import prepare_fragment_write_options
 from .utils import (
     get_namespace_kwargs,
-    get_or_create_namespace,
     has_namespace_params,
     materialize_initial_bases,
     normalize_initial_bases,
+    resolve_namespace_table,
     validate_uri_or_namespace,
 )
 
@@ -35,40 +35,6 @@ if TYPE_CHECKING:
         | ReaderLike
         | Callable[[pa.RecordBatch], pa.RecordBatch]
     )
-
-
-def _resolve_namespace_table(
-    uri: Optional[str],
-    storage_options: Optional[dict[str, Any]],
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-) -> tuple[str, dict[str, Any]]:
-    """Resolve table location and storage options from namespace if available."""
-    resolved_uri = uri
-    merged_storage_options = dict(storage_options or {})
-
-    if has_namespace_params(namespace_impl, table_id):
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-        if namespace is not None:
-            from lance_namespace import DescribeTableRequest
-
-            describe_response = namespace.describe_table(
-                DescribeTableRequest(id=table_id)
-            )
-            if resolved_uri is None:
-                resolved_uri = describe_response.location
-                if resolved_uri is None:
-                    raise ValueError(
-                        "Namespace did not return a 'location' for the table"
-                    )
-            if describe_response.storage_options:
-                merged_storage_options.update(describe_response.storage_options)
-
-    if resolved_uri is None:
-        raise ValueError("Must provide either 'uri' OR ('namespace_impl' + 'table_id').")
-
-    return resolved_uri, merged_storage_options
 
 
 def read_lance(
@@ -591,7 +557,7 @@ def add_columns(
     """
     validate_uri_or_namespace(uri, namespace_impl, table_id)
 
-    uri, storage_options = _resolve_namespace_table(
+    uri, storage_options = resolve_namespace_table(
         uri,
         storage_options,
         namespace_impl,
@@ -932,7 +898,7 @@ def merge_columns_from(
 
     validate_uri_or_namespace(uri, namespace_impl, table_id)
 
-    uri, storage_options = _resolve_namespace_table(
+    uri, storage_options = resolve_namespace_table(
         uri,
         storage_options,
         namespace_impl,

@@ -15,7 +15,7 @@ from lance.dataset import LanceDataset
 from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
-    get_or_create_namespace,
+    resolve_namespace_table,
     validate_uri_or_namespace,
 )
 
@@ -612,16 +612,9 @@ def vector_search(
 
     if isinstance(uri, str | type(None)):
         validate_uri_or_namespace(uri, namespace_impl, table_id)
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-        if namespace is not None and table_id is not None:
-            from lance_namespace import DescribeTableRequest
-
-            describe_response = namespace.describe_table(
-                DescribeTableRequest(id=table_id)
-            )
-            uri = describe_response.location
-            if describe_response.storage_options:
-                merged_storage_options.update(describe_response.storage_options)
+        uri, merged_storage_options = resolve_namespace_table(
+            uri, storage_options, namespace_impl, namespace_properties, table_id
+        )
 
         dataset_uri = uri
         namespace_kwargs = get_namespace_kwargs(

@@ -181,7 +181,7 @@ class TestAddColumnsFrom:
         assert df["doubled"].tolist() == [20, 40, 60, 80]
 
     def test_namespace_storage_options_override_local_options(self, monkeypatch):
-        from lance_ray.io import _resolve_namespace_table
+        from lance_ray.utils import resolve_namespace_table
 
         class FakeNamespace:
             def describe_table(self, request):
@@ -197,11 +197,11 @@ class TestAddColumnsFrom:
                 )
 
         monkeypatch.setattr(
-            "lance_ray.io.get_or_create_namespace",
+            "lance_ray.utils.get_or_create_namespace",
             lambda namespace_impl, namespace_properties: FakeNamespace(),
         )
 
-        uri, storage_options = _resolve_namespace_table(
+        uri, storage_options = resolve_namespace_table(
             None,
             {"access_key_id": "local-ak", "region": "us-east-1"},
             "rest",
@@ -217,6 +217,32 @@ class TestAddColumnsFrom:
             "allow_http": "true",
             "region": "us-east-1",
         }
+
+    def test_resolve_namespace_table_prefers_explicit_uri(self, monkeypatch):
+        """An explicit uri must not trigger describe_table or pull foreign creds."""
+        from lance_ray.utils import resolve_namespace_table
+
+        class ExplodingNamespace:
+            def describe_table(self, request):  # pragma: no cover - must not run
+                raise AssertionError(
+                    "describe_table must not be called when uri is provided"
+                )
+
+        monkeypatch.setattr(
+            "lance_ray.utils.get_or_create_namespace",
+            lambda namespace_impl, namespace_properties: ExplodingNamespace(),
+        )
+
+        uri, storage_options = resolve_namespace_table(
+            "s3://bucket-a/table-a.lance",
+            {"access_key_id": "local-ak"},
+            "rest",
+            {"uri": "http://127.0.0.1:9101/lance"},
+            ["lance_catalog", "sales", "orders"],
+        )
+
+        assert uri == "s3://bucket-a/table-a.lance"
+        assert storage_options == {"access_key_id": "local-ak"}
 
     def test_namespace_args_preserved_for_read_lance(self, monkeypatch):
         calls = {}

@@ -16,7 +16,8 @@ from ray.util.multiprocessing import Pool
 
 from .utils import (
     get_namespace_kwargs,
-    get_or_create_namespace,
+    has_namespace_params,
+    resolve_namespace_table,
     validate_uri_or_namespace,
 )
 
@@ -415,19 +416,10 @@ def create_scalar_index(
     # Note: Ray initialization is now handled by the Pool, following the pattern from io.py
     # This removes the need for explicit ray.init() calls
 
-    merged_storage_options: dict[str, Any] = {}
-    if storage_options:
-        merged_storage_options.update(storage_options)
-
     # Resolve URI and get storage options from namespace if provided
-    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-    if namespace is not None and table_id is not None:
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-        if describe_response.storage_options:
-            merged_storage_options.update(describe_response.storage_options)
+    uri, merged_storage_options = resolve_namespace_table(
+        uri, storage_options, namespace_impl, namespace_properties, table_id
+    )
 
     namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
@@ -884,17 +876,9 @@ def create_index(
         validate_uri_or_namespace(uri, namespace_impl, table_id)
 
         # Resolve URI and storage options from namespace if provided
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-        if namespace is not None and table_id is not None:
-            from lance_namespace import DescribeTableRequest
-
-            describe_response = namespace.describe_table(
-                DescribeTableRequest(id=table_id)
-            )
-            uri = describe_response.location
-            if describe_response.storage_options:
-                merged_storage_options.update(describe_response.storage_options)
-
+        uri, merged_storage_options = resolve_namespace_table(
+            uri, storage_options, namespace_impl, namespace_properties, table_id
+        )
         dataset_uri = uri
         namespace_kwargs = get_namespace_kwargs(
             namespace_impl, namespace_properties, table_id
@@ -1185,18 +1169,13 @@ def optimize_indices(
     )
     validate_uri_or_namespace(uri, namespace_impl, table_id)
 
-    merged_storage_options: dict[str, Any] = {}
-    if storage_options:
-        merged_storage_options.update(storage_options)
-
-    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-    if namespace is not None and table_id is not None:
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-        if describe_response.storage_options:
-            merged_storage_options.update(describe_response.storage_options)
+    resolve_from_namespace = uri is None and has_namespace_params(
+        namespace_impl, table_id
+    )
+    uri, merged_storage_options = resolve_namespace_table(
+        uri, storage_options, namespace_impl, namespace_properties, table_id
+    )
+    if resolve_from_namespace:
         logger.info(
             "Resolved dataset URI from namespace (table_id=%s): %s",
             table_id,
