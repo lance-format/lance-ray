@@ -42,6 +42,7 @@ class LanceDatasource(Datasource):
         fragment_ids: Optional[list[int]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
+        namespace: Optional[Any] = None,
     ):
         _check_import(self, module="lance", package="pylance")
 
@@ -78,8 +79,8 @@ class LanceDatasource(Datasource):
         self._namespace_impl = namespace_impl
         self._namespace_properties = namespace_properties
 
-        # Construct namespace from impl and properties (cached per worker)
-        self._namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+        # Use provided namespace if given; otherwise construct from impl and properties
+        self._namespace = namespace if namespace is not None else get_or_create_namespace(namespace_impl, namespace_properties)
 
         match = []
         match.extend(self.READ_FRAGMENTS_ERRORS_TO_RETRY)
@@ -99,6 +100,36 @@ class LanceDatasource(Datasource):
     def lance_dataset(self) -> "lance.LanceDataset":
         if self._lance_ds is None:
             import lance
+
+            # Resolve uri from namespace+table_id if not provided
+            if self._uri is None and self._namespace is not None and self._table_id is not None:
+                try:
+                    from lance_namespace import DescribeTableRequest
+                    desc = self._namespace.describe_table(DescribeTableRequest(id=self._table_id))
+                    self._uri = getattr(desc, "location", None)
+                    if getattr(desc, "storage_options", None):
+                        if self._storage_options is None:
+                            self._storage_options = {}
+                        self._storage_options.update(desc.storage_options)
+                except Exception:
+                    pass
+
+            # Merge storage.* from namespace root properties if available
+            if self._namespace is not None:
+                try:
+                    from lance_namespace import DescribeNamespaceRequest
+                    ns_res = self._namespace.describe_namespace(DescribeNamespaceRequest(id=[]))
+                    props = getattr(ns_res, "properties", {}) or {}
+                    # Initialize storage_options dict if needed
+                    if self._storage_options is None:
+                        self._storage_options = {}
+                    for k, v in props.items():
+                        if isinstance(k, str) and k.startswith("storage."):
+                            key = k[len("storage."):]
+                            if key and v is not None and str(v) != "":
+                                self._storage_options.setdefault(key, v)
+                except Exception:
+                    pass
 
             dataset_options = self._dataset_options.copy()
             dataset_options["uri"] = self._uri

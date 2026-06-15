@@ -22,6 +22,29 @@ from .utils import (
     normalize_initial_bases,
 )
 
+
+def _schema_to_arrow_ipc_bytes(schema: Optional[pa.Schema]) -> Optional[bytes]:
+    """Serialize an empty Arrow table with the given schema to Arrow IPC bytes.
+
+    Returns None if schema is None or serialization fails.
+    """
+    if schema is None:
+        return None
+    try:
+        import pyarrow.ipc as ipc
+        buf = pa.BufferOutputStream()
+        try:
+            empty_cols = {f.name: pa.array([], type=f.type) for f in schema}
+            empty_table = pa.table(empty_cols, schema=schema)
+        except Exception:
+            empty_table = pa.table([], schema=schema)
+        with ipc.new_stream(buf, schema) as writer:
+            writer.write_table(empty_table)
+        return buf.getvalue().to_pybytes()
+    except Exception:
+        return None
+
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -64,6 +87,7 @@ class _BaseLanceDatasink(Datasink):
         initial_bases: Optional[list[Any]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
+        namespace: Optional[Any] = None,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
@@ -79,11 +103,18 @@ class _BaseLanceDatasink(Datasink):
         self._namespace_impl = namespace_impl
         self._namespace_properties = namespace_properties
 
-        # Construct namespace from impl and properties (cached per worker)
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+        # Use provided namespace if given; otherwise construct from impl and properties (cached per worker)
+        namespace = namespace if namespace is not None else get_or_create_namespace(namespace_impl, namespace_properties)
+        # Keep a direct reference for driver-side operations
+        self._namespace_direct = namespace
+
+        # Save parameters needed for deferred create
+        self.table_id = table_id
+        self._need_create: bool = False
 
         if namespace is not None and table_id is not None:
             self.table_id = table_id
+            has_namespace_storage_options = False
 
             if mode == "append":
                 # For append mode, we need to get existing table URI
@@ -92,39 +123,64 @@ class _BaseLanceDatasink(Datasink):
                 self.uri = describe_response.location
                 if describe_response.storage_options:
                     merged_storage_options.update(describe_response.storage_options)
+                    has_namespace_storage_options = True
             elif mode == "overwrite":
-                # For overwrite mode, try to get existing table, fallback to declare
+                # Try to get existing table; if not found, defer create
                 try:
                     describe_request = DescribeTableRequest(id=table_id)
                     describe_response = namespace.describe_table(describe_request)
                     self.uri = describe_response.location
                     if describe_response.storage_options:
                         merged_storage_options.update(describe_response.storage_options)
+                        has_namespace_storage_options = True
                 except Exception:
-                    uri, ns_storage_options = _declare_table_with_fallback(
-                        namespace, table_id
-                    )
-                    self.uri = uri
-                    if ns_storage_options:
-                        merged_storage_options.update(ns_storage_options)
+                    # Defer table creation to first write block when schema is known
+                    self.uri = None
+                    self._need_create = True
             else:
-                # create mode, declare a new table
-                uri, ns_storage_options = _declare_table_with_fallback(
-                    namespace, table_id
-                )
-                self.uri = uri
-                if ns_storage_options:
-                    merged_storage_options.update(ns_storage_options)
+                # mode == "create": always defer table creation to first write block
+                self.uri = None
+                self._need_create = True
+
+            # Mark that we have namespace storage options for provider creation
+            self._has_namespace_storage_options = has_namespace_storage_options
         else:
-            self.table_id = None
             self.uri = uri
+            self._has_namespace_storage_options = False
 
         self.schema = schema
         self.mode = mode
         self.read_version: Optional[int] = None
+        # Merge storage.* from namespace root properties if available (driver-side)
+        try:
+            if self.namespace is not None:
+                from lance_namespace import DescribeNamespaceRequest
+                ns_res = self.namespace.describe_namespace(DescribeNamespaceRequest(id=[]))
+                props = getattr(ns_res, "properties", {}) or {}
+                for k, v in props.items():
+                    if isinstance(k, str) and k.startswith("storage."):
+                        key = k[len("storage."):]
+                        if key and v is not None and str(v) != "":
+                            merged_storage_options.setdefault(key, v)
+        except Exception:
+            pass
         self.storage_options = merged_storage_options
         self.base_store_params = base_store_params
         self.initial_bases = normalize_initial_bases(initial_bases)
+
+    @staticmethod
+    def _normalize_location(location: Optional[str]) -> Optional[str]:
+        if location is None:
+            return None
+        loc = str(location)
+        if loc.startswith("tos://"):
+            return "s3://" + loc[len("tos://"):]
+        return loc
+
+    @property
+    def namespace(self):
+        """Prefer direct namespace if provided; otherwise create from impl/properties."""
+        return self._namespace_direct or get_or_create_namespace(self._namespace_impl, self._namespace_properties)
 
     @property
     def namespace_kwargs(self) -> dict[str, Any]:
@@ -141,6 +197,7 @@ class _BaseLanceDatasink(Datasink):
         _check_import(self, module="lance", package="pylance")
 
         import lance
+        from lance.dataset import LanceDataset
 
         if self.mode == "append":
             base_store_params_kwargs = {}
@@ -164,7 +221,19 @@ class _BaseLanceDatasink(Datasink):
     ):
         import warnings
 
-        import lance
+        from lance.dataset import LanceDataset, LanceOperation
+
+        # If uri was deferred and not set in the driver, resolve it now via namespace
+        if getattr(self, "uri", None) is None and self.namespace is not None and self.table_id is not None:
+            try:
+                from lance_namespace import DescribeTableRequest
+                desc = self.namespace.describe_table(DescribeTableRequest(id=self.table_id))
+                self.uri = self._normalize_location(getattr(desc, "location", None))
+                if getattr(desc, "storage_options", None):
+                    self.storage_options.update(desc.storage_options)
+            except Exception:
+                # keep None; commit will fail, but we avoid masking original error
+                pass
 
         write_results = write_result
         if not write_results:
@@ -192,7 +261,6 @@ class _BaseLanceDatasink(Datasink):
                 fragment = pickle.loads(fragment_str)
                 fragments.append(fragment)
                 schema = pickle.loads(schema_str)
-        # Check weather writer has fragments or not.
         # Skip commit when there are no fragments.
         if not schema:
             return
@@ -208,14 +276,14 @@ class _BaseLanceDatasink(Datasink):
                 ),
             )
         elif self.mode == "append":
-            op = lance.LanceOperation.Append(fragments)
+            op = LanceOperation.Append(fragments)
         if op:
             base_store_params_kwargs = {}
             if self.base_store_params:
                 base_store_params_kwargs = {
                     "base_store_params": self.base_store_params
                 }
-            lance.LanceDataset.commit(
+            LanceDataset.commit(
                 self.uri,
                 op,
                 read_version=self.read_version,
@@ -332,6 +400,57 @@ class LanceDatasink(_BaseLanceDatasink):
         blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         ctx: Any,
     ):
+        # If we deferred table creation, derive schema from first block and create via namespace
+        if self._need_create and self.namespace is not None and self.table_id is not None:
+            blocks_iter = iter(blocks)
+            try:
+                first_block = next(blocks_iter)
+            except StopIteration:
+                raise ValueError("No data blocks to derive schema for deferred create")
+
+            # Derive schema from first block if not provided
+            if self.schema is None:
+                if isinstance(first_block, pa.Table):
+                    derived_schema = first_block.schema
+                else:
+                    # pandas DataFrame -> Arrow Table
+                    try:
+                        import pandas as pd  # type: ignore
+                    except Exception:
+                        pd = None
+                    if pd is not None and hasattr(first_block, "__class__") and first_block.__class__.__name__ == "DataFrame":
+                        derived_schema = pa.Table.from_pandas(first_block).schema
+                    else:
+                        # Fallback: try generic conversion
+                        derived_schema = pa.Table.from_pydict(first_block).schema
+                self.schema = derived_schema
+
+            # Serialize schema to Arrow IPC bytes
+            ipc_bytes = _schema_to_arrow_ipc_bytes(self.schema)
+            if ipc_bytes is None:
+                raise ValueError("Failed to serialize schema to Arrow IPC for deferred create")
+
+            # Call namespace.create_table and set URI/storage options
+            from lance_namespace import CreateTableRequest
+
+            resp = self.namespace.create_table(CreateTableRequest(id=self.table_id), ipc_bytes)
+            # Normalize tos->s3 for lance operations
+            self.uri = self._normalize_location(getattr(resp, "location", None))
+            # Merge storage options if present
+            resp_opts = getattr(resp, "storage_options", None)
+            if isinstance(resp_opts, dict):
+                self.storage_options.update(resp_opts)
+            # Clear flag
+            self._need_create = False
+
+            # Rebuild blocks iterable to include the first block
+            def _yield_blocks():
+                yield first_block
+                for b in blocks_iter:
+                    yield b
+
+            blocks = _yield_blocks()
+
         fragments_and_schema = write_fragment(
             blocks,
             self.uri,

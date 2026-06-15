@@ -46,6 +46,7 @@ def read_lance(
     fragment_ids: Optional[list[int]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
+    namespace: Optional[Any] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     override_num_blocks: Optional[int] = None,
@@ -110,7 +111,12 @@ def read_lance(
     Returns:
         A :class:`~ray.data.Dataset` producing records read from the Lance dataset.
     """  # noqa: E501
-    validate_uri_or_namespace(uri, namespace_impl, table_id)
+    # 允许通过 namespace+table_id 或 uri 进行读取
+    if namespace is not None:
+        if table_id is None:
+            raise ValueError("当提供 'namespace' 时，必须同时提供 'table_id'.")
+    else:
+        validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     datasource = LanceDatasource(
         uri=uri,
@@ -124,6 +130,7 @@ def read_lance(
         fragment_ids=fragment_ids,
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
+        namespace=namespace,
     )
 
     return read_datasource(
@@ -149,6 +156,7 @@ def write_lance(
     initial_bases: Optional[list[Any]] = None,
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
+    namespace: Optional[Any] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     # Streaming parameters (only effective when stream=True)
@@ -210,7 +218,7 @@ def write_lance(
         batch_size: Batch size when streaming. If None, defaults to 1024.
         resume_rows: Number of leading rows to skip when streaming (for resume).
     """
-    _validate_write_args(uri, namespace_impl, table_id, mode)
+    _validate_write_args(uri, namespace_impl, table_id, mode, namespace)
     if initial_bases and mode != "create":
         raise ValueError("'initial_bases' can only be used with mode='create'")
     initial_bases = normalize_initial_bases(initial_bases)
@@ -230,6 +238,7 @@ def write_lance(
             initial_bases=initial_bases,
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
+            namespace=namespace,
         )
 
         ds.write_datasink(
@@ -579,6 +588,7 @@ def _validate_write_args(
     namespace_impl: Optional[str],
     table_id: Optional[list[str]],
     mode: str,
+    namespace: Optional[Any] = None,
 ) -> None:
     """Validate write arguments.
 
@@ -586,7 +596,7 @@ def _validate_write_args(
     together (to create at a specific location and register with namespace).
     For append mode, requires exactly one of uri OR namespace parameters.
     """
-    has_ns = has_namespace_params(namespace_impl, table_id)
+    has_ns = has_namespace_params(namespace_impl, table_id) or (namespace is not None and table_id is not None)
 
     # For append mode, use the same validation as read operations
     if mode == "append" and uri is not None and has_ns:
