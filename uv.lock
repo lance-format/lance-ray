@@ -342,7 +342,7 @@ dependencies = [
     { name = "ve-lascatalog-sdk" },
 ]
 wheels = [
-    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.7.7-py3-none-any.whl", hash = "sha256:5aad5f3d79a8c822b08e288de00037d8af3e79657878d4549c15e3d3e7f0b759" },
+    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.7.7-py3-none-any.whl", hash = "sha256:96b45b4b90987e304734afb7b2aa4e8e8a73064f5ab68183a7c659fc30aa3606" },
 ]
 
 [package.metadata]
@@ -402,7 +402,7 @@ requires-dist = [
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
     { name = "packaging" },
     { name = "pyarrow", specifier = ">=17.0.0" },
-    { name = "pylance", specifier = ">=7.0.0" },
+    { name = "pylance", url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl" },
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
@@ -1048,8 +1048,8 @@ wheels = [
 
 [[package]]
 name = "pylance"
-version = "7.0.0"
-source = { registry = "https://pypi.org/simple" }
+version = "7.0.0rc0"
+source = { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl" }
 dependencies = [
     { name = "lance-namespace" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1057,13 +1057,34 @@ dependencies = [
     { name = "pyarrow" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/ad/2f64921bf346e7075aef24a72595db44821724a3d89a9a92dd24e79632aa/pylance-7.0.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:98422021975be76e72b1572f41b8c9abb3bee5bdc9bfa5e9ce731110a65ed4d1", size = 62134146 },
-    { url = "https://files.pythonhosted.org/packages/73/1c/c5a01bee0160b55d9a98895cbd33091d038f0a0995b121ab72e629008d02/pylance-7.0.0-cp39-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:4bec86ee5b6fbd8bfc493e653f0a1fba0303cfe5492b9b46fc25ab908edc7183", size = 65373684 },
-    { url = "https://files.pythonhosted.org/packages/eb/da/1fe8b8f7dbfe734d76af76acc994fc360a0d0c79a4874ef69f5a72a58fe3/pylance-7.0.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:881491432c53184e52f8d1db8d5f872f39a03f36fb104bec77b33d379519d8b5", size = 69458555 },
-    { url = "https://files.pythonhosted.org/packages/76/f0/dd505cf3fd0226ab9d94759acd713125af1d3bfacfd80bbd52e3b9f89509/pylance-7.0.0-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:18453999e7fff4f76b16d6b7882c9df0628bd142ff95e2461bd7dd5ee3fe0af3", size = 65394430 },
-    { url = "https://files.pythonhosted.org/packages/17/ba/2357b81034f28eb00790e258ed140289a6a887a7468ca9df6349fd186b27/pylance-7.0.0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:04a58051d408c60fe76d41a220dcaf8fea8fb6d1aa0ca78a709b60bc3cc8d19a", size = 69473470 },
-    { url = "https://files.pythonhosted.org/packages/1f/ec/5c00b6303a67d787f9475141832cbdc513d674ac3dcaeef8a7b169905e65/pylance-7.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:467d4864af047eaab4e1370e2f1e88e2c6f507c079874421116cb41d78bc3629", size = 74792863 },
+    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:78b3eb82129daeada1f9ff6ae36a99dfbd94bed2d6c98d66f7c6671c9e426979" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "boto3", marker = "extra == 'tests'" },
+    { name = "datafusion", marker = "python_full_version >= '3.10' and extra == 'tests'", specifier = ">=53,<54" },
+    { name = "datasets", marker = "extra == 'tests'" },
+    { name = "duckdb", marker = "extra == 'tests'" },
+    { name = "geoarrow-rust-core", marker = "extra == 'geo'" },
+    { name = "geoarrow-rust-io", marker = "extra == 'geo'" },
+    { name = "lance-namespace", specifier = ">=0.7.7,<0.8" },
+    { name = "ml-dtypes", marker = "extra == 'tests'" },
+    { name = "numpy", specifier = ">=1.22" },
+    { name = "pandas", marker = "extra == 'tests'" },
+    { name = "pillow", marker = "extra == 'tests'" },
+    { name = "polars", extras = ["pyarrow", "pandas"], marker = "extra == 'tests'" },
+    { name = "psutil", marker = "extra == 'tests'" },
+    { name = "pyarrow", specifier = ">=14" },
+    { name = "pyright", marker = "extra == 'dev'" },
+    { name = "pytest", marker = "extra == 'tests'" },
+    { name = "pytest-benchmark", marker = "extra == 'benchmarks'" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "==0.11.2" },
+    { name = "tensorflow", marker = "sys_platform == 'linux' and extra == 'tests'" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
+    { name = "tqdm", marker = "extra == 'tests'" },
+]
+provides-extras = ["tests", "dev", "benchmarks", "torch", "geo"]
 
 [[package]]
 name = "pymdown-extensions"
