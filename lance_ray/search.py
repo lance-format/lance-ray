@@ -469,8 +469,10 @@ def _vector_column_to_numpy(vector_column: pa.ChunkedArray) -> Any:
 
 
 def _take_top_k(table: pa.Table, k: int) -> pa.Table:
-    sort_indices = pc.sort_indices(table, sort_keys=[("_distance", "ascending")])
-    return table.take(sort_indices.slice(0, k))
+    # select_k_unstable is an O(n log k) partial sort, cheaper than fully
+    # sorting all candidates before slicing the global top-k.
+    indices = pc.select_k_unstable(table, k=k, sort_keys=[("_distance", "ascending")])
+    return table.take(indices)
 
 
 def _merge_vector_search_results(tables: list[pa.Table], k: int) -> pa.Table:
