@@ -238,19 +238,19 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
         # Find our index
         text_index = None
         for idx in indices:
-            if "text" in idx["name"]:
+            if "text" in idx.name:
                 text_index = idx
                 break
 
         assert text_index is not None, "Text index not found"
-        assert text_index["type"] == "Inverted", (
-            f"Expected Inverted index, got {text_index['type']}"
+        assert text_index.index_type == "Inverted", (
+            f"Expected Inverted index, got {text_index.index_type}"
         )
 
     def test_build_distributed_fts_index_with_name(self, multi_fragment_lance_dataset):
@@ -268,8 +268,8 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created with correct name
-        indices = updated_dataset.list_indices()
-        index_names = [idx["name"] for idx in indices]
+        indices = updated_dataset.describe_indices()
+        index_names = [idx.name for idx in indices]
         assert custom_name in index_names, (
             f"Custom index name '{custom_name}' not found in {index_names}"
         )
@@ -317,7 +317,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_build_distributed_index_large_dataset(self, temp_dir):
@@ -336,7 +336,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
         # Test search functionality
@@ -441,7 +441,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_build_distributed_index_with_storage_options(
@@ -460,7 +460,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_build_distributed_index_with_kwargs(self, multi_fragment_lance_dataset):
@@ -477,7 +477,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_build_distributed_index_dataset_object(self, multi_fragment_lance_dataset):
@@ -493,7 +493,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_build_distributed_nested_scalar_indexes(self, temp_dir):
@@ -522,10 +522,10 @@ class TestDistributedIndexing:
             num_workers=2,
         )
 
-        indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
-        assert indices["nested_text_idx"]["fields"] == ["meta.text"]
-        assert indices["literal_dot_text_idx"]["fields"] == ["meta.`a.b`"]
-        assert indices["hyphen_user_id_idx"]["fields"] == ["`meta-data`.`user-id`"]
+        indices = {idx.name: idx for idx in updated_dataset.describe_indices()}
+        assert indices["nested_text_idx"].field_names == ["meta.text"]
+        assert indices["literal_dot_text_idx"].field_names == ["meta.`a.b`"]
+        assert indices["hyphen_user_id_idx"].field_names == ["`meta-data`.`user-id`"]
 
         nested_results = updated_dataset.scanner(
             full_text_query="nestedthree",
@@ -567,9 +567,9 @@ class TestDistributedIndexing:
             num_workers=2,
         )
 
-        indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
-        assert indices["outer_leaf_idx"]["fields"] == ["outer.leaf"]
-        assert indices["other_leaf_idx"]["fields"] == ["other.leaf"]
+        indices = {idx.name: idx for idx in updated_dataset.describe_indices()}
+        assert indices["outer_leaf_idx"].field_names == ["outer.leaf"]
+        assert indices["other_leaf_idx"].field_names == ["other.leaf"]
 
         outer_results = updated_dataset.scanner(
             filter="outer.leaf = 20",
@@ -583,8 +583,8 @@ class TestDistributedIndexing:
         assert outer_results.column("id").to_pylist() == [2]
         assert other_results.column("id").to_pylist() == [3]
 
-    def test_scalar_index_on_mixed_schema_list_indices(self, temp_dir):
-        """Create scalar index on schema with both scalar and vector columns; verify list_indices."""
+    def test_scalar_index_on_mixed_schema_describe_indices(self, temp_dir):
+        """Create scalar index on schema with both scalar and vector columns; verify describe_indices."""
         dataset_uri = generate_mixed_schema_dataset(
             temp_dir,
             num_rows=200,
@@ -601,18 +601,18 @@ class TestDistributedIndexing:
             num_workers=2,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) >= 1, (
-            "list_indices should return at least the new scalar index"
+            "describe_indices should return at least the new scalar index"
         )
-        names = [idx["name"] for idx in indices]
+        names = [idx.name for idx in indices]
         assert index_name in names, (
-            f"Expected index name {index_name!r} in list_indices: {names}"
+            f"Expected index name {index_name!r} in describe_indices: {names}"
         )
 
-        label_index = next(idx for idx in indices if idx["name"] == index_name)
-        assert label_index["type"] == "BTree", (
-            f"Expected BTree type for scalar index, got {label_index['type']!r}"
+        label_index = next(idx for idx in indices if idx.name == index_name)
+        assert label_index.index_type == "BTree", (
+            f"Expected BTree type for scalar index, got {label_index.index_type!r}"
         )
 
         # Schema should still have both scalar and vector columns
@@ -639,7 +639,7 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "Initial index creation failed"
 
         # Now try to create another index with the same name but replace=False
@@ -675,13 +675,13 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        initial_indices = updated_dataset.list_indices()
+        initial_indices = updated_dataset.describe_indices()
         assert len(initial_indices) > 0, "Initial index creation failed"
 
         # Find our initial index
         initial_index = None
         for idx in initial_indices:
-            if idx["name"] == index_name:
+            if idx.name == index_name:
                 initial_index = idx
                 break
         assert initial_index is not None, "Initial index not found"
@@ -697,15 +697,15 @@ class TestDistributedIndexing:
         )
 
         # Verify the index still exists (should have been replaced)
-        final_indices = updated_dataset.list_indices()
+        final_indices = updated_dataset.describe_indices()
         final_index = None
         for idx in final_indices:
-            if idx["name"] == index_name:
+            if idx.name == index_name:
                 final_index = idx
                 break
 
         assert final_index is not None, "Index should still exist after replacement"
-        assert final_index["type"] == "Inverted", "Index type should remain Inverted"
+        assert final_index.index_type == "Inverted", "Index type should remain Inverted"
 
         # Test that the replaced index still works for searching
         search_term = "Python"
@@ -740,7 +740,7 @@ class TestDistributedIndexing:
         )
 
         # Should still work and create the index
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after building"
 
     def test_distributed_fts_index_new_api(self, temp_dir):
@@ -763,21 +763,21 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed index creation"
 
         # Find our index
         our_index = None
         for idx in indices:
-            if idx["name"] == "new_api_test_idx":
+            if idx.name == "new_api_test_idx":
                 our_index = idx
                 break
 
         assert our_index is not None, (
             "Index 'new_api_test_idx' not found in indices list"
         )
-        assert our_index["type"] == "Inverted", (
-            f"Expected Inverted index, got {our_index['type']}"
+        assert our_index.index_type == "Inverted", (
+            f"Expected Inverted index, got {our_index.index_type}"
         )
 
         # Test that the index works for searching
@@ -813,19 +813,19 @@ class TestDistributedIndexing:
         )
 
         # Verify the index was created
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after index creation"
 
         # Find our index
         our_index = None
         for idx in indices:
-            if idx["name"] == "index_uuid_test_idx":
+            if idx.name == "index_uuid_test_idx":
                 our_index = idx
                 break
 
         assert our_index is not None, "Index 'index_uuid_test_idx' not found"
-        assert our_index["type"] == "Inverted", (
-            f"Expected Inverted index, got {our_index['type']}"
+        assert our_index.index_type == "Inverted", (
+            f"Expected Inverted index, got {our_index.index_type}"
         )
 
     def test_distributed_index_error_handling_new_api(self, temp_dir):
@@ -894,17 +894,17 @@ class TestDistributedBTreeIndexing:
         )
 
         # Verify index
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed BTREE build"
 
         our_index = None
         for idx in indices:
-            if idx["name"] == "btree_multiple_fragment_idx":
+            if idx.name == "btree_multiple_fragment_idx":
                 our_index = idx
                 break
         assert our_index is not None, "BTREE index not found by name"
-        assert our_index["type"] == "BTree", (
-            f"Expected BTree index, got {our_index['type']}"
+        assert our_index.index_type == "BTree", (
+            f"Expected BTree index, got {our_index.index_type}"
         )
 
         # Spot-check equality and range queries
@@ -1029,17 +1029,17 @@ class TestDistributedBTreeIndexing:
             num_workers=num_workers,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed BTREE build"
 
         our_index = None
         for idx in indices:
-            if idx["name"] == "btree_many_workers_idx":
+            if idx.name == "btree_many_workers_idx":
                 our_index = idx
                 break
         assert our_index is not None, "BTREE index not found by name"
-        assert our_index["type"] == "BTree", (
-            f"Expected BTree index, got {our_index['type']}"
+        assert our_index.index_type == "BTree", (
+            f"Expected BTree index, got {our_index.index_type}"
         )
 
         eq_tbl = updated_dataset.scanner(filter="id = 2500", columns=["id"]).to_table()
@@ -1097,16 +1097,16 @@ class TestDistributedBTreeIndexing:
             num_workers=num_workers,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed BTREE build"
 
         our_index = None
         for idx in indices:
-            if idx["name"] == "video_uuid_idx":
+            if idx.name == "video_uuid_idx":
                 our_index = idx
                 break
         assert our_index is not None, "String BTREE index not found"
-        assert our_index["type"] == "BTree"
+        assert our_index.index_type == "BTree"
 
         sample_uuid = all_data[500]["video_uuid"]
         result = updated_dataset.scanner(
@@ -1143,14 +1143,14 @@ class TestDistributedBitmapIndexing:
             num_workers=3,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         our_index = next(
-            (idx for idx in indices if idx["name"] == "fragment_bitmap_idx"),
+            (idx for idx in indices if idx.name == "fragment_bitmap_idx"),
             None,
         )
 
         assert our_index is not None, "BITMAP index not found by name"
-        assert our_index["type"] == "Bitmap"
+        assert our_index.index_type == "Bitmap"
 
         indexed = updated_dataset.scanner(
             filter="fragment_id = 1",
@@ -1194,7 +1194,7 @@ class TestOptimizeIndices:
             )
 
     def test_optimize_indices_success_with_uri(self, multi_fragment_lance_dataset):
-        """optimize_indices returns LanceDataset and list_indices is consistent when API is available."""
+        """optimize_indices returns LanceDataset and describe_indices is consistent when API is available."""
         dataset_uri = multi_fragment_lance_dataset
         lr.create_scalar_index(
             uri=dataset_uri,
@@ -1220,12 +1220,12 @@ class TestOptimizeIndices:
         assert isinstance(result, lance.LanceDataset)
         assert result.count_rows() == lance.LanceDataset(dataset_uri).count_rows()
 
-        indices = result.list_indices()
+        indices = result.describe_indices()
         assert len(indices) >= 1, (
-            "list_indices should include at least the existing index"
+            "describe_indices should include at least the existing index"
         )
-        names = [idx["name"] for idx in indices]
-        assert "text_idx" in names, f"Expected 'text_idx' in list_indices: {names}"
+        names = [idx.name for idx in indices]
+        assert "text_idx" in names, f"Expected 'text_idx' in describe_indices: {names}"
 
     def test_optimize_indices_runtime_error_when_api_missing(self, temp_dir):
         """optimize_indices raises RuntimeError when dataset has no optimize API."""
@@ -1283,16 +1283,16 @@ class TestNamespaceIndexing:
             table_id=table_id,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed FTS build"
 
         our_index = None
         for idx in indices:
-            if idx["name"] == "fts_namespace_idx":
+            if idx.name == "fts_namespace_idx":
                 our_index = idx
                 break
         assert our_index is not None, "FTS index not found"
-        assert our_index["type"] == "Inverted"
+        assert our_index.index_type == "Inverted"
 
         results = updated_dataset.scanner(
             full_text_query="document",
@@ -1331,16 +1331,16 @@ class TestNamespaceIndexing:
             table_id=table_id,
         )
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed BTREE build"
 
         our_index = None
         for idx in indices:
-            if idx["name"] == "btree_namespace_idx":
+            if idx.name == "btree_namespace_idx":
                 our_index = idx
                 break
         assert our_index is not None, "BTREE index not found"
-        assert our_index["type"] == "BTree"
+        assert our_index.index_type == "BTree"
 
         result = updated_dataset.scanner(filter="id = 100", columns=["id"]).to_table()
         assert result.num_rows == 1, "BTREE index query should return 1 row"
@@ -1395,11 +1395,11 @@ class TestNamespaceIndexing:
                 pytest.skip(f"Skipping: lance version limitation: {exc}")
             raise
 
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed vector build"
 
         our_index = next(
-            (idx for idx in indices if idx["name"] == "vec_namespace_idx"), None
+            (idx for idx in indices if idx.name == "vec_namespace_idx"), None
         )
         assert our_index is not None, "vector index not found in dataset"
 
@@ -1527,16 +1527,16 @@ def test_build_distributed_vector_index(tmp_path, index_type):
             )
         raise
 
-    indices = updated_dataset.list_indices()
+    indices = updated_dataset.describe_indices()
     assert len(indices) > 0, "No indices found after distributed vector index build"
 
     # Find the index with the name we specified
     vec_index = next(
-        (idx for idx in indices if idx["name"] == f"idx_{index_type}"), None
+        (idx for idx in indices if idx.name == f"idx_{index_type}"), None
     )
     assert vec_index is not None, f"Index with name idx_{index_type} not found"
-    assert vec_index["type"] == index_type, (
-        f"Expected {index_type} vector index, got {vec_index['type']}"
+    assert vec_index.index_type == index_type, (
+        f"Expected {index_type} vector index, got {vec_index.index_type}"
     )
 
     # Run a simple nearest-neighbor query to ensure the index is usable.
@@ -1583,9 +1583,9 @@ def test_distributed_nested_vector_index_and_search(tmp_path, index_type):
             pytest.skip(f"Skipping: lance version limitation: {exc}")
         raise
 
-    indices = {idx["name"]: idx for idx in updated_dataset.list_indices()}
+    indices = {idx.name: idx for idx in updated_dataset.describe_indices()}
     index_name = f"nested_vector_{index_type.lower()}_idx"
-    assert indices[index_name]["fields"] == ["meta.vector"]
+    assert indices[index_name].field_names == ["meta.vector"]
 
     if not _scanner_accepts_index_segments(updated_dataset):
         with pytest.raises(RuntimeError, match="does not support index_segments"):

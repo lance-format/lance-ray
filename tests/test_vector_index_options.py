@@ -116,7 +116,7 @@ class _FakeDataset:
     def count_rows(self):
         return 200
 
-    def list_indices(self):
+    def describe_indices(self):
         return []
 
     def create_scalar_index(self, **kwargs):

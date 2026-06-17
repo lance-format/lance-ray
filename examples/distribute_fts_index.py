@@ -90,12 +90,12 @@ def demonstrate_segment_indexing(dataset, column="content"):
         logger.info("✅ Successfully created distributed segment index")
 
         # Verify index creation
-        indices = updated_dataset.list_indices()
+        indices = updated_dataset.describe_indices()
         logger.info(f"Total indices: {len(indices)}")
 
         for idx in indices:
-            if idx["name"] == "distributed_fts_segment_idx":
-                logger.info(f"✅ Found our index: {idx['name']} (type: {idx['type']})")
+            if idx.name == "distributed_fts_segment_idx":
+                logger.info(f"✅ Found our index: {idx.name} (type: {idx.index_type})")
                 break
         else:
             logger.warning("❌ Our index not found in the list")

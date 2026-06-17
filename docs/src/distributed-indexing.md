@@ -255,7 +255,7 @@ updated_dataset = lr.create_scalar_index(
 )
 
 # Verify index creation
-indices = updated_dataset.list_indices()
+indices = updated_dataset.describe_indices()
 print(f"Index list: {indices}")
 
 # Use index for search

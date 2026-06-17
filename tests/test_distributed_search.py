@@ -50,14 +50,9 @@ def _mock_pickled_dataset(monkeypatch, dataset):
     return pickled_dataset
 
 
-def test_select_vector_index_raises_for_missing_explicit_index_name(monkeypatch):
-    dataset = object()
+def test_select_vector_index_raises_for_missing_explicit_index_name():
     index = _index_with_segments(("S1", [1, 2]))
-
-    monkeypatch.setattr(
-        "lance_ray.search._get_index_descriptions",
-        lambda _: [index],
-    )
+    dataset = SimpleNamespace(describe_indices=lambda: [index])
 
     with pytest.raises(ValueError, match="missing_idx.*vector_idx"):
         _select_vector_index(
@@ -67,19 +62,14 @@ def test_select_vector_index_raises_for_missing_explicit_index_name(monkeypatch)
         )
 
 
-def test_select_vector_index_matches_canonical_lance_field_path(monkeypatch):
-    dataset = object()
+def test_select_vector_index_matches_canonical_lance_field_path():
     index = SimpleNamespace(
         name="hyphen_idx",
         field_names=["`meta-data`.`user-id`"],
         index_type="IVF_PQ",
         segments=[],
     )
-
-    monkeypatch.setattr(
-        "lance_ray.search._get_index_descriptions",
-        lambda _: [index],
-    )
+    dataset = SimpleNamespace(describe_indices=lambda: [index])
 
     assert (
         _select_vector_index(

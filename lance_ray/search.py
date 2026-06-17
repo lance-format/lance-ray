@@ -71,28 +71,6 @@ def _get_fragment_id(fragment: Any) -> int:
         return fragment.metadata.id
 
 
-def _get_index_descriptions(dataset: LanceDataset) -> list[Any]:
-    if hasattr(dataset, "describe_indices"):
-        return dataset.describe_indices()
-
-    descriptions = []
-    for index in dataset.list_indices():
-        descriptions.append(
-            {
-                "name": index["name"],
-                "index_type": index.get("type"),
-                "field_names": index.get("fields", []),
-                "segments": [
-                    {
-                        "uuid": index["uuid"],
-                        "fragment_ids": index.get("fragment_ids", set()),
-                    }
-                ],
-            }
-        )
-    return descriptions
-
-
 def _index_value(index: Any, name: str, default: Any = None) -> Any:
     if isinstance(index, dict):
         return index.get(name, default)
@@ -111,7 +89,7 @@ def _select_vector_index(
     column: str,
     index_name: Optional[str],
 ) -> Any | None:
-    indices = _get_index_descriptions(dataset)
+    indices = dataset.describe_indices()
     for index in indices:
         name = _index_value(index, "name")
         field_names = _index_value(index, "field_names")

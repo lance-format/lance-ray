@@ -48,6 +48,10 @@ def _dataset_load_kwargs(
     return kwargs
 
 
+def _index_exists(dataset: LanceDataset, name: str) -> bool:
+    return any(index.name == name for index in dataset.describe_indices())
+
+
 def _distribute_fragments_balanced(
     fragments: list[Any], num_workers: int, logger: logging.Logger
 ) -> list[list[int]]:
@@ -575,12 +579,7 @@ def create_scalar_index(
         name = f"{column}_idx"
 
     if replace:
-        try:
-            existing_indices = dataset.list_indices()
-        except Exception:  # pragma: no cover
-            existing_indices = []
-
-        if any(idx.get("name") == name for idx in existing_indices):
+        if _index_exists(dataset, name):
             # Lance 4.0.0: fragment_ids + replace=True may hit an unimplemented path.
             # Implement replace semantics at the driver by dropping the index first.
             dataset.drop_index(name)
@@ -592,16 +591,7 @@ def create_scalar_index(
             )
 
     else:
-        index_exists = False
-        try:
-            existing_indices = dataset.list_indices()
-            existing_names = {idx["name"] for idx in existing_indices}
-            index_exists = name in existing_names
-        except (
-            Exception
-        ):  # pragma: no cover - list_indices() not available in older lance versions
-            pass
-        if index_exists:
+        if _index_exists(dataset, name):
             raise ValueError(
                 f"Index with name '{name}' already exists. Set replace=True "
                 "to replace it."
@@ -1284,21 +1274,11 @@ def create_index(
     if name is None:
         name = f"{column}_idx"
 
-    if not replace:
-        index_exists = False
-        try:
-            existing_indices = dataset_obj.list_indices()
-            existing_names = {idx["name"] for idx in existing_indices}
-            index_exists = name in existing_names
-        except (
-            Exception
-        ):  # pragma: no cover - list_indices() not available in older lance versions
-            pass
-        if index_exists:
-            raise ValueError(
-                f"Index with name '{name}' already exists. Set replace=True "
-                "to replace it."
-            )
+    if not replace and _index_exists(dataset_obj, name):
+        raise ValueError(
+            f"Index with name '{name}' already exists. Set replace=True "
+            "to replace it."
+        )
 
     fragments = dataset_obj.get_fragments()
     if not fragments:
