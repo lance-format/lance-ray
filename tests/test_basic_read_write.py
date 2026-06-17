@@ -82,6 +82,21 @@ class TestWriteLance:
         with pytest.raises((ValueError, AttributeError, TypeError)):
             lr.write_lance(None, str(path))  # type: ignore
 
+    def test_write_lance_stream_create_then_append(self, temp_dir):
+        """Streaming create followed by streaming append over multiple batches."""
+        path = Path(temp_dir) / "stream_append.lance"
+
+        ds1 = ray.data.from_pandas(pd.DataFrame({"id": [1, 2, 3]}))
+        lr.write_lance(ds1, str(path), mode="create", stream=True, batch_size=2)
+        assert lance.dataset(str(path)).count_rows() == 3
+
+        ds2 = ray.data.from_pandas(pd.DataFrame({"id": [4, 5, 6]}))
+        lr.write_lance(ds2, str(path), mode="append", stream=True, batch_size=2)
+
+        result = lance.dataset(str(path))
+        assert result.count_rows() == 6
+        assert sorted(result.to_table()["id"].to_pylist()) == [1, 2, 3, 4, 5, 6]
+
     def test_write_with_pandas_map_batches(self, temp_dir):
         def map_fn(row):
             return {
