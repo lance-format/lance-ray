@@ -361,14 +361,14 @@ dependencies = [
     { name = "packaging" },
     { name = "pyarrow" },
     { name = "pylance" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
     { name = "ray", extra = ["data"] },
 ]
 
 [package.optional-dependencies]
 dev = [
+    { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
     { name = "pytest-xdist" },
     { name = "ruff" },
 ]
@@ -388,9 +388,9 @@ requires-dist = [
     { name = "packaging" },
     { name = "pyarrow", specifier = ">=17.0.0" },
     { name = "pylance", specifier = ">=8.0.0b11" },
-    { name = "pytest", specifier = ">=8.4.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "pytest-cov", specifier = ">=5.0.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "pytest-xdist", marker = "extra == 'dev'", specifier = ">=3.6.0" },
     { name = "ray", extras = ["data"], specifier = ">=2.41.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
