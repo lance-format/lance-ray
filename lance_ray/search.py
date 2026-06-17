@@ -457,7 +457,13 @@ def _compute_vector_distances(
 def _vector_column_to_numpy(vector_column: pa.ChunkedArray) -> Any:
     import numpy as np
 
-    values = vector_column.combine_chunks().to_pylist()
+    combined = vector_column.combine_chunks()
+
+    fast = _fixed_size_list_to_matrix(combined)
+    if fast is not None:
+        return fast
+
+    values = combined.to_pylist()
     if not values:
         return np.empty((0, 0), dtype=np.float32)
     if any(value is None for value in values):
@@ -466,6 +472,33 @@ def _vector_column_to_numpy(vector_column: pa.ChunkedArray) -> Any:
     if matrix.ndim != 2:
         raise ValueError("Fallback vector search requires a list-like vector column")
     return matrix
+
+
+def _fixed_size_list_to_matrix(array: pa.Array) -> Any | None:
+    """Convert a FixedSizeList vector column to a 2-D matrix without a Python round-trip.
+
+    Returns ``None`` (so the caller falls back to the generic, slower
+    ``to_pylist`` path) unless ``array`` is a non-empty, null-free
+    FixedSizeList whose contiguous child buffer can be reshaped directly.
+    """
+    import numpy as np
+
+    if not pa.types.is_fixed_size_list(array.type):
+        return None
+    if array.null_count or len(array) == 0:
+        return None
+
+    values = array.values
+    if values.null_count:
+        return None
+
+    list_size = array.type.list_size
+    if len(values) != len(array) * list_size:
+        # Offset/sliced child buffer: defer to the safe generic path.
+        return None
+
+    flat = np.asarray(values.to_numpy(zero_copy_only=False), dtype=np.float32)
+    return flat.reshape(len(array), list_size)
 
 
 def _take_top_k(table: pa.Table, k: int) -> pa.Table:
