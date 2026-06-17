@@ -82,6 +82,13 @@ class TestWriteLance:
         with pytest.raises((ValueError, AttributeError, TypeError)):
             lr.write_lance(None, str(path))  # type: ignore
 
+    def test_write_lance_invalid_mode(self, sample_dataset, temp_dir):
+        """An out-of-contract mode must raise instead of silently no-op'ing."""
+        path = Path(temp_dir) / "bad_mode.lance"
+
+        with pytest.raises(ValueError, match="Invalid write mode"):
+            lr.write_lance(sample_dataset, str(path), mode="upsert")  # type: ignore
+
     def test_write_with_pandas_map_batches(self, temp_dir):
         def map_fn(row):
             return {
