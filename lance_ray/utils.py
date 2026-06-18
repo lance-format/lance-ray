@@ -28,26 +28,42 @@ def normalize_initial_bases(
     if not initial_bases:
         return None
 
+    # Parse base inputs once and collect IDs the caller supplied explicitly so
+    # auto-assignment can skip them (avoids spurious "Duplicate base path ID"
+    # errors when an auto-assigned base would otherwise collide with one).
+    parsed: list[tuple[Any, Any, bool, Any]] = []
+    explicit_ids: set[int] = set()
+    for base in initial_bases:
+        if isinstance(base, dict):
+            path = base["path"]
+            name = base.get("name")
+            is_root = base.get("is_dataset_root", False)
+            raw_id = base.get("id", 0)
+        else:
+            path = base.path
+            name = base.name
+            is_root = base.is_dataset_root
+            raw_id = base.id
+        parsed.append((path, name, is_root, raw_id))
+        if not is_root and raw_id not in (0, None):
+            explicit_ids.add(raw_id)
+
     specs: list[dict[str, Any]] = []
     next_auto_id = 1
-    for base in initial_bases:
-        raw_id = base.get("id", 0) if isinstance(base, dict) else base.id
-        is_root = (
-            base.get("is_dataset_root", False)
-            if isinstance(base, dict)
-            else base.is_dataset_root
-        )
+    for path, name, is_root, raw_id in parsed:
         if is_root:
             assigned_id = 0
         elif raw_id not in (0, None):
             assigned_id = raw_id
         else:
+            while next_auto_id in explicit_ids:
+                next_auto_id += 1
             assigned_id = next_auto_id
             next_auto_id += 1
         specs.append(
             {
-                "path": base["path"] if isinstance(base, dict) else base.path,
-                "name": base.get("name") if isinstance(base, dict) else base.name,
+                "path": path,
+                "name": name,
                 "is_dataset_root": is_root,
                 "id": assigned_id,
             }
