@@ -24,8 +24,8 @@ def _read_pool_processes(pool: Any) -> int | None:
     return None
 
 
-def _warn_if_process_count_differs(requested_processes: int) -> None:
-    if _GLOBAL_POOL_PROCESSES is None:
+def _warn_if_process_count_differs(requested_processes: Optional[int]) -> None:
+    if _GLOBAL_POOL_PROCESSES is None or requested_processes is None:
         return
     if requested_processes == _GLOBAL_POOL_PROCESSES:
         return
@@ -36,6 +36,16 @@ def _warn_if_process_count_differs(requested_processes: int) -> None:
         _GLOBAL_POOL_PROCESSES,
         requested_processes,
     )
+
+
+def _warn_if_remote_args_ignored(ray_remote_args: Optional[dict[str, Any]]) -> None:
+    if ray_remote_args:
+        logger.warning(
+            "Reusing global Ray Pool; per-call ray_remote_args %s are ignored "
+            "while the global Pool is active. Clear the global Pool to apply "
+            "per-call remote args.",
+            ray_remote_args,
+        )
 
 
 def set_global_pool(pool: Any | None) -> None:
@@ -93,7 +103,7 @@ def clear_global_pool(*, close: bool = False, join: bool = True) -> None:
 @contextmanager
 def get_or_create_pool(
     *,
-    processes: int,
+    processes: Optional[int],
     ray_remote_args: Optional[dict[str, Any]],
 ) -> Iterator[Any]:
     """Yield the global Pool if present, otherwise a local close-and-join Pool."""
@@ -101,6 +111,7 @@ def get_or_create_pool(
         pool = _GLOBAL_POOL
         if pool is not None:
             _warn_if_process_count_differs(processes)
+            _warn_if_remote_args_ignored(ray_remote_args)
 
     if pool is not None:
         yield pool

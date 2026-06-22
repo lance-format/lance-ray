@@ -12,11 +12,11 @@ import ray
 from lance.dataset import LanceDataset, LanceOperation
 from lance.udf import BatchUDF
 from ray.data import Dataset, read_datasource
-from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
 from .fragment import prepare_fragment_write_options
+from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
     has_namespace_params,
@@ -576,30 +576,29 @@ def add_columns(
         **namespace_kwargs,
     )
     fragment_ids = [f.metadata.id for f in lance_ds.get_fragments()]
-    pool = Pool(processes=concurrency, ray_remote_args=ray_remote_args)
-    rst_futures = pool.map_async(
-        _handle_fragment(
-            uri,
-            transform,
-            read_columns,
-            batch_size,
-            reader_schema,
-            read_version,
-            storage_options,
-            namespace_impl,
-            namespace_properties,
-            table_id,
-        ),
-        fragment_ids,
-        chunksize=1,
+    fragment_handler = _handle_fragment(
+        uri,
+        transform,
+        read_columns,
+        batch_size,
+        reader_schema,
+        read_version,
+        storage_options,
+        namespace_impl,
+        namespace_properties,
+        table_id,
     )
     try:
-        result = rst_futures.get()
+        with get_or_create_pool(
+            processes=concurrency, ray_remote_args=ray_remote_args
+        ) as pool:
+            result = pool.map_async(
+                fragment_handler,
+                fragment_ids,
+                chunksize=1,
+            ).get()
     except Exception as exc:
         raise RuntimeError(f"Failed to add columns: {exc}") from exc
-    finally:
-        pool.close()
-        pool.join()
 
     commit_messages = []
     new_schema = None
