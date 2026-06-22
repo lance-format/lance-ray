@@ -159,7 +159,12 @@ def test_map_async_with_pool_closes_and_joins_pool(monkeypatch):
         events.append("create_handler")
         return lambda fragment_ids: {"status": "success", "fragment_ids": fragment_ids}
 
-    monkeypatch.setattr(index_mod, "Pool", FakePool)
+    # _map_async_with_pool now goes through get_or_create_pool, which constructs
+    # and closes/joins the Pool in lance_ray.pool. Patch it there and make sure
+    # no global Pool is configured so the local close-and-join path is taken.
+    pool_mod = sys.modules[index_mod.get_or_create_pool.__module__]
+    monkeypatch.setattr(pool_mod, "_GLOBAL_POOL", None)
+    monkeypatch.setattr(pool_mod, "Pool", FakePool)
 
     assert index_mod._map_async_with_pool(
         create_fragment_handler=create_fragment_handler,

@@ -13,9 +13,9 @@ import ray
 from lance.dataset import Index, IndexConfig, LanceDataset
 from lance.indices import IndicesBuilder
 from packaging import version
-from ray.util.multiprocessing import Pool
 
 from .field_path import resolve_arrow_field_path, resolve_dataset_field_path
+from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
     has_namespace_params,
@@ -140,22 +140,21 @@ def _map_async_with_pool(
 
     This helper encapsulates the common Pool.map_async + get + error wrapping
     logic so that both scalar and vector distributed index builders can share
-    the same implementation.
+    the same implementation. The global Pool is reused when one is configured
+    via init_global_pool/set_global_pool.
     """
-    pool = Pool(processes=num_workers, ray_remote_args=ray_remote_args)
     try:
-        fragment_handler = create_fragment_handler()
-        rst_futures = pool.map_async(
-            fragment_handler,
-            fragment_batches,
-            chunksize=1,
-        )
-        results = rst_futures.get()
+        with get_or_create_pool(
+            processes=num_workers, ray_remote_args=ray_remote_args
+        ) as pool:
+            fragment_handler = create_fragment_handler()
+            results = pool.map_async(
+                fragment_handler,
+                fragment_batches,
+                chunksize=1,
+            ).get()
     except Exception as exc:  # pragma: no cover - exercised via integration tests
         raise RuntimeError(f"{error_prefix}: {exc}") from exc
-    finally:
-        pool.close()
-        pool.join()
 
     return results
 

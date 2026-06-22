@@ -77,6 +77,44 @@ def test_get_or_create_pool_warns_when_global_pool_size_differs(caplog):
     assert "requested 16 workers will be ignored" in caplog.text
 
 
+def test_get_or_create_pool_warns_when_remote_args_ignored(caplog):
+    class FakePool:
+        processes = 4
+
+    pool_mod.set_global_pool(FakePool())
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="lance_ray.pool"),
+            pool_mod.get_or_create_pool(
+                processes=4, ray_remote_args={"num_cpus": 2}
+            ) as pool,
+        ):
+            assert pool is pool_mod.get_global_pool()
+    finally:
+        pool_mod.clear_global_pool()
+
+    assert "per-call ray_remote_args" in caplog.text
+    assert "are ignored" in caplog.text
+
+
+def test_get_or_create_pool_handles_none_processes_with_global_pool(caplog):
+    class FakePool:
+        processes = 4
+
+    pool_mod.set_global_pool(FakePool())
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="lance_ray.pool"),
+            pool_mod.get_or_create_pool(processes=None, ray_remote_args=None) as pool,
+        ):
+            assert pool is pool_mod.get_global_pool()
+    finally:
+        pool_mod.clear_global_pool()
+
+    # processes=None must not raise and must not emit a size-mismatch warning.
+    assert "workers will be ignored" not in caplog.text
+
+
 def test_set_global_pool_can_clear_without_closing():
     events = []
 
