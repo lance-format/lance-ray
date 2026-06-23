@@ -799,9 +799,8 @@ def add_columns_from(
             result = transform(batch_dict)
             if isinstance(result, pa.RecordBatch):
                 new_cols = pa.Table.from_batches([result])
-            elif isinstance(result, pa.Table | dict):
-                new_cols = result
             else:
+                # Already a pa.Table or dict (normalized below).
                 new_cols = result
         else:
             reader = pa.RecordBatchReader.from_batches(
