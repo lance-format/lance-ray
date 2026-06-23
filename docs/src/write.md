@@ -24,7 +24,7 @@ Write a Ray Dataset to Lance format.
 - `namespace`: LanceNamespace instance for metadata catalog integration (requires table_id)
 - `table_id`: Table identifier as list of strings (requires namespace)
 - `schema`: Optional PyArrow schema
-- `mode`: Write mode - "create", "append", or "overwrite"
+- `mode`: Write mode - "create" (default), "append", or "overwrite". "create" and "overwrite" write data using the incoming schema, so new columns are persisted (schema evolution); "append" adds data under the existing dataset schema without evolving it (in the default non-streaming write, columns not in the existing schema are dropped; with `stream=True` they raise a schema-mismatch error)
 - `target_bases`: Optional list of registered base names or base path URIs where new data files should be written. In `create` mode, entries must match `initial_bases`; in `append` and `overwrite` modes, entries must match bases already registered in the dataset manifest
 - `min_rows_per_file`: Minimum rows per file (default: 1024 * 1024)
 - `max_rows_per_file`: Maximum rows per file (default: 64 * 1024 * 1024)

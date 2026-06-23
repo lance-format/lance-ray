@@ -201,8 +201,18 @@ def write_lance(
             with namespace parameters when creating a new dataset (mode='create' or 'overwrite').
         table_id: The table identifier as a list of strings. Must be provided together
             with namespace_impl and namespace_properties.
-        schema: The schema of the dataset. If not provided, it is inferred from the data.
-        mode: The write mode. Can be "create", "append", or "overwrite".
+        schema: The schema of the dataset. If not provided, it is inferred from the
+            data. For distributed create/overwrite writes, provide a schema when
+            input blocks may differ in column order (e.g. a union of differently
+            ordered sources); otherwise the write raises rather than risk writing
+            transposed data.
+        mode: The write mode (default "create"). Can be "create", "append", or
+            "overwrite". "create" writes a new dataset and "overwrite" replaces an
+            existing one; both write data using the schema of the incoming data, so
+            new columns are persisted (schema evolution). "append" adds data under
+            the existing dataset schema and does not evolve it: in the default
+            non-streaming write, columns not present in the existing schema are
+            dropped, while with ``stream=True`` they raise a schema-mismatch error.
         min_rows_per_file: The minimum number of rows per file.
         max_rows_per_file: The maximum number of rows per file.
         data_storage_version: The version of the data storage format to use. Newer versions are more
@@ -342,12 +352,17 @@ def write_lance(
         fragment_initial_bases = (
             initial_bases if mode == "create" and not first_commit_done else None
         )
+        # Only the first committed batch carries the requested mode so that
+        # create/overwrite assign new field ids for the incoming schema. Every
+        # later batch appends to the dataset just created/overwritten above.
+        fragment_mode = "append" if first_commit_done else mode
         writer = LanceFragmentWriter(
             uri=dest_uri,
             schema=schema,  # if None, writer infers from first batch (preserves Arrow metadata)
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
             data_storage_version=data_storage_version,
+            mode=fragment_mode,
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=fragment_initial_bases,
