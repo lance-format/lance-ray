@@ -213,6 +213,7 @@ def compact_database(
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
+    continue_on_error: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Compact all tables under a given database (namespace) using distributed Ray workers.
@@ -231,16 +232,23 @@ def compact_database(
         num_workers: Number of Ray workers per table (default: 4).
         storage_options: Storage options for the datasets.
         ray_remote_args: Options for Ray tasks (e.g. num_cpus, resources).
+        continue_on_error: If False (default), the first table that fails to
+            compact aborts the whole run with ``RuntimeError``. If True, failures
+            are recorded per table and the remaining tables are still compacted.
 
     Returns:
         A list of dicts, one per table, with keys:
         - ``"table_id"``: ``list[str]`` – full table identifier (database + table name).
         - ``"metrics"``: :class:`~lance.lance.CompactionMetrics` or ``None`` –
-          compaction result for that table, or ``None`` if no compaction was needed.
+          compaction result for that table, or ``None`` if no compaction was needed
+          or the table failed.
+        - ``"error"``: ``str`` – only present (and only when ``continue_on_error``
+          is True) for tables whose compaction failed.
 
     Raises:
         ValueError: If database is empty or namespace_impl is not provided.
-        RuntimeError: If listing tables fails or any table compaction fails.
+        RuntimeError: If listing tables fails, or if a table compaction fails
+            while ``continue_on_error`` is False.
 
     Example:
         >>> results = compact_database(
@@ -307,6 +315,10 @@ def compact_database(
             results.append({"table_id": table_id, "metrics": metrics})
         except Exception as e:
             logger.exception("Compaction failed for table %s: %s", table_id, e)
-            raise RuntimeError(f"Compaction failed for table {table_id}: {e}") from e
+            if not continue_on_error:
+                raise RuntimeError(
+                    f"Compaction failed for table {table_id}: {e}"
+                ) from e
+            results.append({"table_id": table_id, "metrics": None, "error": str(e)})
 
     return results

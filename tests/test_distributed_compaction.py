@@ -530,6 +530,68 @@ class TestCompactDatabase:
         request = args[0] if args else kwargs.get("request")
         assert request is not None and request.id == ["my_db"]
 
+    def _mock_two_table_namespace(self):
+        mock_response = MagicMock()
+        mock_response.tables = ["table_a", "table_b"]
+        mock_response.page_token = None
+        mock_namespace = MagicMock()
+        mock_namespace.list_tables.return_value = mock_response
+        return mock_namespace
+
+    def test_compact_database_continue_on_error_records_failures(self):
+        """continue_on_error=True records per-table failures and keeps going."""
+        mock_namespace = self._mock_two_table_namespace()
+
+        def fake_compact_files(*, table_id, **kwargs):
+            if table_id == ["my_db", "table_a"]:
+                raise RuntimeError("boom")
+            return MagicMock()
+
+        with (
+            patch(
+                "lance_ray.compaction.get_or_create_namespace",
+                return_value=mock_namespace,
+            ),
+            patch(
+                "lance_ray.compaction.compact_files",
+                side_effect=fake_compact_files,
+            ),
+        ):
+            results = lr.compact_database(
+                database=["my_db"],
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+                continue_on_error=True,
+            )
+
+        assert len(results) == 2
+        by_id = {tuple(r["table_id"]): r for r in results}
+        assert by_id[("my_db", "table_a")]["metrics"] is None
+        assert "boom" in by_id[("my_db", "table_a")]["error"]
+        assert by_id[("my_db", "table_b")]["metrics"] is not None
+        assert "error" not in by_id[("my_db", "table_b")]
+
+    def test_compact_database_aborts_on_first_error_by_default(self):
+        """Default (continue_on_error=False) aborts the whole run on failure."""
+        mock_namespace = self._mock_two_table_namespace()
+
+        with (
+            patch(
+                "lance_ray.compaction.get_or_create_namespace",
+                return_value=mock_namespace,
+            ),
+            patch(
+                "lance_ray.compaction.compact_files",
+                side_effect=RuntimeError("boom"),
+            ),
+            pytest.raises(RuntimeError, match="Compaction failed for table"),
+        ):
+            lr.compact_database(
+                database=["my_db"],
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+            )
+
     def test_compact_database_two_tables_both_compacted(self, temp_dir):
         """compact_database compacts all tables under the given database."""
         import lance_namespace as ln
