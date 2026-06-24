@@ -14,13 +14,13 @@ help:
 
 .PHONY: lint
 lint: lock
-	uv run ruff check
-	uv run ruff format --check .
+	uv run --no-project --with ruff ruff check
+	uv run --no-project --with ruff ruff format --check .
 
 .PHONY: fix
 fix: lock
-	uv run ruff check --fix --unsafe-fixes
-	uv run ruff format .
+	uv run --no-project --with ruff ruff check --fix --unsafe-fixes
+	uv run --no-project --with ruff ruff format .
 
 .PHONY: lock
 lock:
