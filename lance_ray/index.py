@@ -1263,8 +1263,7 @@ def create_index(
 
     if not replace and _index_exists(dataset_obj, name):
         raise ValueError(
-            f"Index with name '{name}' already exists. Set replace=True "
-            "to replace it."
+            f"Index with name '{name}' already exists. Set replace=True to replace it."
         )
 
     fragments = dataset_obj.get_fragments()
