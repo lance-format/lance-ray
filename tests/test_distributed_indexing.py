@@ -1567,9 +1567,7 @@ def test_build_distributed_vector_index(tmp_path, index_type):
     assert len(indices) > 0, "No indices found after distributed vector index build"
 
     # Find the index with the name we specified
-    vec_index = next(
-        (idx for idx in indices if idx.name == f"idx_{index_type}"), None
-    )
+    vec_index = next((idx for idx in indices if idx.name == f"idx_{index_type}"), None)
     assert vec_index is not None, f"Index with name idx_{index_type} not found"
     assert vec_index.index_type == index_type, (
         f"Expected {index_type} vector index, got {vec_index.index_type}"
