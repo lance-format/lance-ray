@@ -238,9 +238,7 @@ def resolve_namespace_table(
             )
             location = describe_response.location
             if location is None:
-                raise ValueError(
-                    "Namespace did not return a 'location' for the table"
-                )
+                raise ValueError("Namespace did not return a 'location' for the table")
             if describe_response.storage_options:
                 merged_storage_options.update(describe_response.storage_options)
             return location, merged_storage_options
