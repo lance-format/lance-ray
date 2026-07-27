@@ -114,6 +114,29 @@ class TestBasicBehavior:
         assert got["price"] == [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
         assert got["id"] == [1, 2, 3, 4, 5, 6]
 
+    def test_updates_one_fragment_over_multiple_record_batches(self, temp_dir):
+        path = Path(temp_dir) / "multi_batch_fragment.lance"
+        _write_products(path, rows=6, max_rows_per_file=6)
+
+        result = lr.update_columns(
+            str(path),
+            transform=_double_price,
+            output_schema=PRICE_SCHEMA,
+            read_columns=["price"],
+            batch_size=2,
+            concurrency=1,
+        )
+
+        assert result.rows_updated == 6
+        assert lance.dataset(str(path)).to_table()["price"].to_pylist() == [
+            20.0,
+            40.0,
+            60.0,
+            80.0,
+            100.0,
+            120.0,
+        ]
+
     def test_filter_updates_only_matching_rows(self, temp_dir):
         path = Path(temp_dir) / "filtered.lance"
         _write_products(path)

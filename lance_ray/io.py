@@ -1375,20 +1375,17 @@ def _apply_update_transform(
     transform: "_UpdateColumnsTransform",
     output_schema: pa.Schema,
     columns: tuple[str, ...],
-) -> Callable[[pa.Table], pa.Table]:
+) -> Callable[[pa.RecordBatch], pa.RecordBatch]:
     """Build the per-batch transform used by a fragment-local worker."""
     expected = set(columns)
     column_list = list(columns)
     non_nullable = [f.name for f in output_schema if not f.nullable]
 
-    def _wrapped(batch: pa.Table) -> pa.Table:
-        # Scanner output is one RecordBatch.  Combining makes that invariant
-        # explicit after Blob reconstruction has replaced a column.
-        batch = batch.combine_chunks()
-        rowaddr = batch.column("_rowaddr").chunk(0)
+    def _wrapped(batch: pa.RecordBatch) -> pa.RecordBatch:
+        rowaddr = batch.column("_rowaddr")
         user_batch = batch.drop_columns(
             [c for c in _METADATA_COLUMNS if c in batch.column_names]
-        ).to_batches()[0]
+        )
 
         result = transform(user_batch)
 
@@ -1416,14 +1413,15 @@ def _apply_update_transform(
         # Column order and types come from output_schema, not from the user's
         # return value; cast is safe=True so precision loss raises.
         out = pa.Table.from_batches([result]).select(column_list).cast(output_schema)
+        normalized = out.to_batches()[0]
 
         for name in non_nullable:
-            if out.column(name).null_count:
+            if normalized.column(name).null_count:
                 raise ValueError(
                     f"transform produced nulls for non-nullable column '{name}'."
                 )
 
-        return out.append_column("_rowaddr", rowaddr)
+        return normalized.append_column("_rowaddr", rowaddr)
 
     return _wrapped
 
@@ -1468,12 +1466,11 @@ def _handle_update_fragment(
                 f"Fragment {fragment_id} not found in Lance dataset at {uri}"
             )
 
-        # _read_fragments is the shared scanner used by read_lance.  It adds
+        # _read_fragments is the shared scanner used by read_lance. It adds
         # _rowaddr, reconstructs explicitly projected Blob columns with
-        # take_blobs(), and never materializes unrequested Blob columns.
-        update_batches: list[pa.Table] = []
-        rows_updated = 0
-        for batch in _read_fragments(
+        # take_blobs(), and never materializes unrequested Blob columns. Keep
+        # its result as a RecordBatch stream until Lance consumes it.
+        scanned_batches = _read_fragments(
             [fragment_id],
             lance_ds,
             {
@@ -1482,19 +1479,30 @@ def _handle_update_fragment(
                 "batch_size": batch_size,
             },
             with_metadata=True,
-        ):
-            updated = apply_transform(batch)
-            update_batches.append(updated)
-            rows_updated += updated.num_rows
-
-        if not update_batches:
+            as_record_batches=True,
+        )
+        try:
+            first_updated = apply_transform(next(scanned_batches))
+        except StopIteration:
             # The exact filter is evaluated here.  A non-matching fragment
             # produces neither files nor transaction metadata.
             return None
 
-        update_table = pa.concat_tables(update_batches).combine_chunks()
+        rows_updated = first_updated.num_rows
+
+        def updated_batches() -> Iterator[pa.RecordBatch]:
+            nonlocal rows_updated
+            yield first_updated
+            for scanned_batch in scanned_batches:
+                updated = apply_transform(scanned_batch)
+                rows_updated += updated.num_rows
+                yield updated
+
+        update_reader = pa.RecordBatchReader.from_batches(
+            first_updated.schema, updated_batches()
+        )
         fragment_meta, fields_modified = fragment.update_columns(
-            update_table,
+            update_reader,
             left_on="_rowaddr",
             right_on="_rowaddr",
         )
@@ -1569,8 +1577,9 @@ def update_columns(
         read_columns: Columns handed to the transform. ``None`` expands to all
             top-level non-blob columns; blob columns must be requested
             explicitly because reading them materializes their raw bytes.
-        batch_size: Maximum rows in one scanner/transform batch.  The final
-            update table still accumulates all matching rows for a fragment.
+        batch_size: Maximum rows in one scanner/transform batch. Lance consumes
+            these as a RecordBatch stream, although its underlying update join
+            can still materialize a fragment's matching rows.
         ray_remote_args: ``ray.remote`` options for the complete fragment task,
             for example ``{"num_gpus": 1}``.
         concurrency: Maximum number of fragment tasks running concurrently.

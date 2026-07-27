@@ -78,8 +78,9 @@ join, deduplicate, aggregate, or explode rows inside it.
 - `read_columns`: Columns supplied to `transform`. When omitted, all top-level
   non-Blob columns are read. Request Blob columns explicitly; they are passed
   to the transform as raw `LargeBinary` bytes and cannot be written by this API.
-- `batch_size`: Maximum rows in each scanner and transform batch. A fragment's
-  matching update rows are still accumulated before the fragment is written.
+- `batch_size`: Maximum rows in each scanner and transform batch. Lance receives
+  the update values as a RecordBatch stream, though its underlying update join
+  can still materialize a fragment's matching rows.
 - `ray_remote_args`: Ray resource options for each fragment task, such as
   `{"num_gpus": 1}`.
 - `concurrency`: Maximum number of fragment tasks running at once. Lower it to

@@ -332,13 +332,15 @@ def _read_fragments(
     lance_ds: lance.LanceDataset,
     scanner_options: dict[str, Any],
     with_metadata: bool = False,
-) -> Iterator[pa.Table]:
+    as_record_batches: bool = False,
+) -> Iterator[pa.Table | pa.RecordBatch]:
     """Read Lance fragments in batches.
 
     This enhanced reader detects Lance blob-encoded columns and reconstructs
     raw bytes using the :meth:`LanceDataset.take_blobs` API, returning
     :class:`pyarrow.LargeBinaryArray` columns instead of the default
-    struct-based descriptors.
+    struct-based descriptors. ``as_record_batches`` is for callers, such as
+    ``update_columns``, that keep the scanner's batch-native execution model.
 
     Row ordering is preserved by using per-batch row IDs.
 
@@ -388,24 +390,25 @@ def _read_fragments(
     for batch in scanner.to_reader():
         # Fast path: no blob columns requested in this scan
         if not blob_columns:
-            table = pa.Table.from_batches([batch])
-
-            if with_metadata and "_rowaddr" in table.column_names:
-                rowaddr_col = table.column("_rowaddr")
+            if with_metadata and "_rowaddr" in batch.column_names:
+                rowaddr_col = batch.column("_rowaddr")
                 # pyarrow-stubs has no overload for shifting an array by a
                 # plain Python int, and types the result as a scalar.
                 fragid_values = cast(
-                    "pa.ChunkedArray[Any]",
+                    "pa.Array[Any]",
                     pc.cast(pc.shift_right(rowaddr_col, 32), pa.uint64()),
                 )
-                table = table.append_column("_fragid", fragid_values)
+                batch = batch.append_column("_fragid", fragid_values)
 
             if not with_metadata:
                 for col in ("_rowaddr", "_fragid"):
-                    if col in table.column_names:
-                        table = table.drop_columns([col])
+                    if col in batch.column_names:
+                        batch = batch.drop_columns([col])
 
-            yield table
+            if as_record_batches:
+                yield batch
+            else:
+                yield pa.Table.from_batches([batch])
             continue
 
         # Build a table so we can manipulate columns easily
@@ -570,4 +573,9 @@ def _read_fragments(
                 if col in table.column_names:
                     table = table.drop_columns([col])
 
-        yield table
+        if as_record_batches:
+            # Blob replacement currently uses Table column operations. Convert
+            # back before returning so callers can retain a RecordBatch stream.
+            yield table.combine_chunks().to_batches()[0]
+        else:
+            yield table
