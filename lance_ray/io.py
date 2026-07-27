@@ -69,10 +69,9 @@ class UpdateColumnsResult:
     """Outcome of a distributed :func:`update_columns` run.
 
     ``version`` identifies the committed snapshot.  When the filter matches no
-    rows, no transaction is created and ``version == read_version``.
+    rows, no transaction is created and ``rows_updated`` is zero.
     """
 
-    read_version: int
     version: int
     rows_updated: int
 
@@ -1658,7 +1657,6 @@ def update_columns(
     if not rows:
         # The filter matched nothing: no files were written, no transaction.
         return UpdateColumnsResult(
-            read_version=resolved_read_version,
             version=resolved_read_version,
             rows_updated=0,
         )
@@ -1725,7 +1723,6 @@ def update_columns(
     )
 
     return UpdateColumnsResult(
-        read_version=resolved_read_version,
         version=committed.version,
         rows_updated=rows_updated,
     )

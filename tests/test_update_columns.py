@@ -83,7 +83,6 @@ class TestBasicBehavior:
             table_id=table_id,
         )
 
-        assert result.version == result.read_version + 1
         assert result.rows_updated == 3
         got = lr.read_lance(
             namespace_impl="dir",
@@ -103,7 +102,6 @@ class TestBasicBehavior:
             read_columns=["price"],
         )
 
-        assert result.read_version == 1
         assert result.version == 2
         assert result.rows_updated == 6
 
@@ -208,7 +206,7 @@ class TestBasicBehavior:
         )
 
         assert result.rows_updated == 0
-        assert result.version == result.read_version == before
+        assert result.version == before
         assert lance.dataset(str(path)).version == before
 
     def test_transaction_recoverable_from_result_version(self, temp_dir):
@@ -440,6 +438,7 @@ class TestPhysicalCorrectness:
     def test_time_travel_reads_pre_update_values(self, temp_dir):
         path = Path(temp_dir) / "time_travel.lance"
         _write_products(path, rows=4)
+        read_version = lance.dataset(str(path)).version
 
         result = lr.update_columns(
             str(path),
@@ -448,7 +447,7 @@ class TestPhysicalCorrectness:
             read_columns=["price"],
         )
 
-        old = lance.dataset(str(path), version=result.read_version).to_table()
+        old = lance.dataset(str(path), version=read_version).to_table()
         new = lance.dataset(str(path), version=result.version).to_table()
         assert old["price"].to_pylist() == [10.0, 20.0, 30.0, 40.0]
         assert new["price"].to_pylist() == [20.0, 40.0, 60.0, 80.0]
@@ -493,6 +492,7 @@ class TestTransactionBehavior:
         _write_products(path, rows=4)
 
         before_ds = lance.dataset(str(path))
+        read_version = before_ds.version
         price_field_id = before_ds.lance_schema.field("price").id()
 
         result = lr.update_columns(
@@ -506,7 +506,7 @@ class TestTransactionBehavior:
         assert type(txn.operation).__name__ == "Update"
         assert txn.operation.update_mode == "rewrite_columns"
         assert list(txn.operation.fields_modified) == [price_field_id]
-        assert txn.read_version == result.read_version
+        assert txn.read_version == read_version
 
     def test_stale_snapshot_commit_fails(self, temp_dir):
         """A stale Update must never be rebased onto a newer conflicting version."""
