@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 import ray
+from lance.udf import BatchUDF
 
 
 @pytest.fixture
@@ -35,8 +36,12 @@ def _write_products(path, rows=6, max_rows_per_file=2):
     return table
 
 
-def _double_price(batch: pa.Table) -> pa.Table:
-    return pa.table({"price": pc.multiply(batch["price"], 2.0)})
+def _record_batch(data, schema=None) -> pa.RecordBatch:
+    return pa.RecordBatch.from_pydict(data, schema=schema)
+
+
+def _double_price(batch: pa.RecordBatch) -> pa.RecordBatch:
+    return _record_batch({"price": pc.multiply(batch["price"], 2.0)})
 
 
 def _dataset_fingerprint(path):
@@ -154,8 +159,8 @@ class TestBasicBehavior:
         )
         lance.write_dataset(table, str(path), max_rows_per_file=2)
 
-        def bump_both(batch: pa.Table) -> pa.Table:
-            return pa.table(
+        def bump_both(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch(
                 {
                     "price": pc.multiply(batch["price"], 10.0),
                     "label": pc.binary_join_element_wise(batch["label"], "!", ""),
@@ -179,8 +184,8 @@ class TestBasicBehavior:
         path = Path(temp_dir) / "aux_read.lance"
         _write_products(path, rows=4)
 
-        def price_from_id(batch: pa.Table) -> pa.Table:
-            return pa.table({"price": pc.cast(batch["id"], pa.float64())})
+        def price_from_id(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch({"price": pc.cast(batch["id"], pa.float64())})
 
         lr.update_columns(
             str(path),
@@ -214,10 +219,11 @@ class TestTransformContract:
         path = Path(temp_dir) / "hidden_meta.lance"
         _write_products(path, rows=4)
 
-        def assert_no_metadata(batch: pa.Table) -> pa.Table:
+        def assert_no_metadata(batch: pa.RecordBatch) -> pa.RecordBatch:
+            assert isinstance(batch, pa.RecordBatch)
             for hidden in ("_rowaddr", "_fragid", "_rowid"):
                 assert hidden not in batch.column_names
-            return pa.table({"price": pc.multiply(batch["price"], 3.0)})
+            return _record_batch({"price": pc.multiply(batch["price"], 3.0)})
 
         lr.update_columns(
             str(path),
@@ -229,29 +235,49 @@ class TestTransformContract:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [30.0, 60.0, 90.0, 120.0]
 
+    def test_accepts_batch_udf(self, temp_dir):
+        path = Path(temp_dir) / "batch_udf.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch(
+                {"price": pc.multiply(batch["price"], 4.0)}
+            ),
+            output_schema=PRICE_SCHEMA,
+        )
+        lr.update_columns(
+            str(path),
+            transform=udf,
+            output_schema=PRICE_SCHEMA,
+            read_columns=["price"],
+        )
+
+        assert lance.dataset(str(path)).to_table()["price"].to_pylist() == [
+            40.0,
+            80.0,
+        ]
+
     @pytest.mark.parametrize(
         "bad_transform, match",
         [
             (
-                lambda b: pa.table(
+                lambda b: _record_batch(
                     {"price": pc.multiply(b["price"], 2.0), "extra": b["price"]}
                 ),
                 "Unexpected: \\['extra'\\]",
             ),
-            (lambda b: pa.table({"nope": b["price"]}), "missing: \\['price'\\]"),
+            (lambda b: _record_batch({"nope": b["price"]}), "missing: \\['price'\\]"),
             (
-                # Ray may hand the transform single-row batches, so drop a row
-                # by doubling instead of slicing: that always changes the count.
-                lambda b: pa.concat_tables([b.select(["price"])] * 2),
+                lambda b: _record_batch({"price": [1.0] * (b.num_rows * 2)}),
                 "changed the row count",
             ),
             (
-                lambda b: pa.RecordBatch.from_pydict({"price": [1.0] * b.num_rows}),
-                "must return pa.Table, got pa.RecordBatch",
+                lambda b: pa.table({"price": [1.0] * b.num_rows}),
+                "must return pa.RecordBatch, got Table",
             ),
             (
                 lambda b: {"price": [1.0] * b.num_rows},
-                "must return pa.Table, got dict",
+                "must return pa.RecordBatch, got dict",
             ),
         ],
     )
@@ -555,8 +581,8 @@ class TestNestedFieldIds:
         )
         lance.write_dataset(table, str(path), max_rows_per_file=2)
 
-        def append_marker(batch: pa.Table) -> pa.Table:
-            return pa.table(
+        def append_marker(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch(
                 {
                     "tags": pa.array(
                         [v + [99] for v in batch["tags"].to_pylist()], list_type
@@ -594,7 +620,7 @@ class TestNestedFieldIds:
 
         result = lr.update_columns(
             str(path),
-            transform=lambda b: pa.table(
+            transform=lambda b: _record_batch(
                 {"tags": pa.array([[7]] * b.num_rows, list_type)}
             ),
             output_schema=pa.schema([pa.field("tags", list_type)]),
@@ -617,7 +643,7 @@ class TestNestedFieldIds:
 
         lr.update_columns(
             str(path),
-            transform=lambda b: pa.table(
+            transform=lambda b: _record_batch(
                 {
                     "vec": pa.FixedSizeListArray.from_arrays(
                         pa.array([0.5] * (b.num_rows * 2), pa.float32()), 2
@@ -775,11 +801,11 @@ class TestBlobInput:
         path = Path(temp_dir) / "blob_input.lance"
         self._write_blob_dataset(path)
 
-        def payload_size(batch: pa.Table) -> pa.Table:
+        def payload_size(batch: pa.RecordBatch) -> pa.RecordBatch:
             sizes = [
                 len(v) if v is not None else 0 for v in batch["payload"].to_pylist()
             ]
-            return pa.table({"size": pa.array(sizes, pa.int64())})
+            return _record_batch({"size": pa.array(sizes, pa.int64())})
 
         lr.update_columns(
             str(path),
@@ -795,12 +821,14 @@ class TestBlobInput:
         path = Path(temp_dir) / "blob_default.lance"
         self._write_blob_dataset(path)
 
-        def record_projection(batch: pa.Table) -> pa.Table:
+        def record_projection(batch: pa.RecordBatch) -> pa.RecordBatch:
             # The transform runs in a Ray worker, so the observation has to
             # travel back through the data itself.
             assert "payload" not in batch.column_names
             width = len(batch.column_names)
-            return pa.table({"size": pa.array([width] * batch.num_rows, pa.int64())})
+            return _record_batch(
+                {"size": pa.array([width] * batch.num_rows, pa.int64())}
+            )
 
         lr.update_columns(
             str(path),
@@ -857,7 +885,7 @@ class TestBlobInput:
         # not be pulled in unless asked for.
         lr.update_columns(
             str(path),
-            transform=lambda b: pa.table(
+            transform=lambda b: _record_batch(
                 {"size": pa.array([len(b.column_names)] * b.num_rows, pa.int64())}
             ),
             output_schema=size_schema,
@@ -865,11 +893,11 @@ class TestBlobInput:
         assert lance.dataset(str(path)).to_table().to_pydict()["size"] == [2, 2]
 
         # ... but it is readable when explicitly requested.
-        def payload_size(batch: pa.Table) -> pa.Table:
+        def payload_size(batch: pa.RecordBatch) -> pa.RecordBatch:
             sizes = [
                 len(v) if v is not None else 0 for v in batch["payload"].to_pylist()
             ]
-            return pa.table({"size": pa.array(sizes, pa.int64())})
+            return _record_batch({"size": pa.array(sizes, pa.int64())})
 
         lr.update_columns(
             str(path),
@@ -885,7 +913,7 @@ class TestBlobInput:
 
         lr.update_columns(
             str(path),
-            transform=lambda b: pa.table(
+            transform=lambda b: _record_batch(
                 {"size": pc.cast(pc.multiply(b["id"], 100), pa.int64())}
             ),
             output_schema=pa.schema([pa.field("size", pa.int64())]),

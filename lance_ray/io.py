@@ -51,11 +51,11 @@ logger = logging.getLogger(__name__)
 
 #: Internal transform contract for :func:`update_columns`.
 #:
-#: This is deliberately not exported as a public type alias.  The callable
-#: receives a ``pa.Table`` holding only user columns and must return a table
-#: whose columns are exactly ``output_schema.names``, with the same number of
-#: rows **in the same order**.
-_UpdateColumnsTransform = Callable[[pa.Table], pa.Table]
+#: This is deliberately not exported as a public type alias.  The transform
+#: receives a ``pa.RecordBatch`` holding only user columns and must return a
+#: record batch whose columns are exactly ``output_schema.names``, with the
+#: same number of rows **in the same order**.
+_UpdateColumnsTransform = BatchUDF | Callable[[pa.RecordBatch], pa.RecordBatch]
 
 _METADATA_COLUMNS = frozenset({"_rowaddr", "_fragid", "_rowid"})
 
@@ -1382,30 +1382,29 @@ def _apply_update_transform(
     non_nullable = [f.name for f in output_schema if not f.nullable]
 
     def _wrapped(batch: pa.Table) -> pa.Table:
-        rowaddr = batch.column("_rowaddr")
+        # Scanner output is one RecordBatch.  Combining makes that invariant
+        # explicit after Blob reconstruction has replaced a column.
+        batch = batch.combine_chunks()
+        rowaddr = batch.column("_rowaddr").chunk(0)
         user_batch = batch.drop_columns(
             [c for c in _METADATA_COLUMNS if c in batch.column_names]
-        )
+        ).to_batches()[0]
 
         result = transform(user_batch)
 
-        if isinstance(result, pa.RecordBatch):
+        if not isinstance(result, pa.RecordBatch):
             raise TypeError(
-                "transform must return pa.Table, got pa.RecordBatch. Use "
-                "pa.Table.from_batches([rb]) to convert it."
+                "transform must return pa.RecordBatch, got "
+                f"{type(result).__name__}."
             )
-        if not isinstance(result, pa.Table):
-            raise TypeError(
-                f"transform must return pa.Table, got {type(result).__name__}."
-            )
-        if result.num_rows != batch.num_rows:
+        if result.num_rows != user_batch.num_rows:
             raise ValueError(
                 f"transform changed the row count: got {result.num_rows} rows "
-                f"for an input batch of {batch.num_rows}. The transform must be "
+                f"for an input batch of {user_batch.num_rows}. The transform must be "
                 "a row-order-preserving batch mapping; filtering, sorting, "
                 "exploding or aggregating inside the transform is not allowed."
             )
-        actual = set(result.column_names)
+        actual = set(result.schema.names)
         if actual != expected:
             unexpected = sorted(actual - expected)
             missing = sorted(expected - actual)
@@ -1416,7 +1415,7 @@ def _apply_update_transform(
 
         # Column order and types come from output_schema, not from the user's
         # return value; cast is safe=True so precision loss raises.
-        out = result.select(column_list).cast(output_schema)
+        out = pa.Table.from_batches([result]).select(column_list).cast(output_schema)
 
         for name in non_nullable:
             if out.column(name).null_count:
@@ -1538,8 +1537,10 @@ def update_columns(
         >>> import lance_ray as lr
         >>> import pyarrow as pa
         >>> import pyarrow.compute as pc
-        >>> def bump_price(batch: pa.Table) -> pa.Table:
-        ...     return pa.table({"price": pc.multiply(batch["price"], 1.1)})
+        >>> def bump_price(batch: pa.RecordBatch) -> pa.RecordBatch:
+        ...     return pa.RecordBatch.from_pydict(
+        ...         {"price": pc.multiply(batch["price"], 1.1)}
+        ...     )
         >>> lr.update_columns(  # doctest: +SKIP
         ...     "/tmp/products.lance",
         ...     transform=bump_price,
@@ -1551,8 +1552,9 @@ def update_columns(
     Args:
         uri: The path to the target Lance dataset. If omitted, provide
             ``namespace_impl`` and ``table_id`` to resolve it from a namespace.
-        transform: A callable taking a ``pa.Table`` of the requested columns and
-            returning a ``pa.Table`` whose columns are exactly
+        transform: A callable or :class:`lance.udf.BatchUDF` taking a
+            ``pa.RecordBatch`` of the requested columns and returning a
+            ``pa.RecordBatch`` whose columns are exactly
             ``output_schema.names``. It **must preserve row count and row
             order**; reordering cannot be detected and silently writes values to
             the wrong rows. Do not filter, sort, join, deduplicate, aggregate or
