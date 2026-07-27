@@ -2,8 +2,11 @@
 I/O operations for Lance-Ray integration.
 """
 
+import logging
 import pickle
-from collections.abc import Callable
+import uuid as uuid_module
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import pyarrow as pa
@@ -15,7 +18,7 @@ from ray.data import Dataset, read_datasource
 from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
-from .datasource import LanceDatasource
+from .datasource import LanceDatasource, blob_field_kind
 from .fragment import prepare_fragment_write_options
 from .utils import (
     get_namespace_kwargs,
@@ -43,6 +46,70 @@ if TYPE_CHECKING:
         [dict[str, list[Any]]], dict[str, Any] | pa.RecordBatch | pa.Table
     ]
     TransformFromType = dict[str, str] | BatchUDF | ReaderLike | BatchDictTransform
+
+
+logger = logging.getLogger(__name__)
+
+#: Transform contract for :func:`update_columns`.
+#:
+#: Receives a ``pa.Table`` holding only the requested user columns (metadata
+#: columns are hidden) and must return a ``pa.Table`` whose column set is
+#: exactly ``output_schema.names``, with the same number of rows **in the same
+#: order**. Row reordering cannot be detected and silently corrupts data.
+UpdateColumnsTransform = Callable[[pa.Table], pa.Table]
+
+_METADATA_COLUMNS = frozenset({"_rowaddr", "_fragid", "_rowid"})
+
+# Lance's built-in commit performs a conflict-checked rebase on every attempt.
+# Bounded here only to limit tail latency (0 would still rebase once, it just
+# would not retry).
+_UPDATE_COMMIT_MAX_RETRIES = 5
+
+
+@dataclass(frozen=True)
+class UpdateColumnsResult:
+    """Outcome of a distributed :func:`update_columns` run.
+
+    The transaction UUID is intentionally absent: after a successful commit
+    ``version`` is the better handle, and ``dataset.read_transaction(version)``
+    recovers the full transaction (including its UUID). The UUID only matters
+    when it is unknown whether a version was produced at all, so it is carried
+    by :class:`CommitOutcomeUnknown` instead.
+    """
+
+    read_version: int
+    version: int
+    columns: tuple[str, ...]
+    rows_updated: int
+    fragments_rewritten: int
+
+
+class CommitOutcomeUnknown(RuntimeError):
+    """Raised when a commit neither clearly succeeded nor clearly failed.
+
+    The transaction file is written *before* the manifest, so its presence does
+    not prove the commit landed. To confirm, enumerate versions after
+    ``read_version`` and match ``dataset.read_transaction(version).uuid``
+    against :attr:`transaction_uuid`. Do not re-run the backfill until the
+    outcome is established.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        transaction_uuid: str,
+        read_version: int,
+        columns: tuple[str, ...],
+        field_ids: tuple[int, ...],
+        fragment_ids: tuple[int, ...],
+    ):
+        super().__init__(message)
+        self.transaction_uuid = transaction_uuid
+        self.read_version = read_version
+        self.columns = columns
+        self.field_ids = field_ids
+        self.fragment_ids = fragment_ids
 
 
 def read_lance(
@@ -153,6 +220,42 @@ def read_lance(
             override_num_blocks=override_num_blocks,
         ),
     )
+
+
+def _read_resolved_lance(
+    uri: str,
+    *,
+    table_id: Optional[list[str]],
+    columns: Optional[list[str]],
+    filter: Optional[str],
+    storage_options: Optional[dict[str, Any]],
+    base_store_params: Optional[dict[str, dict[str, Any]]],
+    dataset_options: Optional[dict[str, Any]],
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    with_metadata: bool,
+) -> Dataset:
+    """Read an already-resolved URI while retaining namespace credentials.
+
+    ``read_lance`` deliberately rejects an explicit URI combined with namespace
+    arguments.  ``update_columns`` is different: the driver resolves a
+    namespace target once to pin its location and version, but worker dataset
+    opens still need the namespace client for credential refresh.  Keep this
+    narrow internal path so the public validation contract remains unchanged.
+    """
+    datasource = LanceDatasource(
+        uri=uri,
+        table_id=table_id,
+        columns=columns,
+        filter=filter,
+        storage_options=storage_options,
+        base_store_params=base_store_params,
+        dataset_options=dataset_options,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties,
+        with_metadata=with_metadata,
+    )
+    return read_datasource(datasource=datasource, ray_remote_args={})
 
 
 def write_lance(
@@ -1196,6 +1299,649 @@ def merge_columns_from(
         namespace_kwargs=namespace_kwargs,
         original_fragments=fragments_in_lance,
     )
+
+
+def _blob_column_names(schema: pa.Schema) -> set[str]:
+    """Names of top-level blob columns (legacy or v2) in a Lance schema."""
+    return {f.name for f in schema if blob_field_kind(f) is not None}
+
+
+def _leaf_field_ids(lance_field: Any) -> list[int]:
+    """Leaf Lance field ids beneath (or of) ``lance_field``.
+
+    A rewritten data file declares the *leaf* field ids it carries, which is
+    what ``LanceFragment.update_columns`` reports back as ``fields_modified``.
+    For a scalar column that is just the column's own id, but a ``list<int32>``
+    column has a child item field and reports the child's id instead.
+    """
+    children = lance_field.children()
+    if not children:
+        return [lance_field.id()]
+    ids: list[int] = []
+    for child in children:
+        ids.extend(_leaf_field_ids(child))
+    return ids
+
+
+def _resolve_update_targets(
+    lance_ds: LanceDataset,
+    output_schema: pa.Schema,
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """Validate ``output_schema`` against the target dataset.
+
+    Everything here runs on the driver, before any Ray task starts, so schema
+    errors never surface after part of the fragments have been rewritten.
+
+    Returns the target column names (in ``output_schema`` order) and the *leaf*
+    Lance field ids they cover, which the driver later cross-checks against the
+    ``fields_modified`` reported by every worker.
+    """
+    if len(output_schema) == 0:
+        raise ValueError(
+            "'output_schema' must declare at least one column to update. "
+            "update_columns only overwrites existing columns; use "
+            "add_columns_from() to add new ones."
+        )
+
+    target_schema = lance_ds.schema
+    lance_schema = lance_ds.lance_schema
+    target_names = set(target_schema.names)
+    blob_columns = _blob_column_names(target_schema)
+
+    names: list[str] = []
+    field_ids: list[int] = []
+    seen: set[str] = set()
+
+    for field in output_schema:
+        name = field.name
+        if name in seen:
+            raise ValueError(f"Duplicate column '{name}' in 'output_schema'.")
+        seen.add(name)
+
+        if name in _METADATA_COLUMNS:
+            raise ValueError(
+                f"Cannot update metadata column '{name}'. Metadata columns are "
+                "managed by lance-ray and must not appear in 'output_schema'."
+            )
+        if "." in name:
+            raise ValueError(
+                f"Nested field path '{name}' is not supported. Only top-level "
+                "columns can be updated."
+            )
+        if name not in target_names:
+            raise ValueError(
+                f"Cannot update non-existent column '{name}'. update_columns "
+                "only overwrites columns that already exist in the target "
+                "dataset; use add_columns_from() to add new ones."
+            )
+        if name in blob_columns:
+            raise ValueError(
+                f"Cannot write blob column '{name}'. Blob columns may be read "
+                "via 'read_columns' but are not valid update targets."
+            )
+
+        target_field = target_schema.field(name)
+        if pa.types.is_struct(target_field.type):
+            raise ValueError(
+                f"Column '{name}' has a nested (struct) type, which is not "
+                "supported by update_columns yet."
+            )
+        if target_field.type != field.type:
+            raise ValueError(
+                f"Type mismatch for column '{name}': target dataset has "
+                f"{target_field.type}, 'output_schema' declares {field.type}."
+            )
+        if target_field.nullable != field.nullable:
+            raise ValueError(
+                f"Nullability mismatch for column '{name}': target dataset has "
+                f"nullable={target_field.nullable}, 'output_schema' declares "
+                f"nullable={field.nullable}. Arrow cast does not check "
+                "nullability, so this must match exactly."
+            )
+
+        lance_field = lance_schema.field(name)
+        if lance_field is None:
+            raise ValueError(
+                f"Column '{name}' has no Lance field id; cannot update it."
+            )
+        names.append(name)
+        field_ids.extend(_leaf_field_ids(lance_field))
+
+    return tuple(names), tuple(field_ids)
+
+
+def _resolve_read_columns(
+    lance_ds: LanceDataset,
+    read_columns: Optional[Sequence[str]],
+) -> list[str]:
+    """Resolve the projection handed to the user transform.
+
+    ``None`` expands to every top-level **non-blob** user column. Blob columns
+    are reconstructed into raw bytes on read, so pulling them in by default
+    would materialize every image/video in the table.
+    """
+    target_schema = lance_ds.schema
+    blob_columns = _blob_column_names(target_schema)
+
+    if read_columns is None:
+        return [name for name in target_schema.names if name not in blob_columns]
+
+    resolved = list(read_columns)
+    metadata_requested = [c for c in resolved if c in _METADATA_COLUMNS]
+    if metadata_requested:
+        raise ValueError(
+            f"Metadata columns {metadata_requested} cannot be requested in "
+            "'read_columns'. lance-ray reads and re-attaches them internally; "
+            "the transform never sees them."
+        )
+    missing = [c for c in resolved if c not in target_schema.names]
+    if missing:
+        raise ValueError(
+            f"'read_columns' references columns that do not exist in the "
+            f"target dataset: {missing}"
+        )
+    return resolved
+
+
+def _make_update_transform(
+    transform: "UpdateColumnsTransform",
+    output_schema: pa.Schema,
+    columns: tuple[str, ...],
+) -> Callable[[pa.Table], pa.Table]:
+    """Wrap the user transform: hide metadata columns, validate, re-attach."""
+    expected = set(columns)
+    column_list = list(columns)
+    non_nullable = [f.name for f in output_schema if not f.nullable]
+
+    def _wrapped(batch: pa.Table) -> pa.Table:
+        rowaddr = batch.column("_rowaddr")
+        fragid = batch.column("_fragid")
+        user_batch = batch.drop_columns(
+            [c for c in _METADATA_COLUMNS if c in batch.column_names]
+        )
+
+        result = transform(user_batch)
+
+        if isinstance(result, pa.RecordBatch):
+            raise TypeError(
+                "transform must return pa.Table, got pa.RecordBatch. Use "
+                "pa.Table.from_batches([rb]) to convert it."
+            )
+        if not isinstance(result, pa.Table):
+            raise TypeError(
+                f"transform must return pa.Table, got {type(result).__name__}."
+            )
+        if result.num_rows != batch.num_rows:
+            raise ValueError(
+                f"transform changed the row count: got {result.num_rows} rows "
+                f"for an input batch of {batch.num_rows}. The transform must be "
+                "a row-order-preserving batch mapping; filtering, sorting, "
+                "exploding or aggregating inside the transform is not allowed."
+            )
+        actual = set(result.column_names)
+        if actual != expected:
+            unexpected = sorted(actual - expected)
+            missing = sorted(expected - actual)
+            raise ValueError(
+                "transform output columns must match 'output_schema' exactly. "
+                f"Unexpected: {unexpected}; missing: {missing}."
+            )
+
+        # Column order and types come from output_schema, not from the user's
+        # return value; cast is safe=True so precision loss raises.
+        out = result.select(column_list).cast(output_schema)
+
+        for name in non_nullable:
+            if out.column(name).null_count:
+                raise ValueError(
+                    f"transform produced nulls for non-nullable column '{name}'."
+                )
+
+        return out.append_column("_rowaddr", rowaddr).append_column("_fragid", fragid)
+
+    return _wrapped
+
+
+_UPDATE_RESULT_SCHEMA = pa.schema(
+    [
+        pa.field("frag_id", pa.int64()),
+        pa.field("fragment_meta", pa.binary()),
+        pa.field("fields_modified", pa.binary()),
+        pa.field("rows_updated", pa.int64()),
+    ]
+)
+
+
+def _is_commit_conflict(exc: BaseException) -> bool:
+    """Whether a commit failure is a definite conflict (nothing was written).
+
+    pylance maps every Lance error onto a builtin exception type, so the only
+    signal available is the message text produced by ``lance-core``'s
+    ``CommitConflict`` / ``RetryableCommitConflict`` / ``IncompatibleTransaction``
+    variants. Anything we cannot positively identify is treated as an unknown
+    outcome, which is the conservative direction.
+    """
+    message = str(exc).lower()
+    return "commit conflict" in message or "incompatible transaction" in message
+
+
+def update_columns(
+    uri: Optional[str] = None,
+    *,
+    transform: "UpdateColumnsTransform",
+    output_schema: pa.Schema,
+    filter: Optional[str] = None,
+    read_columns: Optional[Sequence[str]] = None,
+    transform_batch_size: Optional[int] = None,
+    transform_ray_remote_args: Optional[Mapping[str, Any]] = None,
+    fragment_ray_remote_args: Optional[Mapping[str, Any]] = None,
+    fragment_concurrency: Optional[int] = None,
+    storage_options: Optional[Mapping[str, Any]] = None,
+    base_store_params: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    namespace_impl: Optional[str] = None,
+    namespace_properties: Optional[Mapping[str, str]] = None,
+    table_id: Optional[Sequence[str]] = None,
+) -> UpdateColumnsResult:
+    """Overwrite existing columns of a Lance dataset with Ray.
+
+    This is the column-level counterpart of :func:`add_columns_from`. It pins a
+    snapshot, computes new values for existing columns with a distributed
+    transform, and rewrites only those columns via Lance's
+    ``RewriteColumns`` update mode: rows do not move, ``_rowaddr`` is preserved,
+    and untouched columns keep their original data files. It fits "most rows,
+    few columns" backfills; it is a poor fit for updating a handful of rows
+    scattered across many fragments, because a fragment's target column is
+    rewritten in full even for a single matching row.
+
+    Examples:
+        >>> import lance_ray as lr
+        >>> import pyarrow as pa
+        >>> import pyarrow.compute as pc
+        >>> def bump_price(batch: pa.Table) -> pa.Table:
+        ...     return pa.table({"price": pc.multiply(batch["price"], 1.1)})
+        >>> lr.update_columns(  # doctest: +SKIP
+        ...     "/tmp/products.lance",
+        ...     transform=bump_price,
+        ...     output_schema=pa.schema([pa.field("price", pa.float64())]),
+        ...     filter="status = 'active'",
+        ...     read_columns=["price"],
+        ... )
+
+    Args:
+        uri: The path to the target Lance dataset. If omitted, provide
+            ``namespace_impl`` and ``table_id`` to resolve it from a namespace.
+        transform: A callable taking a ``pa.Table`` of the requested columns and
+            returning a ``pa.Table`` whose columns are exactly
+            ``output_schema.names``. It **must preserve row count and row
+            order**; reordering cannot be detected and silently writes values to
+            the wrong rows. Do not filter, sort, join, deduplicate, aggregate or
+            explode inside the transform.
+        output_schema: Schema of the transform output. Required, so that column
+            existence, Arrow type and nullability are checked before any Ray
+            task starts. Only names, types and nullability are compared; Lance
+            field ids and field metadata are resolved from the target dataset.
+        filter: A Lance filter expression. Only matching rows get new values;
+            unmatched rows keep their old values. Note that the physical rewrite
+            is still fragment-wide, so a very sparse filter is a poor fit.
+        read_columns: Columns handed to the transform. ``None`` expands to all
+            top-level non-blob columns; blob columns must be requested
+            explicitly because reading them materializes their raw bytes.
+        transform_batch_size: Arrow batch size for the transform stage, i.e. the
+            size of a single UDF/model-inference input. ``None`` uses Ray's
+            default.
+        transform_ray_remote_args: ``ray.remote`` args for the transform tasks
+            only, e.g. ``{"num_gpus": 1}``.
+        fragment_ray_remote_args: ``ray.remote`` args for the per-fragment
+            rewrite tasks only; these are CPU/memory/IO bound.
+        fragment_concurrency: Maximum number of fragments rewritten
+            concurrently. This is the knob that bounds fragment-worker peak
+            memory; it does not bound data accumulated by the transform stage.
+        storage_options: Storage options for the dataset.
+        base_store_params: Runtime object-store parameters keyed by base URI.
+            Required to read blob v2 columns backed by an external base.
+        namespace_impl: The namespace implementation type (e.g. "rest", "dir").
+        namespace_properties: Properties for connecting to the namespace.
+        table_id: The table identifier as a list of strings.
+
+    Returns:
+        An :class:`UpdateColumnsResult`. When the filter matches nothing the run
+        is a successful no-op: no transaction is created and ``version`` equals
+        ``read_version``.
+
+    Raises:
+        CommitOutcomeUnknown: The commit neither clearly succeeded nor clearly
+            failed (timeout, dropped connection). Confirm before re-running.
+    """
+    validate_uri_or_namespace(uri, namespace_impl, list(table_id) if table_id else None)
+
+    table_id_list = list(table_id) if table_id is not None else None
+    namespace_properties_dict = (
+        dict(namespace_properties) if namespace_properties is not None else None
+    )
+    uri, resolved_storage_options = resolve_namespace_table(
+        uri,
+        dict(storage_options) if storage_options is not None else None,
+        namespace_impl,
+        namespace_properties_dict,
+        table_id_list,
+    )
+    namespace_kwargs = get_namespace_kwargs(
+        namespace_impl, namespace_properties_dict, table_id_list
+    )
+    base_store_params_dict = (
+        {k: dict(v) for k, v in base_store_params.items()}
+        if base_store_params is not None
+        else None
+    )
+
+    lance_ds = LanceDataset(
+        uri=uri,
+        storage_options=resolved_storage_options,
+        base_store_params=base_store_params_dict,
+        **namespace_kwargs,
+    )
+    resolved_read_version = lance_ds.version
+
+    if lance_ds.has_stable_row_ids:
+        raise NotImplementedError(
+            "Distributed update_columns does not yet support datasets with "
+            "stable row IDs: pylance does not expose the matched row offsets "
+            "that Lance needs to advance _row_last_updated_at_version, so the "
+            "change would be invisible to CDF consumers "
+            "(lance-format/lance#6734)."
+        )
+
+    columns, field_ids = _resolve_update_targets(lance_ds, output_schema)
+    projection = _resolve_read_columns(lance_ds, read_columns)
+
+    fragments_in_lance = {f.metadata.id for f in lance_ds.get_fragments()}
+
+    ray_ds = _read_resolved_lance(
+        uri,
+        columns=projection,
+        filter=filter,
+        dataset_options={"version": resolved_read_version},
+        storage_options=dict(resolved_storage_options),
+        base_store_params=base_store_params_dict,
+        namespace_impl=namespace_impl,
+        namespace_properties=namespace_properties_dict,
+        table_id=table_id_list,
+        with_metadata=True,
+    )
+
+    map_batches_kwargs: dict[str, Any] = {}
+    if transform_batch_size is not None:
+        map_batches_kwargs["batch_size"] = transform_batch_size
+    if transform_ray_remote_args:
+        # map_batches ends in **ray_remote_args, so the options are splatted
+        # into the call rather than nested under a 'ray_remote_args' key.
+        map_batches_kwargs.update(transform_ray_remote_args)
+
+    ray_ds = ray_ds.map_batches(
+        _make_update_transform(transform, output_schema, columns),
+        batch_format="pyarrow",
+        **map_batches_kwargs,
+    )
+
+    # Capture closure variables for worker tasks.
+    _uri = uri
+    _storage_options = dict(resolved_storage_options)
+    _base_store_params = base_store_params_dict
+    _namespace_impl = namespace_impl
+    _namespace_properties = namespace_properties_dict
+    _table_id = table_id_list
+    _read_version = resolved_read_version
+    _columns = list(columns)
+
+    def _update_one_fragment(group: pa.Table) -> pa.Table:
+        if group.num_rows == 0:
+            return _UPDATE_RESULT_SCHEMA.empty_table()
+
+        frag_ids = pc.unique(group.column("_fragid"))
+        if len(frag_ids) != 1:
+            raise ValueError(
+                f"map_groups received {len(frag_ids)} fragment ids in one "
+                f"group: {frag_ids.to_pylist()}. Expected exactly one."
+            )
+        frag_id = int(frag_ids[0].as_py())
+
+        rowaddr = group.column("_rowaddr")
+        if pc.count_distinct(rowaddr).as_py() != group.num_rows:
+            raise ValueError(
+                f"Duplicate _rowaddr values for fragment {frag_id}. Each row "
+                "address must appear at most once; update_columns will not "
+                "silently pick one of several candidate values."
+            )
+        derived = pc.cast(pc.shift_right(rowaddr, 32), pa.uint64())
+        if pc.any(pc.not_equal(derived, frag_id)).as_py():
+            raise ValueError(
+                f"Some _rowaddr values in the group for fragment {frag_id} do "
+                "not belong to that fragment."
+            )
+
+        # No sort: the fragment update is a hash join on _rowaddr, so input
+        # order carries no meaning, and duplicates were already rejected above.
+        update_table = group.select(["_rowaddr", *_columns]).combine_chunks()
+
+        local_ns_kwargs = get_namespace_kwargs(
+            _namespace_impl, _namespace_properties, _table_id
+        )
+        local_ds = LanceDataset(
+            uri=_uri,
+            storage_options=_storage_options,
+            base_store_params=_base_store_params,
+            version=_read_version,
+            **local_ns_kwargs,
+        )
+        fragment = local_ds.get_fragment(frag_id)
+        if fragment is None:
+            raise ValueError(f"Fragment {frag_id} not found in Lance dataset at {_uri}")
+
+        fragment_meta, fields_modified = fragment.update_columns(
+            update_table,
+            left_on="_rowaddr",
+            right_on="_rowaddr",
+        )
+
+        return pa.table(
+            {
+                "frag_id": pa.array([frag_id], type=pa.int64()),
+                "fragment_meta": pa.array(
+                    [pickle.dumps(fragment_meta)], type=pa.binary()
+                ),
+                "fields_modified": pa.array(
+                    [pickle.dumps(list(fields_modified))], type=pa.binary()
+                ),
+                "rows_updated": pa.array([group.num_rows], type=pa.int64()),
+            },
+            schema=_UPDATE_RESULT_SCHEMA,
+        )
+
+    map_groups_kwargs: dict[str, Any] = {}
+    if fragment_ray_remote_args:
+        # Same as above: map_groups ends in **ray_remote_args.
+        map_groups_kwargs.update(fragment_ray_remote_args)
+    if fragment_concurrency is not None:
+        map_groups_kwargs["concurrency"] = fragment_concurrency
+
+    result_ds = ray_ds.groupby("_fragid").map_groups(
+        _update_one_fragment,
+        batch_format="pyarrow",
+        **map_groups_kwargs,
+    )
+
+    rows = result_ds.take_all()
+    if not rows:
+        # The filter matched nothing: no files were written, no transaction.
+        return UpdateColumnsResult(
+            read_version=resolved_read_version,
+            version=resolved_read_version,
+            columns=columns,
+            rows_updated=0,
+            fragments_rewritten=0,
+        )
+
+    updated_fragments = []
+    seen_frag_ids: set[int] = set()
+    rows_updated = 0
+    observed_field_ids: Optional[list[int]] = None
+
+    for row in rows:
+        frag_id = int(row["frag_id"])
+        if frag_id not in fragments_in_lance:
+            raise ValueError(
+                f"Fragment {frag_id} is not part of the pinned snapshot "
+                f"(version {resolved_read_version}) of {uri}"
+            )
+        if frag_id in seen_frag_ids:
+            raise ValueError(f"Duplicate fragment {frag_id} in map_groups output")
+        seen_frag_ids.add(frag_id)
+
+        fragment_meta = pickle.loads(row["fragment_meta"])
+        if fragment_meta.id != frag_id:
+            raise ValueError(
+                f"Fragment rewrite changed the fragment id: expected {frag_id}, "
+                f"got {fragment_meta.id}"
+            )
+        updated_fragments.append(fragment_meta)
+        rows_updated += int(row["rows_updated"])
+
+        worker_field_ids = sorted(pickle.loads(row["fields_modified"]))
+        if observed_field_ids is None:
+            observed_field_ids = worker_field_ids
+        elif observed_field_ids != worker_field_ids:
+            raise ValueError(
+                "Workers disagree on the modified field ids: "
+                f"{observed_field_ids} vs {worker_field_ids}"
+            )
+
+    if observed_field_ids != sorted(field_ids):
+        raise ValueError(
+            f"Modified field ids {observed_field_ids} do not match the leaf "
+            f"field ids {sorted(field_ids)} of the target columns "
+            f"{list(columns)}."
+        )
+
+    op = LanceOperation.Update(
+        updated_fragments=updated_fragments,
+        # Lance itself reported these while rewriting; the driver-derived leaf
+        # ids above are only a cross-check.
+        fields_modified=observed_field_ids,
+        fields_for_preserving_frag_bitmap=[],
+        update_mode="rewrite_columns",
+    )
+    # Unmodified fragments are intentionally not resubmitted: Lance's Update
+    # transaction merges by fragment id and carries the rest through untouched.
+
+    transaction_uuid = str(uuid_module.uuid4())
+    logger.info(
+        "Committing update_columns: columns=%s read_version=%s fragments=%s "
+        "transaction_uuid=%s",
+        list(columns),
+        resolved_read_version,
+        len(updated_fragments),
+        transaction_uuid,
+    )
+
+    committed = _commit_update(
+        uri=uri,
+        op=op,
+        read_version=resolved_read_version,
+        transaction_uuid=transaction_uuid,
+        storage_options=_storage_options,
+        namespace_kwargs=namespace_kwargs,
+        columns=columns,
+        field_ids=field_ids,
+        fragment_ids=tuple(sorted(seen_frag_ids)),
+    )
+
+    return UpdateColumnsResult(
+        read_version=resolved_read_version,
+        version=committed,
+        columns=columns,
+        rows_updated=rows_updated,
+        fragments_rewritten=len(updated_fragments),
+    )
+
+
+_COMMIT_SLOW_WARNING_S = 300.0
+
+
+def _commit_update(
+    *,
+    uri: str,
+    op: "LanceOperation.Update",
+    read_version: int,
+    transaction_uuid: str,
+    storage_options: dict[str, Any],
+    namespace_kwargs: dict[str, Any],
+    columns: tuple[str, ...],
+    field_ids: tuple[int, ...],
+    fragment_ids: tuple[int, ...],
+) -> int:
+    """Commit the RewriteColumns transaction exactly once.
+
+    Retries are delegated to Lance, whose commit loop re-runs
+    ``TransactionRebase.check_txn`` against every concurrent transaction and
+    only rebases when that check passes. lance-ray's own
+    ``_commit_with_retry`` must not be used here: it compares fragment id sets
+    and then advances ``read_version`` on its own, which would let an Update
+    built from stale fragment metadata overwrite a concurrent writer.
+    """
+    import threading
+
+    from lance.dataset import Transaction
+
+    txn = Transaction(
+        read_version=read_version,
+        operation=op,
+        uuid=transaction_uuid,
+    )
+
+    timer = threading.Timer(
+        _COMMIT_SLOW_WARNING_S,
+        logger.warning,
+        args=(
+            "update_columns commit still pending after %.0fs "
+            "(transaction_uuid=%s, read_version=%s). If it never returns, the "
+            "outcome is unknown and must be confirmed against version history "
+            "before re-running.",
+            _COMMIT_SLOW_WARNING_S,
+            transaction_uuid,
+            read_version,
+        ),
+    )
+    timer.daemon = True
+    timer.start()
+    try:
+        committed_ds = LanceDataset.commit(
+            uri,
+            txn,
+            max_retries=_UPDATE_COMMIT_MAX_RETRIES,
+            storage_options=storage_options,
+            **namespace_kwargs,
+        )
+    except Exception as exc:
+        if _is_commit_conflict(exc):
+            # Nothing was committed. The caller must recompute from a fresh
+            # snapshot; retrying with this stale metadata is never safe.
+            raise
+        raise CommitOutcomeUnknown(
+            "update_columns could not determine whether its commit succeeded. "
+            "The transaction file is written before the manifest, so its "
+            "presence proves nothing. Enumerate versions after "
+            f"{read_version} and match read_transaction(version).uuid against "
+            f"{transaction_uuid!r} before re-running this backfill.",
+            transaction_uuid=transaction_uuid,
+            read_version=read_version,
+            columns=columns,
+            field_ids=field_ids,
+            fragment_ids=fragment_ids,
+        ) from exc
+    finally:
+        timer.cancel()
+
+    return committed_ds.version
 
 
 def _validate_write_args(

@@ -290,6 +290,43 @@ def _read_fragments_with_retry(
     )
 
 
+def blob_field_kind(f: pa.Field[Any]) -> Optional[str]:
+    """Detect Lance blob columns.
+
+    Returns:
+        "v2" for blob v2 extension columns,
+        "legacy" for legacy metadata-based blob columns,
+        or None if the field is not a blob.
+    """
+    field_type = f.type
+
+    # Blob v2: extension type `lance.blob.v2`
+    if isinstance(field_type, pa.ExtensionType):
+        ext_name = getattr(field_type, "extension_name", None)
+        if ext_name == "lance.blob.v2":
+            return "v2"
+
+    # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
+    try:
+        is_large_bin = field_type == pa.large_binary()
+    except Exception:
+        is_large_bin = False
+    if not is_large_bin:
+        return None
+
+    meta = f.metadata
+    if meta is None:
+        return None
+
+    # pyarrow may store metadata keys/values as str
+    if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
+        meta.get(b"lance-encoding:blob") == b"true"
+    ):
+        return "legacy"
+
+    return None
+
+
 def _read_fragments(
     fragment_ids: list[int],
     lance_ds: lance.LanceDataset,
@@ -321,41 +358,7 @@ def _read_fragments(
     # Map column name -> blob kind ("legacy" or "v2")
     blob_columns: dict[str, str] = {}
 
-    def _is_blob_field(f: pa.Field[Any]) -> Optional[str]:
-        """Detect Lance blob columns.
-
-        Returns:
-            "v2" for blob v2 extension columns,
-            "legacy" for legacy metadata-based blob columns,
-            or None if the field is not a blob.
-        """
-        field_type = f.type
-
-        # Blob v2: extension type `lance.blob.v2`
-        if isinstance(field_type, pa.ExtensionType):
-            ext_name = getattr(field_type, "extension_name", None)
-            if ext_name == "lance.blob.v2":
-                return "v2"
-
-        # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
-        try:
-            is_large_bin = field_type == pa.large_binary()
-        except Exception:
-            is_large_bin = False
-        if not is_large_bin:
-            return None
-
-        meta = f.metadata
-        if meta is None:
-            return None
-
-        # pyarrow may store metadata keys/values as str
-        if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
-            meta.get(b"lance-encoding:blob") == b"true"
-        ):
-            return "legacy"
-
-        return None
+    _is_blob_field = blob_field_kind
 
     # Build list of blob columns to reconstruct, honoring column projection
     ds_field_names = ds_schema.names
