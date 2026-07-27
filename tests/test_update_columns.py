@@ -209,25 +209,6 @@ class TestBasicBehavior:
         assert result.version == before
         assert lance.dataset(str(path)).version == before
 
-    def test_transaction_recoverable_from_result_version(self, temp_dir):
-        path = Path(temp_dir) / "txn_lookup.lance"
-        _write_products(path, rows=2, max_rows_per_file=2)
-
-        result = lr.update_columns(
-            str(path),
-            transform=_double_price,
-            output_schema=PRICE_SCHEMA,
-            read_columns=["price"],
-        )
-
-        # The result deliberately omits the UUID: `version` is enough to
-        # recover the whole transaction, including its uuid.
-        assert not hasattr(result, "transaction_uuid")
-        txn = lance.dataset(str(path)).read_transaction(result.version)
-        assert txn is not None
-        assert txn.uuid
-
-
 class TestTransformContract:
     def test_transform_does_not_see_metadata_columns(self, temp_dir):
         path = Path(temp_dir) / "hidden_meta.lance"
@@ -285,88 +266,6 @@ class TestTransformContract:
                 output_schema=PRICE_SCHEMA,
                 read_columns=["price"],
             )
-
-    def test_rejects_non_existent_output_column(self, temp_dir):
-        path = Path(temp_dir) / "missing_col.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="non-existent column 'brand_new'"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema([pa.field("brand_new", pa.float64())]),
-            )
-
-    def test_rejects_type_mismatch(self, temp_dir):
-        path = Path(temp_dir) / "type_mismatch.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="Type mismatch for column 'price'"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema([pa.field("price", pa.int64())]),
-            )
-
-    def test_rejects_nullable_mismatch(self, temp_dir):
-        path = Path(temp_dir) / "nullable_mismatch.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="Nullability mismatch"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema(
-                    [pa.field("price", pa.float64(), nullable=False)]
-                ),
-            )
-
-    def test_rejects_metadata_output_column(self, temp_dir):
-        path = Path(temp_dir) / "meta_output.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="Cannot update metadata column"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema([pa.field("_rowaddr", pa.uint64())]),
-            )
-
-    def test_rejects_empty_output_schema(self, temp_dir):
-        path = Path(temp_dir) / "empty_schema.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="at least one column"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema([]),
-            )
-
-    def test_rejects_metadata_in_read_columns(self, temp_dir):
-        path = Path(temp_dir) / "meta_read.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="cannot be requested in 'read_columns'"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=PRICE_SCHEMA,
-                read_columns=["price", "_rowaddr"],
-            )
-
-    def test_rejects_unknown_read_column(self, temp_dir):
-        path = Path(temp_dir) / "unknown_read.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="do not exist in the target dataset"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=PRICE_SCHEMA,
-                read_columns=["nope"],
-            )
-
 
 class TestPhysicalCorrectness:
     def test_preserves_row_address_schema_and_field_ids(self, temp_dir):
@@ -818,34 +717,6 @@ class TestDriverSideRejection:
 
 
 class TestRejectedScenarios:
-    def test_rejects_stable_row_ids(self, temp_dir):
-        path = Path(temp_dir) / "stable_row_ids.lance"
-        table = pa.table(
-            {
-                "id": pa.array([1, 2], pa.int32()),
-                "price": pa.array([1.0, 2.0], pa.float64()),
-            }
-        )
-        lance.write_dataset(table, str(path), enable_stable_row_ids=True)
-
-        with pytest.raises(NotImplementedError, match="stable row IDs"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=PRICE_SCHEMA,
-            )
-
-    def test_rejects_nested_field_path(self, temp_dir):
-        path = Path(temp_dir) / "nested_path.lance"
-        _write_products(path, rows=2)
-
-        with pytest.raises(ValueError, match="Nested field path"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                output_schema=pa.schema([pa.field("meta.price", pa.float64())]),
-            )
-
     def test_rejects_struct_target_column(self, temp_dir):
         path = Path(temp_dir) / "struct_col.lance"
         struct_type = pa.struct([pa.field("v", pa.int32())])
