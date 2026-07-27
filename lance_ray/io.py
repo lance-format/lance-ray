@@ -4,7 +4,6 @@ I/O operations for Lance-Ray integration.
 
 import logging
 import pickle
-import uuid as uuid_module
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -61,8 +60,7 @@ _UpdateColumnsTransform = Callable[[pa.Table], pa.Table]
 _METADATA_COLUMNS = frozenset({"_rowaddr", "_fragid", "_rowid"})
 
 # Lance's built-in commit performs a conflict-checked rebase on every attempt.
-# Bounded here only to limit tail latency (0 would still rebase once, it just
-# would not retry).
+# Bound retries only to limit tail latency.
 _UPDATE_COMMIT_MAX_RETRIES = 5
 
 
@@ -70,38 +68,13 @@ _UPDATE_COMMIT_MAX_RETRIES = 5
 class UpdateColumnsResult:
     """Outcome of a distributed :func:`update_columns` run.
 
-    The transaction UUID is intentionally absent: after a successful commit
-    ``version`` is the better handle, and ``dataset.read_transaction(version)``
-    recovers the full transaction (including its UUID). The UUID only matters
-    when it is unknown whether a version was produced at all, so it is carried
-    by :class:`CommitOutcomeUnknown` instead.
+    ``version`` identifies the committed snapshot.  When the filter matches no
+    rows, no transaction is created and ``version == read_version``.
     """
 
     read_version: int
     version: int
     rows_updated: int
-
-
-class CommitOutcomeUnknown(RuntimeError):
-    """Raised when a commit neither clearly succeeded nor clearly failed.
-
-    The transaction file is written *before* the manifest, so its presence does
-    not prove the commit landed. To confirm, enumerate versions after
-    ``read_version`` and match ``dataset.read_transaction(version).uuid``
-    against :attr:`transaction_uuid`. Do not re-run the backfill until the
-    outcome is established.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        transaction_uuid: str,
-        read_version: int,
-    ):
-        super().__init__(message)
-        self.transaction_uuid = transaction_uuid
-        self.read_version = read_version
 
 
 def read_lance(
@@ -1537,19 +1510,6 @@ def _handle_update_fragment(
     return _update_fragment
 
 
-def _is_commit_conflict(exc: BaseException) -> bool:
-    """Whether a commit failure is a definite conflict (nothing was written).
-
-    pylance maps every Lance error onto a builtin exception type, so the only
-    signal available is the message text produced by ``lance-core``'s
-    ``CommitConflict`` / ``RetryableCommitConflict`` / ``IncompatibleTransaction``
-    variants. Anything we cannot positively identify is treated as an unknown
-    outcome, which is the conservative direction.
-    """
-    message = str(exc).lower()
-    return "commit conflict" in message or "incompatible transaction" in message
-
-
 def update_columns(
     uri: Optional[str] = None,
     *,
@@ -1626,9 +1586,6 @@ def update_columns(
         is a successful no-op: no transaction is created and ``version`` equals
         ``read_version``.
 
-    Raises:
-        CommitOutcomeUnknown: The commit neither clearly succeeded nor clearly
-            failed (timeout, dropped connection). Confirm before re-running.
     """
     validate_uri_or_namespace(uri, namespace_impl, list(table_id) if table_id else None)
 
@@ -1752,105 +1709,26 @@ def update_columns(
     # Unmodified fragments are intentionally not resubmitted: Lance's Update
     # transaction merges by fragment id and carries the rest through untouched.
 
-    transaction_uuid = str(uuid_module.uuid4())
     logger.info(
-        "Committing update_columns: columns=%s read_version=%s fragments=%s "
-        "transaction_uuid=%s",
+        "Committing update_columns: columns=%s read_version=%s fragments=%s",
         list(columns),
         resolved_read_version,
         len(updated_fragments),
-        transaction_uuid,
     )
-
-    committed = _commit_update(
-        uri=uri,
-        op=op,
+    committed = LanceDataset.commit(
+        uri,
+        op,
         read_version=resolved_read_version,
-        transaction_uuid=transaction_uuid,
+        max_retries=_UPDATE_COMMIT_MAX_RETRIES,
         storage_options=dict(resolved_storage_options),
-        namespace_kwargs=namespace_kwargs,
+        **namespace_kwargs,
     )
 
     return UpdateColumnsResult(
         read_version=resolved_read_version,
-        version=committed,
+        version=committed.version,
         rows_updated=rows_updated,
     )
-
-
-_COMMIT_SLOW_WARNING_S = 300.0
-
-
-def _commit_update(
-    *,
-    uri: str,
-    op: "LanceOperation.Update",
-    read_version: int,
-    transaction_uuid: str,
-    storage_options: dict[str, Any],
-    namespace_kwargs: dict[str, Any],
-) -> int:
-    """Commit the RewriteColumns transaction exactly once.
-
-    Retries are delegated to Lance, whose commit loop re-runs
-    ``TransactionRebase.check_txn`` against every concurrent transaction and
-    only rebases when that check passes. lance-ray's own
-    ``_commit_with_retry`` must not be used here: it compares fragment id sets
-    and then advances ``read_version`` on its own, which would let an Update
-    built from stale fragment metadata overwrite a concurrent writer.
-    """
-    import threading
-
-    from lance.dataset import Transaction
-
-    txn = Transaction(
-        read_version=read_version,
-        operation=op,
-        uuid=transaction_uuid,
-    )
-
-    timer = threading.Timer(
-        _COMMIT_SLOW_WARNING_S,
-        logger.warning,
-        args=(
-            "update_columns commit still pending after %.0fs "
-            "(transaction_uuid=%s, read_version=%s). If it never returns, the "
-            "outcome is unknown and must be confirmed against version history "
-            "before re-running.",
-            _COMMIT_SLOW_WARNING_S,
-            transaction_uuid,
-            read_version,
-        ),
-    )
-    timer.daemon = True
-    timer.start()
-    try:
-        committed_ds = LanceDataset.commit(
-            uri,
-            txn,
-            max_retries=_UPDATE_COMMIT_MAX_RETRIES,
-            storage_options=storage_options,
-            **namespace_kwargs,
-        )
-    except Exception as exc:
-        if _is_commit_conflict(exc):
-            # Nothing was committed. The caller must recompute from a fresh
-            # snapshot; retrying with this stale metadata is never safe.
-            raise
-        raise CommitOutcomeUnknown(
-            "update_columns could not determine whether its commit succeeded. "
-            "The transaction file is written before the manifest, so its "
-            "presence proves nothing. Enumerate versions after "
-            f"{read_version} and match read_transaction(version).uuid against "
-            f"{transaction_uuid!r} before re-running this backfill.",
-            transaction_uuid=transaction_uuid,
-            read_version=read_version,
-        ) from exc
-    finally:
-        timer.cancel()
-
-    return committed_ds.version
-
 
 def _validate_write_args(
     uri: Optional[str],

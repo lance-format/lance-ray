@@ -17,7 +17,6 @@ from .datasink import LanceFragmentCommitter
 from .fragment import LanceFragmentWriter
 from .index import create_index, create_scalar_index, optimize_indices
 from .io import (
-    CommitOutcomeUnknown,
     UpdateColumnsResult,
     add_columns,
     add_columns_from,
@@ -42,7 +41,6 @@ __all__ = [
     "merge_columns_from",
     "update_columns",
     "UpdateColumnsResult",
-    "CommitOutcomeUnknown",
     "create_scalar_index",
     "create_index",
     "optimize_indices",

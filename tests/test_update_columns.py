@@ -9,7 +9,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 import ray
-from lance_ray.io import _is_commit_conflict
 
 
 @pytest.fixture
@@ -538,15 +537,12 @@ class TestTransactionBehavior:
             fields_for_preserving_frag_bitmap=[],
             update_mode="rewrite_columns",
         )
-        # Also pins the premise of ``_is_commit_conflict``: pylance maps this
-        # onto a builtin exception, so the only signal is the message text.
-        with pytest.raises(OSError, match="[Cc]ommit conflict") as excinfo:
+        with pytest.raises(OSError, match="[Cc]ommit conflict"):
             lance.LanceDataset.commit(
                 str(path),
                 Transaction(read_version=stale_version, operation=op),
                 max_retries=5,
             )
-        assert _is_commit_conflict(excinfo.value)
 
     def test_concurrent_append_is_safely_rebased(self, temp_dir):
         """An Append landing mid-flight must be rebased over, not rejected.
@@ -601,8 +597,7 @@ class TestTransactionBehavior:
         # Our column rewrite applied, and the concurrently appended row came
         # through untouched.
         assert got["price"] == [-1.0, -1.0, -1.0, -1.0, 9.0]
-        # The caller-fixed UUID survives Lance's rebase, which is what makes
-        # the CommitOutcomeUnknown recovery procedure usable.
+        # A caller-fixed UUID also survives Lance's conflict-checked rebase.
         assert committed.read_transaction(committed.version).uuid == txn_uuid
 
 
