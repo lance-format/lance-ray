@@ -106,9 +106,7 @@ class TestBasicBehavior:
 
         assert result.read_version == 1
         assert result.version == 2
-        assert result.columns == ("price",)
         assert result.rows_updated == 6
-        assert result.fragments_rewritten == 3
 
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
@@ -145,7 +143,6 @@ class TestBasicBehavior:
         )
 
         assert result.rows_updated == 2
-        assert result.fragments_rewritten == 1
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 30.0, 40.0, 50.0, 60.0]
 
@@ -177,7 +174,6 @@ class TestBasicBehavior:
             read_columns=["price", "label"],
         )
 
-        assert result.columns == ("price", "label")
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [10.0, 20.0, 30.0, 40.0]
         assert got["label"] == ["w!", "x!", "y!", "z!"]
@@ -213,7 +209,6 @@ class TestBasicBehavior:
         )
 
         assert result.rows_updated == 0
-        assert result.fragments_rewritten == 0
         assert result.version == result.read_version == before
         assert lance.dataset(str(path)).version == before
 
@@ -612,16 +607,10 @@ class TestTransactionBehavior:
 
 
 class TestResourceOptions:
-    """The Ray tuning parameters must actually reach Ray.
+    """The fragment-local Ray task must receive the tuning parameters."""
 
-    ``map_batches`` / ``map_groups`` both end in ``**ray_remote_args``, so
-    passing a nested ``ray_remote_args={...}`` is rejected by ray.remote as an
-    unknown option — and only at execution time, once the whole plan has been
-    submitted.
-    """
-
-    def test_transform_ray_remote_args_are_applied(self, temp_dir):
-        path = Path(temp_dir) / "transform_args.lance"
+    def test_ray_remote_args_are_applied(self, temp_dir):
+        path = Path(temp_dir) / "remote_args.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
 
         lr.update_columns(
@@ -629,14 +618,14 @@ class TestResourceOptions:
             transform=_double_price,
             output_schema=PRICE_SCHEMA,
             read_columns=["price"],
-            transform_ray_remote_args={"num_cpus": 1},
+            ray_remote_args={"num_cpus": 1},
         )
 
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 60.0, 80.0]
 
-    def test_fragment_ray_remote_args_and_concurrency_are_applied(self, temp_dir):
-        path = Path(temp_dir) / "fragment_args.lance"
+    def test_concurrency_and_batch_size_are_applied(self, temp_dir):
+        path = Path(temp_dir) / "concurrency.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
 
         result = lr.update_columns(
@@ -644,12 +633,11 @@ class TestResourceOptions:
             transform=_double_price,
             output_schema=PRICE_SCHEMA,
             read_columns=["price"],
-            transform_batch_size=2,
-            fragment_ray_remote_args={"num_cpus": 1},
-            fragment_concurrency=1,
+            batch_size=2,
+            ray_remote_args={"num_cpus": 1},
+            concurrency=1,
         )
 
-        assert result.fragments_rewritten == 2
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 60.0, 80.0]
 

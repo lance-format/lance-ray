@@ -19,7 +19,6 @@ from .index import create_index, create_scalar_index, optimize_indices
 from .io import (
     CommitOutcomeUnknown,
     UpdateColumnsResult,
-    UpdateColumnsTransform,
     add_columns,
     add_columns_from,
     merge_columns_from,
@@ -43,7 +42,6 @@ __all__ = [
     "merge_columns_from",
     "update_columns",
     "UpdateColumnsResult",
-    "UpdateColumnsTransform",
     "CommitOutcomeUnknown",
     "create_scalar_index",
     "create_index",
