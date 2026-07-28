@@ -11,6 +11,11 @@ import pytest
 import ray
 from lance.udf import BatchUDF
 
+# Ray workers cannot import this module (it imports pytest), so any helper a
+# transform references must come from a module they *can* import.
+from _ray_test_support import double_price as _double_price
+from _ray_test_support import record_batch as _record_batch
+
 
 @pytest.fixture
 def temp_dir():
@@ -31,14 +36,6 @@ def _write_products(path, rows=6, max_rows_per_file=2):
     )
     lance.write_dataset(table, str(path), max_rows_per_file=max_rows_per_file)
     return table
-
-
-def _record_batch(data, schema=None) -> pa.RecordBatch:
-    return pa.RecordBatch.from_pydict(data, schema=schema)
-
-
-def _double_price(batch: pa.RecordBatch) -> pa.RecordBatch:
-    return _record_batch({"price": pc.multiply(batch["price"], 2.0)})
 
 
 def _dataset_fingerprint(path):
@@ -240,9 +237,16 @@ class TestTransformContract:
         _write_products(path, rows=4)
 
         def assert_no_metadata(batch: pa.RecordBatch) -> pa.RecordBatch:
-            assert isinstance(batch, pa.RecordBatch)
-            for hidden in ("_rowaddr", "_fragid", "_rowid"):
-                assert hidden not in batch.column_names
+            # Raise rather than assert: pytest rewrites `assert` into calls on
+            # `_pytest`, which a Ray worker cannot import, so a bare assert here
+            # fails to deserialize instead of running.
+            if not isinstance(batch, pa.RecordBatch):
+                raise TypeError(f"expected RecordBatch, got {type(batch).__name__}")
+            seen = [
+                c for c in ("_rowaddr", "_fragid", "_rowid") if c in batch.column_names
+            ]
+            if seen:
+                raise ValueError(f"transform saw metadata columns {seen}")
             return _record_batch({"price": pc.multiply(batch["price"], 3.0)})
 
         lr.update_columns(
@@ -952,8 +956,10 @@ class TestBlobInput:
 
         def record_projection(batch: pa.RecordBatch) -> pa.RecordBatch:
             # The transform runs in a Ray worker, so the observation has to
-            # travel back through the data itself.
-            assert "payload" not in batch.column_names
+            # travel back through the data itself.  Raise rather than assert:
+            # a bare assert would pull `_pytest` into the pickled closure.
+            if "payload" in batch.column_names:
+                raise ValueError("blob column was projected by default")
             width = len(batch.column_names)
             return _record_batch(
                 {"size": pa.array([width] * batch.num_rows, pa.int64())}

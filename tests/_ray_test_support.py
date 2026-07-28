@@ -158,3 +158,26 @@ def die_once_handler(marker: str) -> Callable[[list[int]], dict[str, Any]]:
         return {"status": "success", "fragment_ids": fragment_ids}
 
     return handler
+# ---------------------------------------------------------------------------
+# Transform helpers shared by tests that ship a callable to a Ray worker.
+#
+# These must live here rather than in a ``test_*.py`` module: cloudpickle
+# serializes a nested transform by value but its module-level references *by
+# reference*, so a transform calling a helper defined next to the tests forces
+# the worker to import that test module -- and with it ``pytest``, which is not
+# available in the worker environment.
+# ---------------------------------------------------------------------------
+
+
+def record_batch(data, schema=None):
+    """Build a ``pa.RecordBatch`` from a dict, importable from Ray workers."""
+    import pyarrow as pa
+
+    return pa.RecordBatch.from_pydict(data, schema=schema)
+
+
+def double_price(batch):
+    """Double the ``price`` column of a batch."""
+    import pyarrow.compute as pc
+
+    return record_batch({"price": pc.multiply(batch["price"], 2.0)})
