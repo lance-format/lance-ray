@@ -40,9 +40,7 @@ import pyarrow.compute as pc
 
 
 def increase_price(batch: pa.RecordBatch) -> pa.RecordBatch:
-    return pa.RecordBatch.from_pydict(
-        {"price": pc.multiply(batch["price"], 1.1)}
-    )
+    return pa.RecordBatch.from_pydict({"price": pc.multiply(batch["price"], 1.1)})
 
 
 result = update_columns(

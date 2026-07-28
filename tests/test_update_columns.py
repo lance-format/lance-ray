@@ -194,6 +194,7 @@ class TestBasicBehavior:
             read_columns=["price", "label"],
         )
 
+        assert result.rows_updated == 4
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [10.0, 20.0, 30.0, 40.0]
         assert got["label"] == ["w!", "x!", "y!", "z!"]
@@ -709,6 +710,7 @@ class TestResourceOptions:
             concurrency=1,
         )
 
+        assert result.rows_updated == 4
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 60.0, 80.0]
 
