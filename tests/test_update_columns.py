@@ -18,9 +18,6 @@ def temp_dir():
         yield temp_dir
 
 
-PRICE_SCHEMA = pa.schema([pa.field("price", pa.float64())])
-
-
 def _write_products(path, rows=6, max_rows_per_file=2):
     """A small multi-fragment dataset: ids 1..rows, alternating status."""
     table = pa.table(
@@ -81,7 +78,7 @@ class TestBasicBehavior:
 
         result = lr.update_columns(
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
             namespace_impl="dir",
             namespace_properties={"root": temp_dir},
@@ -103,7 +100,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -121,7 +118,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
             batch_size=2,
             concurrency=1,
@@ -144,7 +141,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             filter="status = 'a'",
             read_columns=["price"],
         )
@@ -162,7 +159,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             filter="id <= 2",
             read_columns=["price"],
         )
@@ -193,9 +190,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=bump_both,
-            output_schema=pa.schema(
-                [pa.field("price", pa.float64()), pa.field("label", pa.string())]
-            ),
+            columns=["price", "label"],
             read_columns=["price", "label"],
         )
 
@@ -213,7 +208,7 @@ class TestBasicBehavior:
         lr.update_columns(
             str(path),
             transform=price_from_id,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["id"],
         )
 
@@ -228,7 +223,7 @@ class TestBasicBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             filter="id > 1000",
             read_columns=["price"],
         )
@@ -236,6 +231,7 @@ class TestBasicBehavior:
         assert result.rows_updated == 0
         assert result.version == before
         assert lance.dataset(str(path)).version == before
+
 
 class TestTransformContract:
     def test_transform_does_not_see_metadata_columns(self, temp_dir):
@@ -251,7 +247,7 @@ class TestTransformContract:
         lr.update_columns(
             str(path),
             transform=assert_no_metadata,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -263,15 +259,13 @@ class TestTransformContract:
         _write_products(path, rows=2, max_rows_per_file=2)
 
         udf = BatchUDF(
-            lambda batch: _record_batch(
-                {"price": pc.multiply(batch["price"], 4.0)}
-            ),
-            output_schema=PRICE_SCHEMA,
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 4.0)}),
+            output_schema=pa.schema([pa.field("price", pa.float64())]),
         )
         lr.update_columns(
             str(path),
             transform=udf,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -312,9 +306,120 @@ class TestTransformContract:
             lr.update_columns(
                 str(path),
                 transform=bad_transform,
-                output_schema=PRICE_SCHEMA,
+                columns=["price"],
                 read_columns=["price"],
             )
+
+    def test_transform_output_is_cast_to_the_dataset_type(self, temp_dir):
+        """The output type is the dataset's, not whatever the transform built."""
+        path = Path(temp_dir) / "cast_output.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+
+        def int_prices(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch({"price": pa.array([1, 2], pa.int32())})
+
+        lr.update_columns(
+            str(path),
+            transform=int_prices,
+            columns=["price"],
+            read_columns=["price"],
+        )
+
+        table = lance.dataset(str(path)).to_table()
+        assert table.schema.field("price").type == pa.float64()
+        assert table.to_pydict()["price"] == [1.0, 2.0]
+
+    def test_rejects_out_of_range_transform_output(self, temp_dir):
+        """The cast is safe=True, so an out-of-range integer raises.
+
+        Note this does *not* generalize to floats: Arrow's safe cast does not
+        range-check float narrowing, so a float64 result for a float32 column
+        rounds (and overflows to inf) silently.  See the ``columns`` docstring.
+        """
+        path = Path(temp_dir) / "lossy_output.lance"
+        table = pa.table(
+            {
+                "id": pa.array([1, 2], pa.int32()),
+                "small": pa.array([1, 2], pa.int8()),
+            }
+        )
+        lance.write_dataset(table, str(path))
+        before = _dataset_fingerprint(path)
+
+        def too_big(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch({"small": pa.array([1000, 2000], pa.int32())})
+
+        with pytest.raises(RuntimeError, match="Integer value 1000"):
+            lr.update_columns(
+                str(path),
+                transform=too_big,
+                columns=["small"],
+                read_columns=["small"],
+            )
+
+        assert _dataset_fingerprint(path) == before
+
+    def test_rejects_nulls_for_a_non_nullable_column(self, temp_dir):
+        """A non-nullable target rejects null output rather than writing it."""
+        path = Path(temp_dir) / "non_nullable.lance"
+        schema = pa.schema(
+            [
+                pa.field("id", pa.int32()),
+                pa.field("price", pa.float64(), nullable=False),
+            ]
+        )
+        table = pa.table(
+            {
+                "id": pa.array([1, 2], pa.int32()),
+                "price": pa.array([1.0, 2.0], pa.float64()),
+            },
+            schema=schema,
+        )
+        lance.write_dataset(table, str(path))
+        before = _dataset_fingerprint(path)
+
+        def nullify(batch: pa.RecordBatch) -> pa.RecordBatch:
+            return _record_batch({"price": pa.array([1.0, None], pa.float64())})
+
+        with pytest.raises(RuntimeError, match="non-nullable"):
+            lr.update_columns(
+                str(path),
+                transform=nullify,
+                columns=["price"],
+                read_columns=["price"],
+            )
+
+        assert _dataset_fingerprint(path) == before
+
+    def test_updates_a_non_nullable_column(self, temp_dir):
+        """Non-null output for a non-nullable target round-trips normally."""
+        path = Path(temp_dir) / "non_nullable_ok.lance"
+        schema = pa.schema(
+            [
+                pa.field("id", pa.int32()),
+                pa.field("price", pa.float64(), nullable=False),
+            ]
+        )
+        table = pa.table(
+            {
+                "id": pa.array([1, 2], pa.int32()),
+                "price": pa.array([1.0, 2.0], pa.float64()),
+            },
+            schema=schema,
+        )
+        lance.write_dataset(table, str(path))
+
+        lr.update_columns(
+            str(path),
+            transform=_double_price,
+            columns=["price"],
+            read_columns=["price"],
+        )
+
+        got = lance.dataset(str(path)).to_table()
+        assert got.schema.field("price").nullable is False
+        assert got.to_pydict()["price"] == [2.0, 4.0]
+
 
 class TestPhysicalCorrectness:
     def test_preserves_row_address_schema_and_field_ids(self, temp_dir):
@@ -334,7 +439,7 @@ class TestPhysicalCorrectness:
         lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -372,7 +477,7 @@ class TestPhysicalCorrectness:
         lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -391,7 +496,7 @@ class TestPhysicalCorrectness:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -408,7 +513,7 @@ class TestPhysicalCorrectness:
             lr.update_columns(
                 str(path),
                 transform=_double_price,
-                output_schema=PRICE_SCHEMA,
+                columns=["price"],
                 read_columns=["price"],
             )
 
@@ -425,13 +530,36 @@ class TestPhysicalCorrectness:
         lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["id"] == [1, 3, 4, 5, 6]
         assert got["price"] == [20.0, 60.0, 80.0, 100.0, 120.0]
+
+    def test_filter_with_delete_vector_updates_only_matching_live_rows(self, temp_dir):
+        """A filtered rewrite must preserve deleted and untouched fragment rows."""
+        path = Path(temp_dir) / "deleted_filtered.lance"
+        _write_products(path, rows=6, max_rows_per_file=3)
+
+        # The first fragment contains ids 1..3. Delete one row from it, then
+        # update only one of its remaining live rows; the second fragment must
+        # not be rewritten at all.
+        lance.dataset(str(path)).delete("id = 2")
+
+        result = lr.update_columns(
+            str(path),
+            transform=_double_price,
+            columns=["price"],
+            filter="id = 1",
+            read_columns=["price"],
+        )
+
+        assert result.rows_updated == 1
+        got = lance.dataset(str(path)).to_table().to_pydict()
+        assert got["id"] == [1, 3, 4, 5, 6]
+        assert got["price"] == [20.0, 30.0, 40.0, 50.0, 60.0]
 
 
 class TestTransactionBehavior:
@@ -446,7 +574,7 @@ class TestTransactionBehavior:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
         )
 
@@ -559,7 +687,7 @@ class TestResourceOptions:
         lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
             ray_remote_args={"num_cpus": 1},
         )
@@ -574,7 +702,7 @@ class TestResourceOptions:
         result = lr.update_columns(
             str(path),
             transform=_double_price,
-            output_schema=PRICE_SCHEMA,
+            columns=["price"],
             read_columns=["price"],
             batch_size=2,
             ray_remote_args={"num_cpus": 1},
@@ -616,7 +744,7 @@ class TestNestedFieldIds:
         result = lr.update_columns(
             str(path),
             transform=append_marker,
-            output_schema=pa.schema([pa.field("tags", list_type)]),
+            columns=["tags"],
             read_columns=["tags"],
         )
 
@@ -646,7 +774,7 @@ class TestNestedFieldIds:
             transform=lambda b: _record_batch(
                 {"tags": pa.array([[7]] * b.num_rows, list_type)}
             ),
-            output_schema=pa.schema([pa.field("tags", list_type)]),
+            columns=["tags"],
             read_columns=["tags"],
         )
 
@@ -673,7 +801,7 @@ class TestNestedFieldIds:
                     )
                 }
             ),
-            output_schema=pa.schema([pa.field("vec", vec_type)]),
+            columns=["vec"],
             read_columns=["vec"],
         )
 
@@ -690,45 +818,21 @@ class TestDriverSideRejection:
     """
 
     @pytest.mark.parametrize(
-        "output_schema, read_columns, exc, match",
+        "columns, read_columns, exc, match",
         [
-            (
-                pa.schema([pa.field("brand_new", pa.float64())]),
-                None,
-                ValueError,
-                "non-existent column",
-            ),
-            (
-                pa.schema([pa.field("price", pa.int64())]),
-                None,
-                ValueError,
-                "Type mismatch",
-            ),
-            (
-                pa.schema([pa.field("price", pa.float64(), nullable=False)]),
-                None,
-                ValueError,
-                "Nullability mismatch",
-            ),
-            (
-                pa.schema([pa.field("_rowaddr", pa.uint64())]),
-                None,
-                ValueError,
-                "metadata column",
-            ),
-            (
-                pa.schema([pa.field("meta.price", pa.float64())]),
-                None,
-                ValueError,
-                "Nested field path",
-            ),
-            (pa.schema([]), None, ValueError, "at least one column"),
-            (PRICE_SCHEMA, ["price", "_rowaddr"], ValueError, "read_columns"),
-            (PRICE_SCHEMA, ["nope"], ValueError, "do not exist"),
+            (["brand_new"], None, ValueError, "non-existent column"),
+            (["_rowaddr"], None, ValueError, "metadata column"),
+            (["meta.price"], None, ValueError, "Nested field path"),
+            (["price", "price"], None, ValueError, "Duplicate column"),
+            ([pa.field("price", pa.float64())], None, TypeError, "as str"),
+            ("price", None, TypeError, "not a bare string"),
+            ([], None, ValueError, "at least one column"),
+            (["price"], ["price", "_rowaddr"], ValueError, "read_columns"),
+            (["price"], ["nope"], ValueError, "do not exist"),
         ],
     )
     def test_rejects_without_touching_the_dataset(
-        self, temp_dir, output_schema, read_columns, exc, match
+        self, temp_dir, columns, read_columns, exc, match
     ):
         path = Path(temp_dir) / "untouched.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
@@ -738,7 +842,7 @@ class TestDriverSideRejection:
             lr.update_columns(
                 str(path),
                 transform=_double_price,
-                output_schema=output_schema,
+                columns=columns,
                 read_columns=read_columns,
             )
 
@@ -759,7 +863,7 @@ class TestDriverSideRejection:
             lr.update_columns(
                 str(path),
                 transform=_double_price,
-                output_schema=PRICE_SCHEMA,
+                columns=["price"],
             )
 
         assert _dataset_fingerprint(path) == before
@@ -781,14 +885,14 @@ class TestRejectedScenarios:
             lr.update_columns(
                 str(path),
                 transform=lambda b: b,
-                output_schema=pa.schema([pa.field("meta", struct_type)]),
+                columns=["meta"],
             )
 
     def test_requires_uri_or_namespace(self, temp_dir):
         with pytest.raises(ValueError, match="Must provide either 'uri'"):
             lr.update_columns(
                 transform=_double_price,
-                output_schema=PRICE_SCHEMA,
+                columns=["price"],
             )
 
 
@@ -833,7 +937,7 @@ class TestBlobInput:
         lr.update_columns(
             str(path),
             transform=payload_size,
-            output_schema=pa.schema([pa.field("size", pa.int64())]),
+            columns=["size"],
             read_columns=["payload"],
         )
 
@@ -856,7 +960,7 @@ class TestBlobInput:
         lr.update_columns(
             str(path),
             transform=record_projection,
-            output_schema=pa.schema([pa.field("size", pa.int64())]),
+            columns=["size"],
         )
 
         # read_columns=None expands to the non-blob columns only: id + size.
@@ -871,7 +975,7 @@ class TestBlobInput:
             lr.update_columns(
                 str(path),
                 transform=lambda b: b,
-                output_schema=pa.schema([pa.field("payload", pa.large_binary())]),
+                columns=["payload"],
                 read_columns=["payload"],
             )
 
@@ -902,8 +1006,6 @@ class TestBlobInput:
             data_storage_version="2.2",  # blob v2 requires file version >= 2.2
         )
 
-        size_schema = pa.schema([pa.field("size", pa.int64())])
-
         # Blob v2 is the case the default projection exists to protect: it must
         # not be pulled in unless asked for.
         lr.update_columns(
@@ -911,7 +1013,7 @@ class TestBlobInput:
             transform=lambda b: _record_batch(
                 {"size": pa.array([len(b.column_names)] * b.num_rows, pa.int64())}
             ),
-            output_schema=size_schema,
+            columns=["size"],
         )
         assert lance.dataset(str(path)).to_table().to_pydict()["size"] == [2, 2]
 
@@ -925,7 +1027,7 @@ class TestBlobInput:
         lr.update_columns(
             str(path),
             transform=payload_size,
-            output_schema=size_schema,
+            columns=["size"],
             read_columns=["payload"],
         )
         assert lance.dataset(str(path)).to_table().to_pydict()["size"] == [2, 4]
@@ -939,7 +1041,7 @@ class TestBlobInput:
             transform=lambda b: _record_batch(
                 {"size": pc.cast(pc.multiply(b["id"], 100), pa.int64())}
             ),
-            output_schema=pa.schema([pa.field("size", pa.int64())]),
+            columns=["size"],
             read_columns=["id"],
         )
 

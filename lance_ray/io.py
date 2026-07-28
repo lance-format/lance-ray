@@ -4,8 +4,9 @@ I/O operations for Lance-Ray integration.
 
 import logging
 import pickle
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import pyarrow as pa
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 #:
 #: This is deliberately not exported as a public type alias.  The transform
 #: receives a ``pa.RecordBatch`` holding only user columns and must return a
-#: record batch whose columns are exactly ``output_schema.names``, with the
+#: record batch whose columns are exactly the requested ``columns``, with the
 #: same number of rows **in the same order**.
 _UpdateColumnsTransform = BatchUDF | Callable[[pa.RecordBatch], pa.RecordBatch]
 
@@ -1253,20 +1254,30 @@ def _leaf_field_ids(lance_field: Any) -> list[int]:
 
 def _resolve_update_targets(
     lance_ds: LanceDataset,
-    output_schema: pa.Schema,
-) -> tuple[tuple[str, ...], tuple[int, ...]]:
-    """Validate ``output_schema`` against the target dataset.
+    columns: Sequence[str],
+) -> tuple[tuple[int, ...], pa.Schema]:
+    """Validate ``columns`` against the target dataset.
 
     Everything here runs on the driver, before any Ray task starts, so schema
     errors never surface after part of the fragments have been rewritten.
 
-    Returns the target column names (in ``output_schema`` order) and the *leaf*
-    Lance field ids they cover, which the driver later cross-checks against the
-    ``fields_modified`` reported by every worker.
+    Returns the *leaf* Lance field ids the columns cover -- which the driver
+    later cross-checks against the ``fields_modified`` reported by every worker
+    -- and the output schema the transform result is normalized to, holding the
+    requested columns in the requested order.  That schema is taken from the
+    target dataset rather than the caller: update_columns only overwrites
+    existing columns, so their Arrow type and nullability are already fixed.
     """
-    if len(output_schema) == 0:
+    if isinstance(columns, str):
+        # str satisfies Sequence[str], so this would otherwise iterate
+        # characters and update whatever single-letter columns happen to exist.
+        raise TypeError(
+            f"'columns' must be a sequence of column names, not a bare string. "
+            f"Did you mean ['{columns}']?"
+        )
+    if len(columns) == 0:
         raise ValueError(
-            "'output_schema' must declare at least one column to update. "
+            "'columns' must name at least one column to update. "
             "update_columns only overwrites existing columns; use "
             "add_columns_from() to add new ones."
         )
@@ -1276,20 +1287,24 @@ def _resolve_update_targets(
     target_names = set(target_schema.names)
     blob_columns = _blob_column_names(target_schema)
 
-    names: list[str] = []
+    fields: list[pa.Field] = []
     field_ids: list[int] = []
     seen: set[str] = set()
 
-    for field in output_schema:
-        name = field.name
+    for name in columns:
+        if not isinstance(name, str):
+            raise TypeError(
+                f"'columns' must contain column names as str, got "
+                f"{type(name).__name__}."
+            )
         if name in seen:
-            raise ValueError(f"Duplicate column '{name}' in 'output_schema'.")
+            raise ValueError(f"Duplicate column '{name}' in 'columns'.")
         seen.add(name)
 
         if name in _METADATA_COLUMNS:
             raise ValueError(
                 f"Cannot update metadata column '{name}'. Metadata columns are "
-                "managed by lance-ray and must not appear in 'output_schema'."
+                "managed by lance-ray and must not appear in 'columns'."
             )
         if "." in name:
             raise ValueError(
@@ -1314,28 +1329,16 @@ def _resolve_update_targets(
                 f"Column '{name}' has a nested (struct) type, which is not "
                 "supported by update_columns yet."
             )
-        if target_field.type != field.type:
-            raise ValueError(
-                f"Type mismatch for column '{name}': target dataset has "
-                f"{target_field.type}, 'output_schema' declares {field.type}."
-            )
-        if target_field.nullable != field.nullable:
-            raise ValueError(
-                f"Nullability mismatch for column '{name}': target dataset has "
-                f"nullable={target_field.nullable}, 'output_schema' declares "
-                f"nullable={field.nullable}. Arrow cast does not check "
-                "nullability, so this must match exactly."
-            )
 
         lance_field = lance_schema.field(name)
         if lance_field is None:
             raise ValueError(
                 f"Column '{name}' has no Lance field id; cannot update it."
             )
-        names.append(name)
+        fields.append(target_field)
         field_ids.extend(_leaf_field_ids(lance_field))
 
-    return tuple(names), tuple(field_ids)
+    return tuple(field_ids), pa.schema(fields)
 
 
 def _resolve_read_columns(
@@ -1374,11 +1377,10 @@ def _resolve_read_columns(
 def _apply_update_transform(
     transform: "_UpdateColumnsTransform",
     output_schema: pa.Schema,
-    columns: tuple[str, ...],
 ) -> Callable[[pa.RecordBatch], pa.RecordBatch]:
     """Build the per-batch transform used by a fragment-local worker."""
-    expected = set(columns)
-    column_list = list(columns)
+    column_list = list(output_schema.names)
+    expected = set(column_list)
     non_nullable = [f.name for f in output_schema if not f.nullable]
 
     def _wrapped(batch: pa.RecordBatch) -> pa.RecordBatch:
@@ -1391,8 +1393,7 @@ def _apply_update_transform(
 
         if not isinstance(result, pa.RecordBatch):
             raise TypeError(
-                "transform must return pa.RecordBatch, got "
-                f"{type(result).__name__}."
+                f"transform must return pa.RecordBatch, got {type(result).__name__}."
             )
         if result.num_rows != user_batch.num_rows:
             raise ValueError(
@@ -1406,12 +1407,12 @@ def _apply_update_transform(
             unexpected = sorted(actual - expected)
             missing = sorted(expected - actual)
             raise ValueError(
-                "transform output columns must match 'output_schema' exactly. "
+                "transform output columns must match 'columns' exactly. "
                 f"Unexpected: {unexpected}; missing: {missing}."
             )
 
-        # Column order and types come from output_schema, not from the user's
-        # return value; cast is safe=True so precision loss raises.
+        # Column order and types come from the target dataset, not from the
+        # user's return value; cast is safe=True so precision loss raises.
         out = pa.Table.from_batches([result]).select(column_list).cast(output_schema)
         normalized = out.to_batches()[0]
 
@@ -1430,7 +1431,6 @@ def _handle_update_fragment(
     uri: str,
     transform: "_UpdateColumnsTransform",
     output_schema: pa.Schema,
-    columns: tuple[str, ...],
     projection: list[str],
     filter: Optional[str],
     batch_size: int,
@@ -1447,7 +1447,7 @@ def _handle_update_fragment(
     scan, transform and rewrite in one Ray task avoids the Ray Data shuffle and
     regrouping required by ``merge_columns_from`` for externally-created data.
     """
-    apply_transform = _apply_update_transform(transform, output_schema, columns)
+    apply_transform = _apply_update_transform(transform, output_schema)
 
     def _update_fragment(fragment_id: int) -> Optional[tuple[int, bytes, bytes, int]]:
         namespace_kwargs = get_namespace_kwargs(
@@ -1481,25 +1481,34 @@ def _handle_update_fragment(
             with_metadata=True,
             as_record_batches=True,
         )
-        try:
-            first_updated = apply_transform(next(scanned_batches))
-        except StopIteration:
+        first_scanned = next(scanned_batches, None)
+        if first_scanned is None:
             # The exact filter is evaluated here.  A non-matching fragment
-            # produces neither files nor transaction metadata.
+            # produces neither files nor transaction metadata.  Lance rejects an
+            # empty reader outright ("HashJoiner: No data"), so this batch has to
+            # be pulled before the rewrite starts; it is then fed straight back
+            # into the stream below, so nothing is scanned twice.
             return None
 
-        rows_updated = first_updated.num_rows
+        # apply_transform emits output_schema plus the _rowaddr it carries
+        # through, so the reader schema is known without transforming a batch.
+        reader_schema = pa.schema(
+            [
+                *output_schema,
+                pa.field("_rowaddr", first_scanned.schema.field("_rowaddr").type),
+            ]
+        )
+        rows_updated = 0
 
         def updated_batches() -> Iterator[pa.RecordBatch]:
             nonlocal rows_updated
-            yield first_updated
-            for scanned_batch in scanned_batches:
+            for scanned_batch in chain([first_scanned], scanned_batches):
                 updated = apply_transform(scanned_batch)
                 rows_updated += updated.num_rows
                 yield updated
 
         update_reader = pa.RecordBatchReader.from_batches(
-            first_updated.schema, updated_batches()
+            reader_schema, updated_batches()
         )
         fragment_meta, fields_modified = fragment.update_columns(
             update_reader,
@@ -1520,7 +1529,7 @@ def update_columns(
     uri: Optional[str] = None,
     *,
     transform: "_UpdateColumnsTransform",
-    output_schema: pa.Schema,
+    columns: Sequence[str],
     filter: Optional[str] = None,
     read_columns: Optional[Sequence[str]] = None,
     batch_size: int = 1024,
@@ -1552,7 +1561,7 @@ def update_columns(
         >>> lr.update_columns(  # doctest: +SKIP
         ...     "/tmp/products.lance",
         ...     transform=bump_price,
-        ...     output_schema=pa.schema([pa.field("price", pa.float64())]),
+        ...     columns=["price"],
         ...     filter="status = 'active'",
         ...     read_columns=["price"],
         ... )
@@ -1562,15 +1571,20 @@ def update_columns(
             ``namespace_impl`` and ``table_id`` to resolve it from a namespace.
         transform: A callable or :class:`lance.udf.BatchUDF` taking a
             ``pa.RecordBatch`` of the requested columns and returning a
-            ``pa.RecordBatch`` whose columns are exactly
-            ``output_schema.names``. It **must preserve row count and row
-            order**; reordering cannot be detected and silently writes values to
-            the wrong rows. Do not filter, sort, join, deduplicate, aggregate or
-            explode inside the transform.
-        output_schema: Schema of the transform output. Required, so that column
-            existence, Arrow type and nullability are checked before any Ray
-            task starts. Only names, types and nullability are compared; Lance
-            field ids and field metadata are resolved from the target dataset.
+            ``pa.RecordBatch`` whose columns are exactly ``columns``. It **must
+            preserve row count and row order**; reordering cannot be detected
+            and silently writes values to the wrong rows. Do not filter, sort,
+            join, deduplicate, aggregate or explode inside the transform.
+        columns: Names of the existing columns to overwrite. Required, and
+            checked against the target dataset before any Ray task starts. The
+            output Arrow type and nullability of each column are taken from the
+            dataset -- update_columns cannot change them -- and the transform
+            result is cast to them with ``safe=True``. That rejects out-of-range
+            integers, truncating time-unit conversions and unparseable strings,
+            but it does **not** catch float narrowing: returning a ``float64``
+            for a ``float32`` column rounds, and overflows to ``inf``, silently.
+            Produce the column's own type in the transform when precision
+            matters.
         filter: A Lance filter expression. Only matching rows get new values;
             unmatched rows keep their old values. Note that the physical rewrite
             is still fragment-wide, so a very sparse filter is a poor fit.
@@ -1636,7 +1650,7 @@ def update_columns(
             "(lance-format/lance#6734)."
         )
 
-    columns, field_ids = _resolve_update_targets(lance_ds, output_schema)
+    field_ids, output_schema = _resolve_update_targets(lance_ds, columns)
     projection = _resolve_read_columns(lance_ds, read_columns)
 
     fragment_ids = [f.metadata.id for f in lance_ds.get_fragments()]
@@ -1644,7 +1658,6 @@ def update_columns(
         uri,
         transform,
         output_schema,
-        columns,
         projection,
         filter,
         batch_size,
@@ -1687,7 +1700,7 @@ def update_columns(
             raise ValueError(
                 f"Fragment rewrite changed the fragment id: expected {frag_id}, "
                 f"got {fragment_meta.id}"
-        )
+            )
         updated_fragments.append(fragment_meta)
         rows_updated += updated_rows
 
@@ -1737,6 +1750,7 @@ def update_columns(
         version=committed.version,
         rows_updated=rows_updated,
     )
+
 
 def _validate_write_args(
     uri: Optional[str],

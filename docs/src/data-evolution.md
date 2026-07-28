@@ -48,7 +48,7 @@ def increase_price(batch: pa.RecordBatch) -> pa.RecordBatch:
 result = update_columns(
     "products.lance",
     transform=increase_price,
-    output_schema=pa.schema([pa.field("price", pa.float64())]),
+    columns=["price"],
     filter="status = 'active'",
     read_columns=["price"],
 )
@@ -61,7 +61,7 @@ The task scans the fragment, applies `filter` and `transform`, then rewrites
 only the requested columns. Untouched columns retain their original data files.
 
 `transform` accepts and returns a `pyarrow.RecordBatch`. A `lance.udf.BatchUDF`
-is also accepted. Its result must contain exactly the fields in `output_schema`.
+is also accepted. Its result must contain exactly the fields named in `columns`.
 The transform must preserve both row count and row order: do not filter, sort,
 join, deduplicate, aggregate, or explode rows inside it.
 
@@ -71,8 +71,13 @@ join, deduplicate, aggregate, or explode rows inside it.
   with `namespace_impl` and `table_id`.
 - `transform`: A `RecordBatch` transform or `BatchUDF` that produces replacement
   values.
-- `output_schema`: Required schema for the replacement columns. Every field
-  must already exist in the dataset, and its type and nullability must match.
+- `columns`: Required names of the columns to overwrite. Each must already exist
+  in the dataset. Their Arrow type and nullability are taken from the dataset —
+  `update_columns` cannot change them — and the transform result is cast to them
+  with `safe=True`. That rejects out-of-range integers, truncating time-unit
+  conversions, and unparseable strings, but it does **not** catch float
+  narrowing: returning a `float64` for a `float32` column rounds, and overflows
+  to `inf`, silently. Produce the column's own type when precision matters.
 - `filter`: Optional Lance filter expression. Only matching rows receive new
   values; the containing fragment is nevertheless rewritten.
 - `read_columns`: Columns supplied to `transform`. When omitted, all top-level
