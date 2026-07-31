@@ -1920,6 +1920,25 @@ def test_build_distributed_vector_index(tmp_path, index_type):
     assert "ANNSubIndex" in plan
     assert index_name in plan
 
+    queries = np.asarray([q, q], dtype=np.float32)
+    batch = lr.vector_search(
+        updated_dataset,
+        nearest={"column": "vector", "q": queries, "k": 5},
+        index_name=index_name,
+        columns=["id"],
+        num_workers=2,
+        fast_search=True,
+    )
+
+    assert batch.column("query_index").to_pylist() == [0] * 5 + [1] * 5
+    assert (
+        batch.slice(0, 5).column("id").to_pylist()
+        == batch.slice(5).column("id").to_pylist()
+    )
+    assert batch.slice(0, 5).column("_distance").to_pylist() == pytest.approx(
+        batch.slice(5).column("_distance").to_pylist()
+    )
+
     if index_type == "IVF_PQ":
         stats = updated_dataset.stats.index_stats(index_name)
         assert stats["indices"]

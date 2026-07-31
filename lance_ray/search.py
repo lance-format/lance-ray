@@ -124,6 +124,24 @@ def _canonical_index_field_names(field_names: Any) -> set[str]:
     return canonical_names
 
 
+def _apply_index_metric_default(
+    nearest: dict[str, Any],
+    vector_index: Any | None,
+) -> dict[str, Any]:
+    if (
+        vector_index is None
+        or nearest.get("metric") is not None
+        or nearest.get("distance_type") is not None
+    ):
+        return nearest
+
+    details = _index_value(vector_index, "details", {}) or {}
+    metric = _index_value(details, "metric_type")
+    if metric is None:
+        return nearest
+    return {**nearest, "metric": str(metric).lower()}
+
+
 def _plan_vector_search(
     *,
     fragments: list[Any],
@@ -253,6 +271,7 @@ def _execute_vector_search_plan(
     nearest: dict[str, Any],
     candidate_k: int,
     analyze_plan: bool,
+    is_batch_query: bool = False,
 ) -> pa.Table | _SearchPlanAnalysis:
     dataset = _load_worker_dataset(pickled_dataset)
 
@@ -264,6 +283,7 @@ def _execute_vector_search_plan(
             nearest=nearest,
             candidate_k=candidate_k,
             analyze_plan=analyze_plan,
+            is_batch_query=is_batch_query,
         )
 
     if not _scanner_accepts_index_segments(dataset):
@@ -304,6 +324,49 @@ def _scanner_accepts_index_segments(dataset: LanceDataset) -> bool:
     )
 
 
+def _inspect_vector_search_query(
+    dataset: LanceDataset,
+    *,
+    nearest: dict[str, Any],
+    base_scanner_options: dict[str, Any],
+    include_row_id: bool,
+) -> tuple[bool, pa.Schema]:
+    probe = dataset.scanner(columns=["_distance"], nearest=nearest)
+    probe_schema = probe.projected_schema
+    is_batch_query = (
+        probe_schema.names
+        and probe_schema.names[0] == "query_index"
+        and pa.types.is_int32(probe_schema.field(0).type)
+        and not probe_schema.field(0).nullable
+    )
+
+    schema_options = dict(base_scanner_options)
+    schema_options["nearest"] = nearest
+    schema_options["with_row_id"] = True
+    result_schema = dataset.scanner(**schema_options).projected_schema
+    if not include_row_id:
+        row_id_indices = result_schema.get_all_field_indices("_rowid")
+        if row_id_indices:
+            result_schema = result_schema.remove(row_id_indices[-1])
+
+    return is_batch_query, result_schema
+
+
+def _projection_includes_row_id(
+    columns: Optional[list[str] | dict[str, str]],
+    scanner_options: dict[str, Any],
+) -> bool:
+    if scanner_options.get("with_row_id"):
+        return True
+    if columns is None:
+        columns = scanner_options.get("columns")
+    if isinstance(columns, list):
+        return "_rowid" in columns
+    if isinstance(columns, dict):
+        return "_rowid" in columns
+    return False
+
+
 def _execute_flat_fallback_vector_search_plan(
     dataset: LanceDataset,
     *,
@@ -312,13 +375,15 @@ def _execute_flat_fallback_vector_search_plan(
     nearest: dict[str, Any],
     candidate_k: int,
     analyze_plan: bool,
+    is_batch_query: bool,
 ) -> pa.Table | _SearchPlanAnalysis:
     vector_column = nearest["column"]
-    vector_scan_column, drop_vector_column = _prepare_fallback_scan_columns(
-        base_scanner_options,
-        vector_column,
-    )
     scanner_options = dict(base_scanner_options)
+    vector_scan_column, drop_vector_column = _prepare_fallback_scan_columns(
+        scanner_options,
+        vector_column,
+        is_batch_query=is_batch_query,
+    )
     scanner_options.pop("fast_search", None)
     scanner_options["fragments"] = [
         dataset.get_fragment(fragment_id) for fragment_id in plan.fragment_ids
@@ -336,32 +401,76 @@ def _execute_flat_fallback_vector_search_plan(
     table = scanner.to_table()
     if table.num_rows == 0:
         table = table.append_column("_distance", pa.array([], type=pa.float32()))
+        if is_batch_query:
+            table = _add_query_index(table, [])
         if drop_vector_column and vector_scan_column in table.column_names:
             table = table.drop_columns([vector_scan_column])
         return table
 
-    distances = _compute_vector_distances(
-        table[vector_scan_column],
-        nearest["q"],
-        _get_nearest_metric(nearest),
+    valid_vectors = pc.invert(pc.is_null(table[vector_scan_column]))
+    table = table.filter(valid_vectors)
+    if table.num_rows == 0:
+        table = table.append_column("_distance", pa.array([], type=pa.float32()))
+        if is_batch_query:
+            table = _add_query_index(table, [])
+        if drop_vector_column and vector_scan_column in table.column_names:
+            table = table.drop_columns([vector_scan_column])
+        return table
+
+    metric = _get_nearest_metric(nearest)
+    vector_matrix = _vector_column_to_numpy(table[vector_scan_column], metric)
+    query_vectors = _query_vectors_to_numpy(nearest["q"], is_batch_query, metric)
+    import numpy as np
+
+    query_results = []
+    for query_index, query_vector in enumerate(query_vectors):
+        distances = _compute_vector_distances(
+            vector_matrix,
+            query_vector,
+            metric,
+        )
+        finite_distances = np.isfinite(distances)
+        query_result = table.filter(pa.array(finite_distances, type=pa.bool_()))
+        distances = distances[finite_distances]
+        query_result = query_result.append_column(
+            "_distance", pa.array(distances, type=pa.float32())
+        )
+        query_result = _apply_distance_range(query_result, nearest)
+        query_result = _take_top_k(query_result, candidate_k)
+        if drop_vector_column and vector_scan_column in query_result.column_names:
+            query_result = query_result.drop_columns([vector_scan_column])
+        if is_batch_query:
+            query_result = _add_query_index(
+                query_result,
+                [query_index] * query_result.num_rows,
+            )
+        query_results.append(query_result)
+
+    table = (
+        pa.concat_tables(query_results, promote_options="default")
+        if is_batch_query
+        else query_results[0]
     )
-    table = table.append_column("_distance", pa.array(distances, type=pa.float32()))
-    table = _take_top_k(table, candidate_k)
-    if drop_vector_column and vector_scan_column in table.column_names:
-        table = table.drop_columns([vector_scan_column])
     return table
 
 
 def _prepare_fallback_scan_columns(
     scanner_options: dict[str, Any],
     vector_column: str,
+    *,
+    is_batch_query: bool,
 ) -> tuple[str, bool]:
     requested_columns = scanner_options.get("columns")
     if requested_columns is None:
         return vector_column, False
 
     if isinstance(requested_columns, list):
-        scan_columns = [column for column in requested_columns if column != "_distance"]
+        virtual_columns = {"_distance"}
+        if is_batch_query:
+            virtual_columns.add("query_index")
+        scan_columns = [
+            column for column in requested_columns if column not in virtual_columns
+        ]
         if vector_column in scan_columns:
             scanner_options["columns"] = scan_columns
             return vector_column, False
@@ -391,15 +500,37 @@ def _get_nearest_metric(nearest: dict[str, Any]) -> str:
     return str(metric).lower()
 
 
+def _query_ndim(query: Any) -> int:
+    import numpy as np
+
+    return np.asarray(query).ndim
+
+
+def _query_vectors_to_numpy(
+    query: Any,
+    is_batch_query: bool,
+    metric: str,
+) -> Any:
+    import numpy as np
+
+    dtype = np.uint8 if metric == "hamming" else np.float32
+    query_array = np.asarray(query, dtype=dtype)
+    expected_ndim = 2 if is_batch_query else 1
+    if query_array.ndim != expected_ndim:
+        kind = "two-dimensional batch" if is_batch_query else "one-dimensional"
+        raise ValueError(f"nearest['q'] must be a {kind} vector")
+    return query_array if is_batch_query else query_array.reshape(1, -1)
+
+
 def _compute_vector_distances(
-    vector_column: pa.ChunkedArray,
+    matrix: Any,
     query: Any,
     metric: str,
 ) -> Any:
     import numpy as np
 
-    matrix = _vector_column_to_numpy(vector_column)
-    query_vector = np.asarray(query, dtype=np.float32)
+    dtype = np.uint8 if metric == "hamming" else np.float32
+    query_vector = np.asarray(query, dtype=dtype)
     if query_vector.ndim != 1:
         raise ValueError("nearest['q'] must be a one-dimensional vector")
     if matrix.shape[1] != query_vector.shape[0]:
@@ -409,22 +540,25 @@ def _compute_vector_distances(
         )
 
     if metric in ("l2", "euclidean"):
-        return np.linalg.norm(matrix - query_vector, axis=1).astype(np.float32)
+        difference = matrix - query_vector
+        return np.sum(difference * difference, axis=1).astype(np.float32)
     if metric == "cosine":
         query_norm = np.linalg.norm(query_vector)
         row_norms = np.linalg.norm(matrix, axis=1)
         denom = row_norms * query_norm
+        similarities = np.full(matrix.shape[0], np.nan, dtype=np.float32)
         similarities = np.divide(
             matrix @ query_vector,
             denom,
-            out=np.zeros(matrix.shape[0], dtype=np.float32),
+            out=similarities,
             where=denom != 0,
         )
         return (1.0 - similarities).astype(np.float32)
     if metric in ("dot", "ip", "inner_product"):
-        return (-(matrix @ query_vector)).astype(np.float32)
+        return (1.0 - matrix @ query_vector).astype(np.float32)
     if metric == "hamming":
-        return np.count_nonzero(matrix != query_vector, axis=1).astype(np.float32)
+        xor = np.bitwise_xor(matrix, query_vector)
+        return np.bitwise_count(xor).sum(axis=1).astype(np.float32)
 
     raise ValueError(
         "Unsupported fallback vector search metric "
@@ -432,26 +566,82 @@ def _compute_vector_distances(
     )
 
 
-def _vector_column_to_numpy(vector_column: pa.ChunkedArray) -> Any:
+def _vector_column_to_numpy(vector_column: pa.ChunkedArray, metric: str) -> Any:
     import numpy as np
 
     values = vector_column.combine_chunks().to_pylist()
     if not values:
-        return np.empty((0, 0), dtype=np.float32)
-    if any(value is None for value in values):
-        raise ValueError("Fallback vector search does not support null vectors")
-    matrix = np.asarray(values, dtype=np.float32)
+        dtype = np.uint8 if metric == "hamming" else np.float32
+        return np.empty((0, 0), dtype=dtype)
+    dtype = np.uint8 if metric == "hamming" else np.float32
+    matrix = np.asarray(values, dtype=dtype)
     if matrix.ndim != 2:
         raise ValueError("Fallback vector search requires a list-like vector column")
     return matrix
 
 
 def _take_top_k(table: pa.Table, k: int) -> pa.Table:
-    sort_indices = pc.sort_indices(table, sort_keys=[("_distance", "ascending")])
+    sort_keys = [("_distance", "ascending")]
+    if "_rowid" in table.column_names:
+        sort_keys.append(("_rowid", "ascending"))
+    sort_indices = pc.sort_indices(table, sort_keys=sort_keys)
     return table.take(sort_indices.slice(0, k))
 
 
-def _merge_vector_search_results(tables: list[pa.Table], k: int) -> pa.Table:
+def _apply_distance_range(table: pa.Table, nearest: dict[str, Any]) -> pa.Table:
+    distance_range = nearest.get("distance_range")
+    if distance_range is None:
+        return table
+
+    lower_bound, upper_bound = distance_range
+    if lower_bound is not None:
+        table = table.filter(pc.greater_equal(table["_distance"], lower_bound))
+    if upper_bound is not None:
+        table = table.filter(pc.less(table["_distance"], upper_bound))
+    return table
+
+
+def _add_query_index(
+    table: pa.Table,
+    query_indices: list[int],
+) -> pa.Table:
+    return table.add_column(
+        0,
+        pa.field("query_index", pa.int32(), nullable=False),
+        pa.array(query_indices, type=pa.int32()),
+    )
+
+
+def _take_top_k_per_query(table: pa.Table, k: int) -> pa.Table:
+    import numpy as np
+
+    sort_keys = [("query_index", "ascending"), ("_distance", "ascending")]
+    if "_rowid" in table.column_names:
+        sort_keys.append(("_rowid", "ascending"))
+    sort_indices = pc.sort_indices(table, sort_keys=sort_keys)
+    table = table.take(sort_indices)
+    if table.num_rows == 0:
+        return table
+
+    query_indices = table["query_index"].combine_chunks().to_numpy()
+    row_indices = np.arange(table.num_rows)
+    group_starts = np.empty(table.num_rows, dtype=np.int64)
+    group_starts[0] = 0
+    group_starts[1:] = np.where(
+        query_indices[1:] != query_indices[:-1],
+        row_indices[1:],
+        0,
+    )
+    np.maximum.accumulate(group_starts, out=group_starts)
+    return table.filter(pa.array(row_indices - group_starts < k))
+
+
+def _merge_vector_search_results(
+    tables: list[pa.Table],
+    k: int,
+    *,
+    is_batch_query: bool = False,
+) -> pa.Table:
     non_empty_tables = [table for table in tables if table.num_rows > 0]
     if not non_empty_tables:
         return tables[0].slice(0, 0) if tables else pa.table({})
@@ -463,6 +653,13 @@ def _merge_vector_search_results(tables: list[pa.Table], k: int) -> pa.Table:
             "for global top-k merge"
         )
 
+    if is_batch_query:
+        if "query_index" not in table.column_names:
+            raise RuntimeError(
+                "Distributed batch vector search results must include a "
+                "'query_index' column for per-query top-k merge"
+            )
+        return _take_top_k_per_query(table, k)
     return _take_top_k(table, k)
 
 
@@ -544,8 +741,9 @@ def vector_search(
     segment coverage.  Indexed worker tasks search only their assigned
     ``index_segments``.  Unindexed fallback tasks scan their assigned fragments
     without ``nearest`` and compute distances locally.  Workers return local
-    candidates and the driver sorts by ``_distance`` to produce the final top-k
-    table.
+    candidates and the driver sorts by ``_distance`` and ``_rowid`` to produce
+    the final top-k table.  Batch queries are merged independently by
+    ``query_index``.
 
     Args:
         uri: Lance dataset object or dataset URI.  In URI mode, provide either
@@ -553,7 +751,9 @@ def vector_search(
         nearest: Lance vector search options.  Must include ``column``, ``q``,
             and ``k``.  The worker-side ``k`` is raised to at least
             ``k * oversample_factor`` before the driver performs the final
-            global top-k merge.
+            global top-k merge.  For fixed-size vector columns, ``q`` may be a
+            two-dimensional batch.  Batch results contain a non-null Int32
+            ``query_index`` column and up to ``k`` rows per query.
         index_name: Optional vector index name to use.  If specified and the
             index cannot be found, ``ValueError`` is raised.  If omitted,
             Lance-Ray uses the first vector index covering ``nearest["column"]``.
@@ -589,8 +789,10 @@ def vector_search(
             supplied here.
 
     Returns:
-        A PyArrow table containing the global top-k rows sorted by ``_distance``.
-        If ``analyze_plan=True``, returns a string containing per-shard Lance
+        A PyArrow table containing the global top-k rows sorted by
+        ``_distance`` and ``_rowid``.  Batch results are grouped by
+        ``query_index`` and contain a separate top-k for each query.  If
+        ``analyze_plan=True``, returns a string containing per-shard Lance
         scanner analysis instead.
     """
     if num_workers <= 0:
@@ -606,10 +808,14 @@ def vector_search(
 
     base_scanner_options = dict(scanner_options or {})
     _validate_search_scanner_options(base_scanner_options)
-    if columns is not None:
-        if isinstance(columns, list) and "_distance" not in columns:
-            columns = [*columns, "_distance"]
-        base_scanner_options["columns"] = columns
+    include_row_id = _projection_includes_row_id(columns, base_scanner_options)
+    effective_columns = (
+        columns if columns is not None else base_scanner_options.get("columns")
+    )
+    if effective_columns is not None:
+        if isinstance(effective_columns, list) and "_distance" not in effective_columns:
+            effective_columns = [*effective_columns, "_distance"]
+        base_scanner_options["columns"] = effective_columns
     if filter is not None:
         base_scanner_options["filter"] = filter
     base_scanner_options["fast_search"] = fast_search
@@ -651,7 +857,15 @@ def vector_search(
 
     fragments = dataset.get_fragments()
     if not fragments:
-        return pa.table({})
+        is_batch_query, result_schema = _inspect_vector_search_query(
+            dataset,
+            nearest=nearest,
+            base_scanner_options=base_scanner_options,
+            include_row_id=include_row_id,
+        )
+        if analyze_plan:
+            return pa.table({})
+        return pa.Table.from_batches([], schema=result_schema)
 
     vector_index = _select_vector_index(
         dataset,
@@ -663,6 +877,13 @@ def vector_search(
             "No vector index found for column '%s'; distributed search will use flat scan",
             column,
         )
+    nearest = _apply_index_metric_default(nearest, vector_index)
+    is_batch_query, result_schema = _inspect_vector_search_query(
+        dataset,
+        nearest=nearest,
+        base_scanner_options=base_scanner_options,
+        include_row_id=include_row_id,
+    )
 
     plans = _plan_vector_search(
         fragments=fragments,
@@ -670,10 +891,24 @@ def vector_search(
         num_workers=num_workers,
         include_unindexed=include_unindexed and not fast_search,
     )
+    if (
+        not is_batch_query
+        and any(not plan.index_segments for plan in plans)
+        and _query_ndim(nearest["q"]) == 2
+    ):
+        raise ValueError(
+            "Flat fallback vector search does not support multivector queries. "
+            "Build an index covering all fragments or use fast_search=True."
+        )
     if not plans:
-        return pa.table({})
+        if analyze_plan:
+            return pa.table({})
+        return pa.Table.from_batches([], schema=result_schema)
 
     pickled_dataset = pickle.dumps(dataset)
+    worker_scanner_options = dict(base_scanner_options)
+    if not analyze_plan:
+        worker_scanner_options["with_row_id"] = True
 
     try:
         with get_or_create_pool(
@@ -688,10 +923,11 @@ def vector_search(
                 return _execute_vector_search_plan(
                     plan,
                     pickled_dataset=worker_pickled_dataset,
-                    base_scanner_options=base_scanner_options,
+                    base_scanner_options=worker_scanner_options,
                     nearest=nearest,
                     candidate_k=candidate_k,
                     analyze_plan=analyze_plan,
+                    is_batch_query=is_batch_query,
                 )
 
             results = pool.map_async(run_plan, plans, chunksize=1).get()
@@ -703,4 +939,11 @@ def vector_search(
     if analyze_plan:
         return _format_analyze_plan_results(results)
 
-    return _merge_vector_search_results(results, global_k)
+    result = _merge_vector_search_results(
+        results,
+        global_k,
+        is_batch_query=is_batch_query,
+    )
+    if not include_row_id and "_rowid" in result.column_names:
+        result = result.drop_columns(["_rowid"])
+    return result.select(result_schema.names)

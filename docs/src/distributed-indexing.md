@@ -211,9 +211,9 @@ The function returns the Lance dataset instance (optimization is applied on stor
 
 ### Distributed Vector Search
 
-`vector_search()` - Run vector search with Ray workers and merge the global top-k on the driver.
+`vector_search()` - Run single or batch vector search with Ray workers and merge the global top-k on the driver.
 
-The driver opens one fixed dataset version, reads vector index segment metadata once, and plans work by index segment ownership.  Indexed worker tasks receive only their assigned `index_segments`, so a segment covering multiple fragments is never split across workers.  Fragments not covered by an index can be included as separate flat-search fallback work unless `fast_search=True`; fallback tasks use regular fragment scans and compute vector distances in Lance-Ray.
+The driver opens one fixed dataset version, reads vector index segment metadata once, and plans work by index segment ownership.  Indexed worker tasks receive only their assigned `index_segments`, so a segment covering multiple fragments is never split across workers.  Fragments not covered by an index can be included as separate flat-search fallback work unless `fast_search=True`; fallback tasks use regular fragment scans and compute vector distances in Lance-Ray.  For a fixed-size vector column, pass a two-dimensional query `[B, D]` to search a batch.  The driver merges candidates independently for each query and returns up to `k` rows per query.
 
 #### `vector_search`
 
@@ -245,7 +245,7 @@ def vector_search(
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `uri` | `str` or `lance.LanceDataset`, optional | Lance dataset object, or its URI. Either `uri` OR (`namespace_impl` + `table_id`) must be provided when using URI mode. If a `LanceDataset` object is provided, namespace parameters are ignored and workers reopen the same dataset URI/version. |
-| `nearest` | `dict[str, Any]` | Lance vector search options. Must include `column`, `q`, and `k`. Other Lance nearest options such as `minimum_nprobes`, `maximum_nprobes`, `refine_factor`, and distance range are forwarded to every worker. Lance-Ray raises worker-side `k` to at least `k * oversample_factor` before global merge. |
+| `nearest` | `dict[str, Any]` | Lance vector search options. Must include `column`, `q`, and `k`. For fixed-size vector columns, `q` may be one vector `[D]` or a batch `[B, D]`. If `metric` is omitted and a vector index is selected, indexed and fallback workers use the index metric; without an index the default is L2. Index-search options such as `minimum_nprobes`, `maximum_nprobes`, and `refine_factor` are forwarded to indexed workers; `distance_range` is also applied to flat fallback results. Lance-Ray raises worker-side `k` to at least `k * oversample_factor` before global merge. Multivector queries remain single queries and require full index coverage; flat fallback does not implement multivector distance. |
 | `index_name` | `str`, optional | Vector index name to use. If provided and not found, `vector_search()` raises `ValueError` instead of silently falling back. If omitted, Lance-Ray uses the first vector index covering `nearest["column"]`; if none exists, the search uses flat fallback plans unless `fast_search=True`. |
 | `columns` | `list[str]` or `dict[str, str]`, optional | Projection passed to the Lance scanner. When a list is provided and `_distance` is missing, Lance-Ray appends `_distance` automatically because the driver needs it for global top-k merge. |
 | `filter` | `Any`, optional | Filter passed unchanged to every worker scanner. |
@@ -264,7 +264,7 @@ def vector_search(
 
 #### Return Value
 
-The function returns a `pyarrow.Table` containing the global top-k rows sorted by `_distance`. If `analyze_plan=True`, it returns a `str` containing one Lance scanner analysis section per planned shard.
+For a one-dimensional query, the function returns a `pyarrow.Table` containing the global top-k rows sorted by `_distance` and `_rowid`. For a two-dimensional batch query, the first column is a non-null Int32 `query_index`; rows are grouped in input-query order, and each group contains up to `k` rows sorted by `_distance` and `_rowid`. The internal `_rowid` tie-break column is omitted unless requested. If `analyze_plan=True`, the function returns a `str` containing one Lance scanner analysis section per planned shard.
 
 ## Examples
 
@@ -383,6 +383,24 @@ results = lr.vector_search(
     nearest={
         "column": "vector",
         "q": query_vector,
+        "k": 10,
+        "minimum_nprobes": 20,
+    },
+    index_name="idx_ivf_flat",
+    columns=["id", "vector"],
+    num_workers=8,
+    oversample_factor=2,
+    fast_search=False,
+)
+
+# Run two queries in one Ray scheduling round.  The result is one table whose
+# query_index column maps every row back to query_vectors[0] or query_vectors[1].
+query_vectors = [query_vector, another_query_vector]
+batch_results = lr.vector_search(
+    uri="path/to/dataset.lance",
+    nearest={
+        "column": "vector",
+        "q": query_vectors,
         "k": 10,
         "minimum_nprobes": 20,
     },
