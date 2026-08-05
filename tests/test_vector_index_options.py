@@ -69,7 +69,7 @@ class _FakeLanceField:
 
 class _FakeLanceSchema:
     def field(self, column):
-        if column not in {"value", "text", "labels"}:
+        if column not in {"value", "text", "labels", "event_date"}:
             raise KeyError(column)
         return _FakeLanceField()
 
@@ -84,6 +84,8 @@ class _FakeSchema:
             return _FakeField(column, index_mod.pa.string())
         if column == "labels":
             return _FakeField(column, index_mod.pa.list_(index_mod.pa.string()))
+        if column == "event_date":
+            return _FakeField(column, index_mod.pa.date32())
         else:
             raise KeyError(column)
 
@@ -94,6 +96,7 @@ class _FakeSchema:
                 _FakeField("value", index_mod.pa.int64()),
                 _FakeField("text", index_mod.pa.string()),
                 _FakeField("labels", index_mod.pa.list_(index_mod.pa.string())),
+                _FakeField("event_date", index_mod.pa.date32()),
             ]
         )
 
@@ -452,6 +455,7 @@ def test_create_index_rejects_invalid_num_segments(monkeypatch):
     ("index_type", "column"),
     [
         ("BTREE", "value"),
+        ("BTREE", "event_date"),
         ("BITMAP", "value"),
         ("INVERTED", "text"),
         ("FTS", "text"),
@@ -459,6 +463,7 @@ def test_create_index_rejects_invalid_num_segments(monkeypatch):
         ("BLOOMFILTER", "value"),
         ("RTREE", "value"),
         ("LABEL_LIST", "labels"),
+        ("ZONEMAP", "event_date"),
     ],
 )
 def test_create_scalar_index_uses_segment_path(monkeypatch, index_type, column):
