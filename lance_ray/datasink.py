@@ -266,7 +266,7 @@ class _BaseLanceDatasink(Datasink):
             return
         op = None
         if self.mode in {"create", "overwrite"}:
-            op = lance.LanceOperation.Overwrite(
+            op = LanceOperation.Overwrite(
                 schema,
                 fragments,
                 initial_bases=(
