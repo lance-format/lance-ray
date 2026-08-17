@@ -335,25 +335,25 @@ wheels = [
 
 [[package]]
 name = "lance-namespace"
-version = "0.7.7"
-source = { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.7.7-py3-none-any.whl" }
+version = "0.6.1"
+source = { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.6.1-py3-none-any.whl" }
 dependencies = [
     { name = "lance-namespace-urllib3-client" },
     { name = "ve-lascatalog-sdk" },
 ]
 wheels = [
-    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.7.7-py3-none-any.whl", hash = "sha256:96b45b4b90987e304734afb7b2aa4e8e8a73064f5ab68183a7c659fc30aa3606" },
+    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.6.1-py3-none-any.whl", hash = "sha256:d9638f1deea8704c62d3f06ef6b5e2086e591a519c1730f04502378ff97f04c4" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "lance-namespace-urllib3-client", specifier = "==0.7.7" },
+    { name = "lance-namespace-urllib3-client", specifier = "==0.6.1" },
     { name = "ve-lascatalog-sdk", specifier = ">=1.0.0" },
 ]
 
 [[package]]
 name = "lance-namespace-urllib3-client"
-version = "0.7.7"
+version = "0.6.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
@@ -361,9 +361,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/07/95/38ab81ccc1e09beeecd8ddfc61b8bc73831dc5053db1e3f9021f64a4896b/lance_namespace_urllib3_client-0.7.7.tar.gz", hash = "sha256:4d8c066628c17c6a10cf643b51a7f7ae1bfb8a614d9cc54a5af38a4ba2b4b102", size = 202930 }
+sdist = { url = "https://files.pythonhosted.org/packages/63/a1/8706a2be25bd184acccc411e48f1a42a4cbf3b6556cba15b9fcf4c15cfcc/lance_namespace_urllib3_client-0.6.1.tar.gz", hash = "sha256:31fbd058ce1ea0bf49045cdeaa756360ece0bc61e9e10276f41af6d217debe87", size = 182567 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/35/96/5483e48e40433b1d078183c15a92c99e59a156041b0260e7f18ee34e7c08/lance_namespace_urllib3_client-0.7.7-py3-none-any.whl", hash = "sha256:9221c3e00fd89f0c811953d94b32d2ea527765280460a174f5872dc8a74c0ed6", size = 334767 },
+    { url = "https://files.pythonhosted.org/packages/cd/c7/cb9580602dec25f0fdd6005c1c9ba1d4c8c0c3dc8d543107e5a9f248bba8/lance_namespace_urllib3_client-0.6.1-py3-none-any.whl", hash = "sha256:b9c103e1377ad46d2bd70eec894bfec0b1e2133dae0964d7e4de543c6e16293b", size = 317111 },
 ]
 
 [[package]]
@@ -395,14 +395,14 @@ docs = [
 
 [package.metadata]
 requires-dist = [
-    { name = "lance-namespace", url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.7.7-py3-none-any.whl" },
+    { name = "lance-namespace", url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance-namespace/lance_namespace-0.6.1-py3-none-any.whl" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-awesome-pages-plugin", marker = "extra == 'docs'", specifier = ">=2.9.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
     { name = "packaging" },
     { name = "pyarrow", specifier = ">=17.0.0" },
-    { name = "pylance", url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl" },
+    { name = "pylance", url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance/pylance-5.0.0b6%2Bve.20-cp39-abi3-manylinux_2_28_x86_64.whl" },
     { name = "pytest", specifier = ">=8.4.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
@@ -1048,8 +1048,8 @@ wheels = [
 
 [[package]]
 name = "pylance"
-version = "7.0.0rc0"
-source = { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl" }
+version = "5.0.0b6+ve.20"
+source = { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance/pylance-5.0.0b6%2Bve.20-cp39-abi3-manylinux_2_28_x86_64.whl" }
 dependencies = [
     { name = "lance-namespace" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1057,18 +1057,18 @@ dependencies = [
     { name = "pyarrow" },
 ]
 wheels = [
-    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance_test/tag-7.0.100dev1/pylance-7.0.0rc0-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:78b3eb82129daeada1f9ff6ae36a99dfbd94bed2d6c98d66f7c6671c9e426979" },
+    { url = "https://proton-pkgs.tos-cn-beijing.volces.com/lance/pylance-5.0.0b6%2Bve.20-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:801dd4ffcec6f7f5a3c330046dbd9a03c300e1987e6743ec8fd318a372b1ac5f" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "boto3", marker = "extra == 'tests'" },
-    { name = "datafusion", marker = "python_full_version >= '3.10' and extra == 'tests'", specifier = ">=53,<54" },
+    { name = "datafusion", marker = "python_full_version >= '3.10' and extra == 'tests'", specifier = ">=52,<53" },
     { name = "datasets", marker = "extra == 'tests'" },
     { name = "duckdb", marker = "extra == 'tests'" },
     { name = "geoarrow-rust-core", marker = "extra == 'geo'" },
     { name = "geoarrow-rust-io", marker = "extra == 'geo'" },
-    { name = "lance-namespace", specifier = ">=0.7.7,<0.8" },
+    { name = "lance-namespace", specifier = ">=0.6.1" },
     { name = "ml-dtypes", marker = "extra == 'tests'" },
     { name = "numpy", specifier = ">=1.22" },
     { name = "pandas", marker = "extra == 'tests'" },
@@ -1080,7 +1080,6 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'tests'" },
     { name = "pytest-benchmark", marker = "extra == 'benchmarks'" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.11.2" },
-    { name = "tensorflow", marker = "sys_platform == 'linux' and extra == 'tests'" },
     { name = "torch", marker = "extra == 'torch'", specifier = ">=2.0" },
     { name = "tqdm", marker = "extra == 'tests'" },
 ]
