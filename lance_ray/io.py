@@ -15,7 +15,7 @@ from ray.util.multiprocessing import Pool
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
 from .utils import (
-    get_namespace_kwargs,
+    get_explicit_namespace_kwargs,
     has_namespace_params,
     materialize_initial_bases,
     normalize_initial_bases,
@@ -448,7 +448,8 @@ def _handle_fragment(
     """
 
     def func(fragment_id: int):
-        namespace_kwargs = get_namespace_kwargs(
+        namespace_kwargs = get_explicit_namespace_kwargs(
+            uri,
             namespace_impl, namespace_properties, table_id
         )
 
@@ -526,7 +527,9 @@ def add_columns(
     """
     storage_options = storage_options or {}
 
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_explicit_namespace_kwargs(
+        uri, namespace_impl, namespace_properties, table_id
+    )
 
     lance_ds = LanceDataset(
         uri=uri,

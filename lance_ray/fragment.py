@@ -94,7 +94,7 @@ def write_fragment(
         }
 
     write_kwargs = get_write_fragments_kwargs(
-        namespace_impl, namespace_properties, table_id
+        uri, namespace_impl, namespace_properties, table_id
     )
     if initial_bases:
         initial_bases_kwargs = {

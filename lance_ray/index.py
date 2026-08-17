@@ -13,8 +13,8 @@ from packaging import version
 from ray.util.multiprocessing import Pool
 
 from .utils import (
-    get_namespace_kwargs,
-    get_or_create_namespace,
+    get_explicit_namespace_kwargs,
+    resolve_namespace_table,
     validate_uri_or_namespace,
 )
 
@@ -160,7 +160,8 @@ def _handle_fragment_index(
                 if fragment_id < 0 or fragment_id > 0xFFFFFFFF:
                     raise ValueError(f"Invalid fragment_id: {fragment_id}")
 
-            namespace_kwargs = get_namespace_kwargs(
+            namespace_kwargs = get_explicit_namespace_kwargs(
+                dataset_uri,
                 namespace_impl, namespace_properties, table_id
             )
 
@@ -357,21 +358,17 @@ def create_scalar_index(
     # Note: Ray initialization is now handled by the Pool, following the pattern from io.py
     # This removes the need for explicit ray.init() calls
 
-    merged_storage_options: dict[str, Any] = {}
-    if storage_options:
-        merged_storage_options.update(storage_options)
+    uri, merged_storage_options = resolve_namespace_table(
+        uri,
+        storage_options,
+        namespace_impl,
+        namespace_properties,
+        table_id,
+    )
 
-    # Resolve URI and get storage options from namespace if provided
-    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-    if namespace is not None and table_id is not None:
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-        if describe_response.storage_options:
-            merged_storage_options.update(describe_response.storage_options)
-
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_explicit_namespace_kwargs(
+        uri, namespace_impl, namespace_properties, table_id
+    )
 
     # Load dataset
     dataset = LanceDataset(
@@ -671,7 +668,8 @@ def _handle_vector_fragment_index(
                 if fragment_id < 0 or fragment_id > 0xFFFFFFFF:
                     raise ValueError(f"Invalid fragment_id: {fragment_id}")
 
-            namespace_kwargs = get_namespace_kwargs(
+            namespace_kwargs = get_explicit_namespace_kwargs(
+                dataset_uri,
                 namespace_impl, namespace_properties, table_id
             )
             dataset = LanceDataset(
@@ -809,20 +807,17 @@ def create_index(
         # URI or namespace mode
         validate_uri_or_namespace(uri, namespace_impl, table_id)
 
-        # Resolve URI and storage options from namespace if provided
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-        if namespace is not None and table_id is not None:
-            from lance_namespace import DescribeTableRequest
-
-            describe_response = namespace.describe_table(
-                DescribeTableRequest(id=table_id)
-            )
-            uri = describe_response.location
-            if describe_response.storage_options:
-                merged_storage_options.update(describe_response.storage_options)
+        uri, merged_storage_options = resolve_namespace_table(
+            uri,
+            merged_storage_options,
+            namespace_impl,
+            namespace_properties,
+            table_id,
+        )
 
         dataset_uri = uri
-        namespace_kwargs = get_namespace_kwargs(
+        namespace_kwargs = get_explicit_namespace_kwargs(
+            dataset_uri,
             namespace_impl, namespace_properties, table_id
         )
         dataset_obj = LanceDataset(
@@ -1099,25 +1094,17 @@ def optimize_indices(
     )
     validate_uri_or_namespace(uri, namespace_impl, table_id)
 
-    merged_storage_options: dict[str, Any] = {}
-    if storage_options:
-        merged_storage_options.update(storage_options)
+    uri, merged_storage_options = resolve_namespace_table(
+        uri,
+        storage_options,
+        namespace_impl,
+        namespace_properties,
+        table_id,
+    )
 
-    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-    if namespace is not None and table_id is not None:
-        from lance_namespace import DescribeTableRequest
-
-        describe_response = namespace.describe_table(DescribeTableRequest(id=table_id))
-        uri = describe_response.location
-        if describe_response.storage_options:
-            merged_storage_options.update(describe_response.storage_options)
-        logger.info(
-            "Resolved dataset URI from namespace (table_id=%s): %s",
-            table_id,
-            uri,
-        )
-
-    namespace_kwargs = get_namespace_kwargs(namespace_impl, namespace_properties, table_id)
+    namespace_kwargs = get_explicit_namespace_kwargs(
+        uri, namespace_impl, namespace_properties, table_id
+    )
 
     dataset = LanceDataset(
         uri,

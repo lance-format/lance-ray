@@ -11,7 +11,7 @@ from ray.data.datasource.datasource import ReadTask
 
 from .utils import (
     array_split,
-    get_namespace_kwargs,
+    get_explicit_namespace_kwargs,
     get_or_create_namespace,
 )
 
@@ -134,7 +134,8 @@ class LanceDatasource(Datasource):
             dataset_options = self._dataset_options.copy()
             dataset_options["uri"] = self._uri
             dataset_options["storage_options"] = self._storage_options
-            ns_kwargs = get_namespace_kwargs(
+            ns_kwargs = get_explicit_namespace_kwargs(
+                self._uri,
                 self._namespace_impl, self._namespace_properties, self._table_id
             )
             dataset_options.update(ns_kwargs)
@@ -263,7 +264,8 @@ def _read_fragments_with_retry(
     scanner_options: dict[str, Any],
     retry_params: dict[str, Any],
 ) -> Iterator[pa.Table]:
-    namespace_kwargs = get_namespace_kwargs(
+    namespace_kwargs = get_explicit_namespace_kwargs(
+        uri,
         namespace_impl, namespace_properties, table_id
     )
     base_store_params_kwargs = {}

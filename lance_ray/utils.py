@@ -158,6 +158,41 @@ def get_or_create_namespace(
     return _get_cached_namespace(namespace_impl, namespace_properties_tuple)
 
 
+def resolve_namespace_table(
+    uri: Optional[str],
+    storage_options: Optional[dict[str, Any]],
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    table_id: Optional[list[str]],
+) -> tuple[Optional[str], dict[str, Any]]:
+    """Resolve a namespace table to physical I/O parameters on the driver."""
+    resolved_options = dict(storage_options or {})
+    if uri is not None or not has_namespace_params(namespace_impl, table_id):
+        return uri, resolved_options
+
+    from lance_namespace import DescribeNamespaceRequest, DescribeTableRequest
+
+    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
+    response = namespace.describe_table(DescribeTableRequest(id=table_id))
+    resolved_uri = response.location
+    if resolved_uri and resolved_uri.startswith("tos://"):
+        resolved_uri = "s3://" + resolved_uri[len("tos://"):]
+    if response.storage_options:
+        resolved_options.update(response.storage_options)
+
+    namespace_response = namespace.describe_namespace(
+        DescribeNamespaceRequest(id=[])
+    )
+    for key, value in (namespace_response.properties or {}).items():
+        if key.startswith("storage.") and value not in (None, ""):
+            resolved_options.setdefault(
+                key[len("storage."):],
+                value,
+            )
+
+    return resolved_uri, resolved_options
+
+
 def _create_storage_options_provider(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
@@ -212,7 +247,24 @@ def get_namespace_kwargs(
     return kwargs
 
 
+def get_explicit_namespace_kwargs(
+    uri: Optional[str],
+    namespace_impl: Optional[str],
+    namespace_properties: Optional[dict[str, str]],
+    table_id: Optional[list[str]],
+) -> dict[str, Any]:
+    """Return namespace kwargs only when a physical URI is not provided."""
+    if uri is not None:
+        return {}
+    return get_namespace_kwargs(
+        namespace_impl,
+        namespace_properties,
+        table_id,
+    )
+
+
 def get_write_fragments_kwargs(
+    uri: Optional[str],
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
@@ -223,6 +275,9 @@ def get_write_fragments_kwargs(
     - pylance 4.x: ``storage_options_provider``
     - pylance 5.0+: ``namespace_client``, ``table_id``
     """
+    if uri is not None:
+        return {}
+
     if not has_namespace_params(namespace_impl, table_id):
         return {}
 

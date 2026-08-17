@@ -16,7 +16,7 @@ from ray.data.datasource.datasink import Datasink
 
 from .fragment import write_fragment
 from .utils import (
-    get_namespace_kwargs,
+    get_explicit_namespace_kwargs,
     get_or_create_namespace,
     materialize_initial_bases,
     normalize_initial_bases,
@@ -174,7 +174,8 @@ class _BaseLanceDatasink(Datasink):
     @property
     def namespace_kwargs(self) -> dict[str, Any]:
         """Namespace wiring for pylance credential refresh."""
-        return get_namespace_kwargs(
+        return get_explicit_namespace_kwargs(
+            self.uri,
             self._namespace_impl, self._namespace_properties, self.table_id
         )
 
@@ -421,9 +422,6 @@ class LanceDatasink(_BaseLanceDatasink):
             data_storage_version=self.data_storage_version,
             storage_options=self.storage_options,
             initial_bases=self.initial_bases if self.mode == "create" else None,
-            namespace_impl=self._namespace_impl,
-            namespace_properties=self._namespace_properties,
-            table_id=self.table_id,
             retry_params=self._retry_params,
         )
         return [
