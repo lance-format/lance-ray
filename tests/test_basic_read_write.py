@@ -331,6 +331,25 @@ class TestNamespaceReadWrite:
 
         cloudpickle.dumps(datasink)
 
+    def test_directory_namespace_table_is_declared_on_driver(self, temp_dir):
+        """A namespace table is declared before write tasks are serialized."""
+        from lance_namespace import DescribeTableRequest, connect
+
+        table_id = ["test_table"]
+        datasink = LanceDatasink(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        datasink.on_write_start(pa.schema([pa.field("id", pa.int64())]))
+
+        namespace = connect("dir", {"root": temp_dir})
+        response = namespace.describe_table(DescribeTableRequest(id=table_id))
+        assert datasink.uri == response.location
+        assert datasink._need_create is False
+        cloudpickle.dumps(datasink)
+
     def test_write_and_read_with_directory_namespace(self, sample_data, temp_dir):
         """Test write and read using DirectoryNamespace."""
         table_id = ["test_table"]

@@ -23,52 +23,36 @@ from .utils import (
 )
 
 
-def _schema_to_arrow_ipc_bytes(schema: Optional[pa.Schema]) -> Optional[bytes]:
-    """Serialize an empty Arrow table with the given schema to Arrow IPC bytes.
-
-    Returns None if schema is None or serialization fails.
-    """
-    if schema is None:
-        return None
-    try:
-        import pyarrow.ipc as ipc
-        buf = pa.BufferOutputStream()
-        try:
-            empty_cols = {f.name: pa.array([], type=f.type) for f in schema}
-            empty_table = pa.table(empty_cols, schema=schema)
-        except Exception:
-            empty_table = pa.table([], schema=schema)
-        with ipc.new_stream(buf, schema) as writer:
-            writer.write_table(empty_table)
-        return buf.getvalue().to_pybytes()
-    except Exception:
-        return None
-
-
 if TYPE_CHECKING:
     import pandas as pd
 
 
 def _declare_table_with_fallback(
-    namespace, table_id: list[str]
+    namespace, table_id: list[str], schema: pa.Schema
 ) -> tuple[str, Optional[dict[str, str]]]:
-    """Declare a table using declare_table, falling back to create_empty_table.
+    """Declare a table, falling back to schema-based table creation.
 
     Returns:
         Tuple of (uri, storage_options)
     """
     try:
-        from lance_namespace import DeclareTableRequest
+        from lance_namespace import DeclareTableRequest, UnsupportedOperationError
 
         declare_request = DeclareTableRequest(id=table_id, location=None)
         declare_response = namespace.declare_table(declare_request)
         return declare_response.location, declare_response.storage_options
-    except (AttributeError, NotImplementedError):
-        # Fallback for older namespace implementations without declare_table
-        from lance_namespace import CreateEmptyTableRequest
+    except (AttributeError, NotImplementedError, UnsupportedOperationError):
+        import pyarrow.ipc as ipc
+        from lance_namespace import CreateTableRequest
 
-        create_request = CreateEmptyTableRequest(id=table_id)
-        create_response = namespace.create_empty_table(create_request)
+        buffer = pa.BufferOutputStream()
+        with ipc.new_stream(buffer, schema):
+            pass
+        create_request = CreateTableRequest(id=table_id)
+        create_response = namespace.create_table(
+            create_request,
+            buffer.getvalue().to_pybytes(),
+        )
         return create_response.location, create_response.storage_options
 
 
@@ -202,7 +186,27 @@ class _BaseLanceDatasink(Datasink):
         _check_import(self, module="lance", package="pylance")
 
         import lance
-        from lance.dataset import LanceDataset
+
+        if self.schema is None:
+            self.schema = schema
+
+        if self._need_create:
+            if self.schema is None:
+                raise ValueError(
+                    "Cannot declare a namespace table without a write schema"
+                )
+            namespace = self.namespace
+            if namespace is None or self.table_id is None:
+                raise ValueError(
+                    "Namespace and table_id are required to declare a table"
+                )
+            location, storage_options = _declare_table_with_fallback(
+                namespace, self.table_id, self.schema
+            )
+            self.uri = self._normalize_location(location)
+            if storage_options:
+                self.storage_options.update(storage_options)
+            self._need_create = False
 
         if self.mode == "append":
             base_store_params_kwargs = {}
@@ -219,6 +223,10 @@ class _BaseLanceDatasink(Datasink):
             self.read_version = ds.version
             if self.schema is None:
                 self.schema = ds.schema
+
+        # A direct namespace is only needed for driver-side resolution. Workers
+        # perform physical I/O using the resolved URI and storage options.
+        self._namespace_direct = None
 
     def on_write_complete(
         self,
@@ -405,57 +413,6 @@ class LanceDatasink(_BaseLanceDatasink):
         blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         ctx: Any,
     ):
-        # If we deferred table creation, derive schema from first block and create via namespace
-        if self._need_create and self.namespace is not None and self.table_id is not None:
-            blocks_iter = iter(blocks)
-            try:
-                first_block = next(blocks_iter)
-            except StopIteration:
-                raise ValueError("No data blocks to derive schema for deferred create")
-
-            # Derive schema from first block if not provided
-            if self.schema is None:
-                if isinstance(first_block, pa.Table):
-                    derived_schema = first_block.schema
-                else:
-                    # pandas DataFrame -> Arrow Table
-                    try:
-                        import pandas as pd  # type: ignore
-                    except Exception:
-                        pd = None
-                    if pd is not None and hasattr(first_block, "__class__") and first_block.__class__.__name__ == "DataFrame":
-                        derived_schema = pa.Table.from_pandas(first_block).schema
-                    else:
-                        # Fallback: try generic conversion
-                        derived_schema = pa.Table.from_pydict(first_block).schema
-                self.schema = derived_schema
-
-            # Serialize schema to Arrow IPC bytes
-            ipc_bytes = _schema_to_arrow_ipc_bytes(self.schema)
-            if ipc_bytes is None:
-                raise ValueError("Failed to serialize schema to Arrow IPC for deferred create")
-
-            # Call namespace.create_table and set URI/storage options
-            from lance_namespace import CreateTableRequest
-
-            resp = self.namespace.create_table(CreateTableRequest(id=self.table_id), ipc_bytes)
-            # Normalize tos->s3 for lance operations
-            self.uri = self._normalize_location(getattr(resp, "location", None))
-            # Merge storage options if present
-            resp_opts = getattr(resp, "storage_options", None)
-            if isinstance(resp_opts, dict):
-                self.storage_options.update(resp_opts)
-            # Clear flag
-            self._need_create = False
-
-            # Rebuild blocks iterable to include the first block
-            def _yield_blocks():
-                yield first_block
-                for b in blocks_iter:
-                    yield b
-
-            blocks = _yield_blocks()
-
         fragments_and_schema = write_fragment(
             blocks,
             self.uri,
