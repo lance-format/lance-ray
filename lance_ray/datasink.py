@@ -103,10 +103,15 @@ class _BaseLanceDatasink(Datasink):
         self._namespace_impl = namespace_impl
         self._namespace_properties = namespace_properties
 
-        # Use provided namespace if given; otherwise construct from impl and properties (cached per worker)
-        namespace = namespace if namespace is not None else get_or_create_namespace(namespace_impl, namespace_properties)
-        # Keep a direct reference for driver-side operations
-        self._namespace_direct = namespace
+        # Namespace clients created from serializable connection parameters are
+        # reconstructed on demand. Keeping the native client here would make the
+        # datasink impossible for Ray to serialize.
+        namespace = (
+            namespace
+            if namespace is not None
+            else get_or_create_namespace(namespace_impl, namespace_properties)
+        )
+        self._namespace_direct = namespace if namespace_impl is None else None
 
         # Save parameters needed for deferred create
         self.table_id = table_id

@@ -9,9 +9,12 @@ import lance_ray as lr
 import pyarrow as pa
 import pytest
 import ray
+from ray import cloudpickle
 from ray.data import Dataset
 
 import pandas as pd
+
+from lance_ray.datasink import LanceDatasink
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -317,6 +320,16 @@ class TestAddColumns:
 
 class TestNamespaceReadWrite:
     """Test cases for read/write with DirectoryNamespace."""
+
+    def test_directory_namespace_datasink_is_serializable(self, temp_dir):
+        """Namespace clients reconstructed from properties stay out of task state."""
+        datasink = LanceDatasink(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=["test_table"],
+        )
+
+        cloudpickle.dumps(datasink)
 
     def test_write_and_read_with_directory_namespace(self, sample_data, temp_dir):
         """Test write and read using DirectoryNamespace."""
