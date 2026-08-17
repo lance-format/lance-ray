@@ -13,6 +13,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.ipc as ipc
 import ray
+from lance.optimize import CompactionOptions
 
 # 为了在本仓库内直接运行示例，动态追加本地包搜索路径（不影响已安装环境）
 _CUR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,8 @@ if os.path.isdir(_LOCAL_PKG_DIR) and _LOCAL_PKG_DIR not in sys.path:
     sys.path.append(_LOCAL_PKG_DIR)
 
 # 导入 lance-ray I/O 方法
+from lance_ray.compaction import compact_files
+from lance_ray.index import create_scalar_index
 from lance_ray.io import write_lance, read_lance
 
 # 导入 lance-namespace 连接与请求模型
@@ -108,6 +111,15 @@ def _ensure_namespace(props: Dict[str, Any], db_name: str):
     exists = ns.namespace_exists(NamespaceExistsRequest(id=[db_name]))
     assert getattr(exists, "exists", True), "命名空间不存在"
     return ns, base_location
+
+
+def _connection_properties(props: Dict[str, Any]) -> Dict[str, str]:
+    """Return only properties understood by the namespace connector."""
+    return {
+        key: value
+        for key, value in props.items()
+        if not key.startswith("_") and value is not None
+    }
 
 
 @pytest.fixture(scope="session")
@@ -203,3 +215,116 @@ def test_explicit_create_table_ipc_then_append(db_name):
     ds_all = read_lance(namespace=ns, table_id=table_id)
     # 如果初始为 0，则追加后应为 2；如果初始为 3，则追加后应为 5
     assert ds_all.count() in (2, 5)
+
+
+def test_namespace_impl_write_read_roundtrip(db_name, sample_df):
+    """Read and write through serializable LAS connection parameters."""
+    props = _load_props_from_config()
+    _ensure_namespace(props, db_name)
+    table_id = [
+        db_name,
+        f"table_impl_rw_{datetime.utcnow().strftime('%H%M%S')}",
+    ]
+
+    write_lance(
+        ray.data.from_pandas(sample_df),
+        namespace_impl="las",
+        namespace_properties=_connection_properties(props),
+        table_id=table_id,
+        mode="overwrite",
+    )
+
+    actual = read_lance(
+        namespace_impl="las",
+        namespace_properties=_connection_properties(props),
+        table_id=table_id,
+    ).to_pandas()
+    pd.testing.assert_frame_equal(
+        sample_df.sort_values("id").reset_index(drop=True),
+        actual.sort_values("id").reset_index(drop=True),
+    )
+
+
+def test_namespace_impl_compaction(db_name):
+    """Compact a multi-fragment LAS table resolved through the catalog."""
+    props = _load_props_from_config()
+    _ensure_namespace(props, db_name)
+    table_id = [
+        db_name,
+        f"table_impl_compact_{datetime.utcnow().strftime('%H%M%S')}",
+    ]
+    frame = pd.DataFrame(
+        {
+            "id": range(20),
+            "value": [f"value_{idx}" for idx in range(20)],
+        }
+    )
+    connection_properties = _connection_properties(props)
+
+    write_lance(
+        ray.data.from_pandas(frame),
+        namespace_impl="las",
+        namespace_properties=connection_properties,
+        table_id=table_id,
+        mode="overwrite",
+        min_rows_per_file=5,
+        max_rows_per_file=5,
+    )
+    metrics = compact_files(
+        namespace_impl="las",
+        namespace_properties=connection_properties,
+        table_id=table_id,
+        compaction_options=CompactionOptions(
+            target_rows_per_fragment=100,
+            num_threads=1,
+        ),
+        num_workers=2,
+    )
+
+    assert metrics is not None
+    assert metrics.fragments_removed == 4
+    assert metrics.fragments_added == 1
+    assert read_lance(
+        namespace_impl="las",
+        namespace_properties=connection_properties,
+        table_id=table_id,
+    ).count() == len(frame)
+
+
+def test_namespace_impl_btree_index(db_name):
+    """Build and query a distributed scalar index on a LAS table."""
+    props = _load_props_from_config()
+    _ensure_namespace(props, db_name)
+    table_id = [
+        db_name,
+        f"table_impl_btree_{datetime.utcnow().strftime('%H%M%S')}",
+    ]
+    frame = pd.DataFrame(
+        {
+            "id": range(100),
+            "value": [f"value_{idx}" for idx in range(100)],
+        }
+    )
+    connection_properties = _connection_properties(props)
+
+    write_lance(
+        ray.data.from_pandas(frame),
+        namespace_impl="las",
+        namespace_properties=connection_properties,
+        table_id=table_id,
+        mode="overwrite",
+        min_rows_per_file=25,
+        max_rows_per_file=25,
+    )
+    dataset = create_scalar_index(
+        namespace_impl="las",
+        namespace_properties=connection_properties,
+        table_id=table_id,
+        column="id",
+        index_type="BTREE",
+        name="id_btree",
+        num_workers=2,
+    )
+
+    assert any(index["name"] == "id_btree" for index in dataset.list_indices())
+    assert dataset.scanner(filter="id = 42").count_rows() == 1
