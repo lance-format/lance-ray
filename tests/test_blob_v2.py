@@ -28,6 +28,7 @@ from ray.exceptions import RayTaskError
 from _utils import (
     fragment_write_options_skip_reason,
     missing_fragment_write_options,
+    to_numpy_backed,
 )
 
 # Prefer the local Lance Python package when running in a monorepo layout
@@ -163,6 +164,7 @@ def test_blob_v2_roundtrip_with_projection_and_filter(tmp_path: Path) -> None:
         df = (
             lr.read_lance(str(path))
             .to_pandas()
+            .pipe(to_numpy_backed)
             .sort_values("id")
             .reset_index(drop=True)
         )
@@ -182,6 +184,7 @@ def test_blob_v2_roundtrip_with_projection_and_filter(tmp_path: Path) -> None:
     df_proj = (
         lr.read_lance(str(path), columns=["blob"], filter="id >= 2")
         .to_pandas()
+        .pipe(to_numpy_backed)
         .reset_index(drop=True)
     )
     assert df_proj.columns.tolist() == ["blob"]
@@ -376,6 +379,7 @@ def test_blob_v2_reference_multi_base_all_lance_ray_paths(tmp_path: Path) -> Non
     df = (
         lr.read_lance(str(path), base_store_params=base_store_params)
         .to_pandas()
+        .pipe(to_numpy_backed)
         .sort_values("id")
         .reset_index(drop=True)
     )
@@ -390,6 +394,7 @@ def test_blob_v2_reference_multi_base_all_lance_ray_paths(tmp_path: Path) -> Non
             base_store_params=base_store_params,
         )
         .to_pandas()
+        .pipe(to_numpy_backed)
         .reset_index(drop=True)
     )
     assert df_proj["blob"].tolist() == [external_payload, None]
@@ -409,6 +414,7 @@ def test_blob_v2_reference_multi_base_all_lance_ray_paths(tmp_path: Path) -> Non
     stream_df = (
         lr.read_lance(str(stream_path), base_store_params=base_store_params)
         .to_pandas()
+        .pipe(to_numpy_backed)
         .sort_values("id")
         .reset_index(drop=True)
     )
@@ -439,6 +445,7 @@ def test_blob_v2_reference_multi_base_all_lance_ray_paths(tmp_path: Path) -> Non
     manual_df = (
         lr.read_lance(str(manual_path), base_store_params=base_store_params)
         .to_pandas()
+        .pipe(to_numpy_backed)
         .sort_values("id")
         .reset_index(drop=True)
     )

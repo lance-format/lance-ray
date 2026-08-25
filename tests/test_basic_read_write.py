@@ -18,6 +18,7 @@ import pandas as pd
 from _utils import (
     fragment_write_options_skip_reason,
     missing_fragment_write_options,
+    to_numpy_backed,
 )
 
 sys.path.insert(
@@ -291,7 +292,7 @@ class TestReadWrite:
 
         # Read it back
         read_dataset = lr.read_lance(str(path))
-        read_df = read_dataset.to_pandas()
+        read_df = read_dataset.to_pandas().pipe(to_numpy_backed)
 
         # Compare data (sort by id to ensure consistent order)
         original_sorted = sample_data.sort_values("id").reset_index(drop=True)
@@ -423,7 +424,7 @@ class TestNamespaceReadWrite:
             namespace_properties={"root": temp_dir},
             table_id=table_id,
         )
-        read_df = read_dataset.to_pandas()
+        read_df = read_dataset.to_pandas().pipe(to_numpy_backed)
 
         original_sorted = sample_data.sort_values("id").reset_index(drop=True)
         read_sorted = read_df.sort_values("id").reset_index(drop=True)
