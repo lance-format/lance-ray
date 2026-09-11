@@ -1287,7 +1287,7 @@ def _resolve_update_targets(
     target_names = set(target_schema.names)
     blob_columns = _blob_column_names(target_schema)
 
-    fields: list[pa.Field] = []
+    fields: list[pa.Field[Any]] = []
     field_ids: list[int] = []
     seen: set[str] = set()
 
@@ -1330,7 +1330,8 @@ def _resolve_update_targets(
                 "supported by update_columns yet."
             )
 
-        lance_field = lance_schema.field(name)
+        # ``LanceSchema.field()`` is missing from pylance's schema stub.
+        lance_field = lance_schema.field(name)  # type: ignore[attr-defined]
         if lance_field is None:
             raise ValueError(
                 f"Column '{name}' has no Lance field id; cannot update it."

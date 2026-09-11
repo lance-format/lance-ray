@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Iterator
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast, overload
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -327,6 +327,27 @@ def blob_field_kind(f: pa.Field[Any]) -> Optional[str]:
     return None
 
 
+@overload
+def _read_fragments(
+    fragment_ids: list[int],
+    lance_ds: lance.LanceDataset,
+    scanner_options: dict[str, Any],
+    with_metadata: bool = False,
+    as_record_batches: Literal[False] = False,
+) -> Iterator[pa.Table]: ...
+
+
+@overload
+def _read_fragments(
+    fragment_ids: list[int],
+    lance_ds: lance.LanceDataset,
+    scanner_options: dict[str, Any],
+    with_metadata: bool = False,
+    *,
+    as_record_batches: Literal[True],
+) -> Iterator[pa.RecordBatch]: ...
+
+
 def _read_fragments(
     fragment_ids: list[int],
     lance_ds: lance.LanceDataset,
@@ -391,14 +412,14 @@ def _read_fragments(
         # Fast path: no blob columns requested in this scan
         if not blob_columns:
             if with_metadata and "_rowaddr" in batch.column_names:
-                rowaddr_col = batch.column("_rowaddr")
+                batch_rowaddrs = batch.column("_rowaddr")
                 # pyarrow-stubs has no overload for shifting an array by a
                 # plain Python int, and types the result as a scalar.
-                fragid_values = cast(
+                batch_fragids = cast(
                     "pa.Array[Any]",
-                    pc.cast(pc.shift_right(rowaddr_col, 32), pa.uint64()),
+                    pc.cast(pc.shift_right(batch_rowaddrs, 32), pa.uint64()),
                 )
-                batch = batch.append_column("_fragid", fragid_values)
+                batch = batch.append_column("_fragid", batch_fragids)
 
             if not with_metadata:
                 for col in ("_rowaddr", "_fragid"):

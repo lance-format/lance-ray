@@ -1,7 +1,9 @@
 """Test cases for the distributed ``update_columns`` API."""
 
 import tempfile
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import lance
 import lance_ray as lr
@@ -12,18 +14,24 @@ import ray
 from lance.udf import BatchUDF
 
 # Ray workers cannot import this module (it imports pytest), so any helper a
-# transform references must come from a module they *can* import.
-from _ray_test_support import double_price as _double_price
-from _ray_test_support import record_batch as _record_batch
+# transform references must come from a module they *can* import. mypy treats
+# the top-level ``_ray_test_support`` as untyped, so it reads the same file
+# through the ``tests`` package instead.
+if TYPE_CHECKING:
+    from tests._ray_test_support import double_price as _double_price
+    from tests._ray_test_support import record_batch as _record_batch
+else:
+    from _ray_test_support import double_price as _double_price
+    from _ray_test_support import record_batch as _record_batch
 
 
 @pytest.fixture
-def temp_dir():
+def temp_dir() -> Iterator[str]:
     with tempfile.TemporaryDirectory() as temp_dir:
         yield temp_dir
 
 
-def _write_products(path, rows=6, max_rows_per_file=2):
+def _write_products(path: Path, rows: int = 6, max_rows_per_file: int = 2) -> pa.Table:
     """A small multi-fragment dataset: ids 1..rows, alternating status."""
     table = pa.table(
         {
@@ -38,7 +46,7 @@ def _write_products(path, rows=6, max_rows_per_file=2):
     return table
 
 
-def _dataset_fingerprint(path):
+def _dataset_fingerprint(path: Path) -> tuple[int, list[str]]:
     """Version plus every data file, to prove nothing was written."""
     ds = lance.dataset(str(path))
     files = sorted(
@@ -50,7 +58,7 @@ def _dataset_fingerprint(path):
 
 
 class TestBasicBehavior:
-    def test_namespace_only_updates_columns(self, temp_dir):
+    def test_namespace_only_updates_columns(self, temp_dir: str) -> None:
         """The driver resolves the namespace once, while workers retain it.
 
         This guards the internal read path used after update_columns has pinned
@@ -90,7 +98,7 @@ class TestBasicBehavior:
         ).take_all()
         assert sorted(row["price"] for row in got) == [20.0, 40.0, 60.0]
 
-    def test_updates_all_rows_across_fragments(self, temp_dir):
+    def test_updates_all_rows_across_fragments(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "all_rows.lance"
         _write_products(path)
 
@@ -108,7 +116,9 @@ class TestBasicBehavior:
         assert got["price"] == [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
         assert got["id"] == [1, 2, 3, 4, 5, 6]
 
-    def test_updates_one_fragment_over_multiple_record_batches(self, temp_dir):
+    def test_updates_one_fragment_over_multiple_record_batches(
+        self, temp_dir: str
+    ) -> None:
         path = Path(temp_dir) / "multi_batch_fragment.lance"
         _write_products(path, rows=6, max_rows_per_file=6)
 
@@ -131,7 +141,7 @@ class TestBasicBehavior:
             120.0,
         ]
 
-    def test_filter_updates_only_matching_rows(self, temp_dir):
+    def test_filter_updates_only_matching_rows(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "filtered.lance"
         _write_products(path)
 
@@ -148,7 +158,7 @@ class TestBasicBehavior:
         # Only the odd ids (status 'a') doubled; the rest keep their old value.
         assert got["price"] == [20.0, 20.0, 60.0, 40.0, 100.0, 60.0]
 
-    def test_partial_fragment_coverage_is_allowed(self, temp_dir):
+    def test_partial_fragment_coverage_is_allowed(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "partial.lance"
         _write_products(path)
 
@@ -165,7 +175,7 @@ class TestBasicBehavior:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 30.0, 40.0, 50.0, 60.0]
 
-    def test_updates_multiple_columns(self, temp_dir):
+    def test_updates_multiple_columns(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "multi_col.lance"
         table = pa.table(
             {
@@ -180,7 +190,11 @@ class TestBasicBehavior:
             return _record_batch(
                 {
                     "price": pc.multiply(batch["price"], 10.0),
-                    "label": pc.binary_join_element_wise(batch["label"], "!", ""),
+                    # pyarrow-stubs requires every argument to share one
+                    # array type, so it rejects the literal separator.
+                    "label": pc.binary_join_element_wise(  # type: ignore[call-overload]
+                        batch["label"], "!", ""
+                    ),
                 }
             )
 
@@ -196,7 +210,7 @@ class TestBasicBehavior:
         assert got["price"] == [10.0, 20.0, 30.0, 40.0]
         assert got["label"] == ["w!", "x!", "y!", "z!"]
 
-    def test_transform_may_read_columns_it_does_not_update(self, temp_dir):
+    def test_transform_may_read_columns_it_does_not_update(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "aux_read.lance"
         _write_products(path, rows=4)
 
@@ -213,7 +227,7 @@ class TestBasicBehavior:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [1.0, 2.0, 3.0, 4.0]
 
-    def test_no_op_when_filter_matches_nothing(self, temp_dir):
+    def test_no_op_when_filter_matches_nothing(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "noop.lance"
         _write_products(path)
         before = lance.dataset(str(path)).version
@@ -232,7 +246,7 @@ class TestBasicBehavior:
 
 
 class TestTransformContract:
-    def test_transform_does_not_see_metadata_columns(self, temp_dir):
+    def test_transform_does_not_see_metadata_columns(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "hidden_meta.lance"
         _write_products(path, rows=4)
 
@@ -259,7 +273,7 @@ class TestTransformContract:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [30.0, 60.0, 90.0, 120.0]
 
-    def test_accepts_batch_udf(self, temp_dir):
+    def test_accepts_batch_udf(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "batch_udf.lance"
         _write_products(path, rows=2, max_rows_per_file=2)
 
@@ -303,7 +317,12 @@ class TestTransformContract:
             ),
         ],
     )
-    def test_rejects_bad_transform_output(self, temp_dir, bad_transform, match):
+    def test_rejects_bad_transform_output(
+        self,
+        temp_dir: str,
+        bad_transform: Callable[[pa.RecordBatch], Any],
+        match: str,
+    ) -> None:
         path = Path(temp_dir) / "bad_output.lance"
         _write_products(path, rows=2, max_rows_per_file=2)
 
@@ -315,7 +334,7 @@ class TestTransformContract:
                 read_columns=["price"],
             )
 
-    def test_transform_output_is_cast_to_the_dataset_type(self, temp_dir):
+    def test_transform_output_is_cast_to_the_dataset_type(self, temp_dir: str) -> None:
         """The output type is the dataset's, not whatever the transform built."""
         path = Path(temp_dir) / "cast_output.lance"
         _write_products(path, rows=2, max_rows_per_file=2)
@@ -334,7 +353,7 @@ class TestTransformContract:
         assert table.schema.field("price").type == pa.float64()
         assert table.to_pydict()["price"] == [1.0, 2.0]
 
-    def test_rejects_out_of_range_transform_output(self, temp_dir):
+    def test_rejects_out_of_range_transform_output(self, temp_dir: str) -> None:
         """The cast is safe=True, so an out-of-range integer raises.
 
         Note this does *not* generalize to floats: Arrow's safe cast does not
@@ -364,15 +383,14 @@ class TestTransformContract:
 
         assert _dataset_fingerprint(path) == before
 
-    def test_rejects_nulls_for_a_non_nullable_column(self, temp_dir):
+    def test_rejects_nulls_for_a_non_nullable_column(self, temp_dir: str) -> None:
         """A non-nullable target rejects null output rather than writing it."""
         path = Path(temp_dir) / "non_nullable.lance"
-        schema = pa.schema(
-            [
-                pa.field("id", pa.int32()),
-                pa.field("price", pa.float64(), nullable=False),
-            ]
-        )
+        schema_fields: list[pa.Field[Any]] = [
+            pa.field("id", pa.int32()),
+            pa.field("price", pa.float64(), nullable=False),
+        ]
+        schema = pa.schema(schema_fields)
         table = pa.table(
             {
                 "id": pa.array([1, 2], pa.int32()),
@@ -396,15 +414,14 @@ class TestTransformContract:
 
         assert _dataset_fingerprint(path) == before
 
-    def test_updates_a_non_nullable_column(self, temp_dir):
+    def test_updates_a_non_nullable_column(self, temp_dir: str) -> None:
         """Non-null output for a non-nullable target round-trips normally."""
         path = Path(temp_dir) / "non_nullable_ok.lance"
-        schema = pa.schema(
-            [
-                pa.field("id", pa.int32()),
-                pa.field("price", pa.float64(), nullable=False),
-            ]
-        )
+        schema_fields: list[pa.Field[Any]] = [
+            pa.field("id", pa.int32()),
+            pa.field("price", pa.float64(), nullable=False),
+        ]
+        schema = pa.schema(schema_fields)
         table = pa.table(
             {
                 "id": pa.array([1, 2], pa.int32()),
@@ -427,7 +444,7 @@ class TestTransformContract:
 
 
 class TestPhysicalCorrectness:
-    def test_preserves_row_address_schema_and_field_ids(self, temp_dir):
+    def test_preserves_row_address_schema_and_field_ids(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "identity.lance"
         _write_products(path)
 
@@ -463,13 +480,13 @@ class TestPhysicalCorrectness:
         assert after_meta["_rowaddr"].tolist() == before_meta["_rowaddr"].tolist()
         assert after_meta["_fragid"].tolist() == before_meta["_fragid"].tolist()
 
-    def test_untouched_columns_keep_their_data_files(self, temp_dir):
+    def test_untouched_columns_keep_their_data_files(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "files.lance"
         _write_products(path, rows=4, max_rows_per_file=4)
 
-        def files_by_field(ds):
+        def files_by_field(ds: lance.LanceDataset) -> dict[int, str]:
             fragment = ds.get_fragments()[0]
-            mapping = {}
+            mapping: dict[int, str] = {}
             for data_file in fragment.data_files():
                 for field_id in data_file.fields:
                     mapping[field_id] = data_file.path
@@ -493,7 +510,7 @@ class TestPhysicalCorrectness:
         for name in ("id", "status"):
             assert after[field_ids[name]] == before[field_ids[name]]
 
-    def test_time_travel_reads_pre_update_values(self, temp_dir):
+    def test_time_travel_reads_pre_update_values(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "time_travel.lance"
         _write_products(path, rows=4)
         read_version = lance.dataset(str(path)).version
@@ -510,7 +527,7 @@ class TestPhysicalCorrectness:
         assert old["price"].to_pylist() == [10.0, 20.0, 30.0, 40.0]
         assert new["price"].to_pylist() == [20.0, 40.0, 60.0, 80.0]
 
-    def test_repeated_updates_stack(self, temp_dir):
+    def test_repeated_updates_stack(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "repeated.lance"
         _write_products(path, rows=4)
 
@@ -525,7 +542,7 @@ class TestPhysicalCorrectness:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [80.0, 160.0, 240.0, 320.0]
 
-    def test_deleted_rows_do_not_misalign_columns(self, temp_dir):
+    def test_deleted_rows_do_not_misalign_columns(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "deleted.lance"
         _write_products(path, rows=6, max_rows_per_file=3)
 
@@ -543,7 +560,9 @@ class TestPhysicalCorrectness:
         assert got["id"] == [1, 3, 4, 5, 6]
         assert got["price"] == [20.0, 60.0, 80.0, 100.0, 120.0]
 
-    def test_filter_with_delete_vector_updates_only_matching_live_rows(self, temp_dir):
+    def test_filter_with_delete_vector_updates_only_matching_live_rows(
+        self, temp_dir: str
+    ) -> None:
         """A filtered rewrite must preserve deleted and untouched fragment rows."""
         path = Path(temp_dir) / "deleted_filtered.lance"
         _write_products(path, rows=6, max_rows_per_file=3)
@@ -568,13 +587,15 @@ class TestPhysicalCorrectness:
 
 
 class TestTransactionBehavior:
-    def test_commits_a_rewrite_columns_update(self, temp_dir):
+    def test_commits_a_rewrite_columns_update(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "txn_shape.lance"
         _write_products(path, rows=4)
 
         before_ds = lance.dataset(str(path))
         read_version = before_ds.version
-        price_field_id = before_ds.lance_schema.field("price").id()
+        # ``LanceSchema.field()`` is missing from pylance's schema stub.
+        price_field = before_ds.lance_schema.field("price")  # type: ignore[attr-defined]
+        price_field_id = price_field.id()
 
         result = lr.update_columns(
             str(path),
@@ -584,12 +605,13 @@ class TestTransactionBehavior:
         )
 
         txn = lance.dataset(str(path)).read_transaction(result.version)
-        assert type(txn.operation).__name__ == "Update"
+        assert txn is not None
+        assert isinstance(txn.operation, lance.LanceOperation.Update)
         assert txn.operation.update_mode == "rewrite_columns"
         assert list(txn.operation.fields_modified) == [price_field_id]
         assert txn.read_version == read_version
 
-    def test_stale_snapshot_commit_fails(self, temp_dir):
+    def test_stale_snapshot_commit_fails(self, temp_dir: str) -> None:
         """A stale Update must never be rebased onto a newer conflicting version."""
         from lance.dataset import Transaction
 
@@ -625,7 +647,7 @@ class TestTransactionBehavior:
                 max_retries=5,
             )
 
-    def test_concurrent_append_is_safely_rebased(self, temp_dir):
+    def test_concurrent_append_is_safely_rebased(self, temp_dir: str) -> None:
         """An Append landing mid-flight must be rebased over, not rejected.
 
         The append has to happen *after* the fragment rewrite and *before* the
@@ -679,13 +701,15 @@ class TestTransactionBehavior:
         # through untouched.
         assert got["price"] == [-1.0, -1.0, -1.0, -1.0, 9.0]
         # A caller-fixed UUID also survives Lance's conflict-checked rebase.
-        assert committed.read_transaction(committed.version).uuid == txn_uuid
+        committed_txn = committed.read_transaction(committed.version)
+        assert committed_txn is not None
+        assert committed_txn.uuid == txn_uuid
 
 
 class TestResourceOptions:
     """The fragment-local Ray task must receive the tuning parameters."""
 
-    def test_ray_remote_args_are_applied(self, temp_dir):
+    def test_ray_remote_args_are_applied(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "remote_args.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
 
@@ -700,7 +724,7 @@ class TestResourceOptions:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [20.0, 40.0, 60.0, 80.0]
 
-    def test_concurrency_and_batch_size_are_applied(self, temp_dir):
+    def test_concurrency_and_batch_size_are_applied(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "concurrency.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
 
@@ -727,7 +751,7 @@ class TestNestedFieldIds:
     column fail — and only after the whole distributed pass has completed.
     """
 
-    def test_updates_a_list_column(self, temp_dir):
+    def test_updates_a_list_column(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "list_col.lance"
         list_type = pa.list_(pa.int32())
         table = pa.table(
@@ -739,12 +763,9 @@ class TestNestedFieldIds:
         lance.write_dataset(table, str(path), max_rows_per_file=2)
 
         def append_marker(batch: pa.RecordBatch) -> pa.RecordBatch:
+            tags = cast("list[list[int]]", batch["tags"].to_pylist())
             return _record_batch(
-                {
-                    "tags": pa.array(
-                        [v + [99] for v in batch["tags"].to_pylist()], list_type
-                    )
-                }
+                {"tags": pa.array([v + [99] for v in tags], list_type)}
             )
 
         result = lr.update_columns(
@@ -758,7 +779,7 @@ class TestNestedFieldIds:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["tags"] == [[1, 2, 99], [3, 99], [4, 5, 6, 99], [99]]
 
-    def test_fields_modified_uses_leaf_ids(self, temp_dir):
+    def test_fields_modified_uses_leaf_ids(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "leaf_ids.lance"
         list_type = pa.list_(pa.int32())
         table = pa.table(
@@ -770,7 +791,8 @@ class TestNestedFieldIds:
         lance.write_dataset(table, str(path), max_rows_per_file=2)
 
         ds = lance.dataset(str(path))
-        tags = ds.lance_schema.field("tags")
+        # ``LanceSchema.field()`` is missing from pylance's schema stub.
+        tags = ds.lance_schema.field("tags")  # type: ignore[attr-defined]
         leaf_ids = [child.id() for child in tags.children()]
         # Precondition for this test to mean anything.
         assert leaf_ids and leaf_ids != [tags.id()]
@@ -785,9 +807,11 @@ class TestNestedFieldIds:
         )
 
         txn = lance.dataset(str(path)).read_transaction(result.version)
+        assert txn is not None
+        assert isinstance(txn.operation, lance.LanceOperation.Update)
         assert list(txn.operation.fields_modified) == leaf_ids
 
-    def test_updates_a_fixed_size_list_column(self, temp_dir):
+    def test_updates_a_fixed_size_list_column(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "vector_col.lance"
         vec_type = pa.list_(pa.float32(), 2)
         table = pa.table(
@@ -838,8 +862,13 @@ class TestDriverSideRejection:
         ],
     )
     def test_rejects_without_touching_the_dataset(
-        self, temp_dir, columns, read_columns, exc, match
-    ):
+        self,
+        temp_dir: str,
+        columns: Any,
+        read_columns: Optional[list[str]],
+        exc: type[Exception],
+        match: str,
+    ) -> None:
         path = Path(temp_dir) / "untouched.lance"
         _write_products(path, rows=4, max_rows_per_file=2)
         before = _dataset_fingerprint(path)
@@ -854,7 +883,9 @@ class TestDriverSideRejection:
 
         assert _dataset_fingerprint(path) == before
 
-    def test_stable_row_ids_rejected_without_touching_the_dataset(self, temp_dir):
+    def test_stable_row_ids_rejected_without_touching_the_dataset(
+        self, temp_dir: str
+    ) -> None:
         path = Path(temp_dir) / "stable_untouched.lance"
         table = pa.table(
             {
@@ -876,7 +907,7 @@ class TestDriverSideRejection:
 
 
 class TestRejectedScenarios:
-    def test_rejects_struct_target_column(self, temp_dir):
+    def test_rejects_struct_target_column(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "struct_col.lance"
         struct_type = pa.struct([pa.field("v", pa.int32())])
         table = pa.table(
@@ -894,7 +925,7 @@ class TestRejectedScenarios:
                 columns=["meta"],
             )
 
-    def test_requires_uri_or_namespace(self, temp_dir):
+    def test_requires_uri_or_namespace(self, temp_dir: str) -> None:
         with pytest.raises(ValueError, match="Must provide either 'uri'"):
             lr.update_columns(
                 transform=_double_price,
@@ -904,19 +935,18 @@ class TestRejectedScenarios:
 
 class TestBlobInput:
     @staticmethod
-    def _write_blob_dataset(path, rows=4):
+    def _write_blob_dataset(path: Path, rows: int = 4) -> pa.Table:
         blob_field = pa.field(
             "payload",
             pa.large_binary(),
             metadata={"lance-encoding:blob": "true"},
         )
-        schema = pa.schema(
-            [
-                pa.field("id", pa.int32()),
-                blob_field,
-                pa.field("size", pa.int64()),
-            ]
-        )
+        schema_fields: list[pa.Field[Any]] = [
+            pa.field("id", pa.int32()),
+            blob_field,
+            pa.field("size", pa.int64()),
+        ]
+        schema = pa.schema(schema_fields)
         table = pa.table(
             {
                 "id": pa.array(list(range(rows)), pa.int32()),
@@ -930,7 +960,9 @@ class TestBlobInput:
         lance.write_dataset(table, str(path), max_rows_per_file=2)
         return table
 
-    def test_legacy_blob_can_be_read_to_compute_a_plain_column(self, temp_dir):
+    def test_legacy_blob_can_be_read_to_compute_a_plain_column(
+        self, temp_dir: str
+    ) -> None:
         path = Path(temp_dir) / "blob_input.lance"
         self._write_blob_dataset(path)
 
@@ -950,7 +982,7 @@ class TestBlobInput:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["size"] == [1, 2, 3, 4]
 
-    def test_default_projection_excludes_blob_columns(self, temp_dir):
+    def test_default_projection_excludes_blob_columns(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "blob_default.lance"
         self._write_blob_dataset(path)
 
@@ -975,7 +1007,7 @@ class TestBlobInput:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["size"] == [2, 2, 2, 2]
 
-    def test_rejects_blob_output(self, temp_dir):
+    def test_rejects_blob_output(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "blob_output.lance"
         self._write_blob_dataset(path)
 
@@ -987,7 +1019,9 @@ class TestBlobInput:
                 read_columns=["payload"],
             )
 
-    def test_blob_v2_column_is_readable_and_excluded_by_default(self, temp_dir):
+    def test_blob_v2_column_is_readable_and_excluded_by_default(
+        self, temp_dir: str
+    ) -> None:
         blob_field = pytest.importorskip("lance").blob_field
         blob_array = pytest.importorskip("lance").blob_array
 
@@ -1040,7 +1074,7 @@ class TestBlobInput:
         )
         assert lance.dataset(str(path)).to_table().to_pydict()["size"] == [2, 4]
 
-    def test_unrelated_blob_column_does_not_block_updates(self, temp_dir):
+    def test_unrelated_blob_column_does_not_block_updates(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "blob_unrelated.lance"
         self._write_blob_dataset(path)
 
