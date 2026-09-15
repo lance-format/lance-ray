@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
 import inspect
+import io
+import os
 import pickle
+import tempfile
 import warnings
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from itertools import chain
@@ -35,6 +38,28 @@ from .utils import (
     normalize_initial_bases,
 )
 
+_WRITE_REPLAY_MEMORY_THRESHOLD_ENV = "LANCE_RAY_WRITE_REPLAY_MEMORY_THRESHOLD_BYTES"
+_DEFAULT_WRITE_REPLAY_MEMORY_THRESHOLD_BYTES = 128 * 1024 * 1024
+
+
+def _write_replay_memory_threshold() -> int:
+    value = os.environ.get(_WRITE_REPLAY_MEMORY_THRESHOLD_ENV)
+    if value is None:
+        return _DEFAULT_WRITE_REPLAY_MEMORY_THRESHOLD_BYTES
+    try:
+        threshold = int(value)
+    except ValueError:
+        raise ValueError(
+            f"{_WRITE_REPLAY_MEMORY_THRESHOLD_ENV} must be a non-negative integer "
+            "number of bytes"
+        ) from None
+    if threshold < 0:
+        raise ValueError(
+            f"{_WRITE_REPLAY_MEMORY_THRESHOLD_ENV} must be a non-negative integer "
+            "number of bytes"
+        )
+    return threshold
+
 
 def write_fragment(
     stream: Iterable[Union[pa.Table, "pd.DataFrame", dict[str, Any]]],
@@ -59,6 +84,17 @@ def write_fragment(
     table_id: Optional[list[str]] = None,
     retry_params: Optional[dict[str, Any]] = None,
 ) -> list[tuple["FragmentMetadata", pa.Schema]]:
+    """Write uncommitted fragments, checking their total row count against input.
+
+    Without ``retry_params``, write once using a streaming reader. When multiple
+    attempts are allowed, spool this call's input to a temporary Arrow IPC stream
+    before writing, then open a fresh reader for each attempt. The stream stays
+    in memory up to 128 MiB by default, then rolls entirely to a temporary file.
+    ``LANCE_RAY_WRITE_REPLAY_MEMORY_THRESHOLD_BYTES`` overrides this threshold
+    per call; zero forces disk immediately. Invalid values raise ``ValueError``
+    only for nonempty, retry-enabled calls. This is not a peak memory limit:
+    writes can overshoot it, and source data and Arrow buffers need extra memory.
+    """
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
     from lance.fragment import DEFAULT_MAX_BYTES_PER_FILE, write_fragments
@@ -86,16 +122,19 @@ def write_fragment(
 
     stream = chain([first], stream_iter)
 
+    input_rows = 0
+
     def record_batch_converter() -> Iterator[pa.RecordBatch]:
+        nonlocal input_rows
         for block in stream:
             tbl = pd_to_arrow(block, schema)
-            yield from tbl.to_batches()
+            for batch in tbl.to_batches():
+                input_rows += batch.num_rows
+                yield batch
 
     max_bytes_per_file = (
         DEFAULT_MAX_BYTES_PER_FILE if max_bytes_per_file is None else max_bytes_per_file
     )
-
-    reader = pa.RecordBatchReader.from_batches(schema, record_batch_converter())
 
     # Use default retry params if not provided
     if retry_params is None:
@@ -121,7 +160,7 @@ def write_fragment(
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
     )
 
-    def _write_fragments() -> list["FragmentMetadata"]:
+    def _write_fragments(reader: pa.RecordBatchReader) -> list["FragmentMetadata"]:
         # ``write_fragments`` is overloaded on ``return_transaction``. The
         # version-dependent kwargs are assembled dynamically, which makes mypy
         # pick the ``return_transaction=True`` overload; ``return_transaction``
@@ -143,7 +182,47 @@ def write_fragment(
             **optional_write_kwargs,
         )
 
-    fragments = call_with_retry(_write_fragments, **retry_params)
+    if retry_params.get("max_attempts", 10) > 1:
+        # A failed write can consume part or all of its reader. Spool the input
+        # once so every attempt replays the same batches from the beginning.
+        threshold = _write_replay_memory_threshold()
+        with tempfile.SpooledTemporaryFile(max_size=threshold, mode="w+b") as replay:
+            # max_size=0 disables automatic rollover in the standard library.
+            if threshold == 0:
+                replay.rollover()
+            # Python 3.10's spool is file-like but does not inherit IOBase,
+            # which the Arrow stubs require. Arrow accepts it at runtime.
+            replay_stream = cast(io.IOBase, replay)
+            with pa.ipc.new_stream(replay_stream, schema) as writer:
+                for batch in record_batch_converter():
+                    writer.write_batch(batch)
+
+            def write_once() -> list["FragmentMetadata"]:
+                replay.seek(0)
+                with pa.ipc.open_stream(replay_stream) as reader:
+                    return _write_fragments(reader)
+
+            fragments = call_with_retry(write_once, **retry_params)
+    else:
+        with pa.RecordBatchReader.from_batches(
+            schema, record_batch_converter()
+        ) as reader:
+
+            def write_once_streaming() -> list["FragmentMetadata"]:
+                return _write_fragments(reader)
+
+            fragments = call_with_retry(write_once_streaming, **retry_params)
+            # Include any unexpected unread remainder in the input row count
+            # so an early return from the writer cannot hide missing rows.
+            for _ in reader:
+                pass
+
+    fragment_rows = sum(fragment.num_rows for fragment in fragments)
+    if fragment_rows != input_rows:
+        raise RuntimeError(
+            "Lance fragment write row count mismatch: "
+            f"expected {input_rows}, wrote {fragment_rows}"
+        )
     return [(fragment, schema) for fragment in fragments]
 
 
@@ -325,6 +404,16 @@ class LanceFragmentWriter:
         Retry parameters for write operations. Default is None.
         If provided, should contain keys like 'description', 'match',
         'max_attempts', and 'max_backoff_s'.
+        None means a single streaming attempt. Allowing multiple attempts spools
+        the complete input of each write call to a temporary Arrow IPC stream,
+        even if the first attempt succeeds. The default memory threshold is
+        128 MiB, configurable per call with the worker environment variable
+        LANCE_RAY_WRITE_REPLAY_MEMORY_THRESHOLD_BYTES (zero forces disk).
+        Exceeding the threshold moves the entire stream to the worker's
+        temporary directory (for example, configured with TMPDIR). Budget for
+        concurrent writes, threshold overshoot, source data, and Arrow buffers;
+        this is not a peak memory limit. max_bytes_per_file does not limit
+        replay storage. See the writing guide for Ray environment propagation.
 
     """
 
