@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Iterator
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast, overload
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -290,18 +290,78 @@ def _read_fragments_with_retry(
     )
 
 
+def blob_field_kind(f: pa.Field[Any]) -> Optional[str]:
+    """Detect Lance blob columns.
+
+    Returns:
+        "v2" for blob v2 extension columns,
+        "legacy" for legacy metadata-based blob columns,
+        or None if the field is not a blob.
+    """
+    field_type = f.type
+
+    # Blob v2: extension type `lance.blob.v2`
+    if isinstance(field_type, pa.ExtensionType):
+        ext_name = getattr(field_type, "extension_name", None)
+        if ext_name == "lance.blob.v2":
+            return "v2"
+
+    # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
+    try:
+        is_large_bin = field_type == pa.large_binary()
+    except Exception:
+        is_large_bin = False
+    if not is_large_bin:
+        return None
+
+    meta = f.metadata
+    if meta is None:
+        return None
+
+    # pyarrow may store metadata keys/values as str
+    if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
+        meta.get(b"lance-encoding:blob") == b"true"
+    ):
+        return "legacy"
+
+    return None
+
+
+@overload
 def _read_fragments(
     fragment_ids: list[int],
     lance_ds: lance.LanceDataset,
     scanner_options: dict[str, Any],
     with_metadata: bool = False,
-) -> Iterator[pa.Table]:
+    as_record_batches: Literal[False] = False,
+) -> Iterator[pa.Table]: ...
+
+
+@overload
+def _read_fragments(
+    fragment_ids: list[int],
+    lance_ds: lance.LanceDataset,
+    scanner_options: dict[str, Any],
+    with_metadata: bool = False,
+    *,
+    as_record_batches: Literal[True],
+) -> Iterator[pa.RecordBatch]: ...
+
+
+def _read_fragments(
+    fragment_ids: list[int],
+    lance_ds: lance.LanceDataset,
+    scanner_options: dict[str, Any],
+    with_metadata: bool = False,
+    as_record_batches: bool = False,
+) -> Iterator[pa.Table | pa.RecordBatch]:
     """Read Lance fragments in batches.
 
     This enhanced reader detects Lance blob-encoded columns and reconstructs
     raw bytes using the :meth:`LanceDataset.take_blobs` API, returning
     :class:`pyarrow.LargeBinaryArray` columns instead of the default
-    struct-based descriptors.
+    struct-based descriptors. ``as_record_batches`` is for callers, such as
+    ``update_columns``, that keep the scanner's batch-native execution model.
 
     Row ordering is preserved by using per-batch row IDs.
 
@@ -321,41 +381,7 @@ def _read_fragments(
     # Map column name -> blob kind ("legacy" or "v2")
     blob_columns: dict[str, str] = {}
 
-    def _is_blob_field(f: pa.Field[Any]) -> Optional[str]:
-        """Detect Lance blob columns.
-
-        Returns:
-            "v2" for blob v2 extension columns,
-            "legacy" for legacy metadata-based blob columns,
-            or None if the field is not a blob.
-        """
-        field_type = f.type
-
-        # Blob v2: extension type `lance.blob.v2`
-        if isinstance(field_type, pa.ExtensionType):
-            ext_name = getattr(field_type, "extension_name", None)
-            if ext_name == "lance.blob.v2":
-                return "v2"
-
-        # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
-        try:
-            is_large_bin = field_type == pa.large_binary()
-        except Exception:
-            is_large_bin = False
-        if not is_large_bin:
-            return None
-
-        meta = f.metadata
-        if meta is None:
-            return None
-
-        # pyarrow may store metadata keys/values as str
-        if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
-            meta.get(b"lance-encoding:blob") == b"true"
-        ):
-            return "legacy"
-
-        return None
+    _is_blob_field = blob_field_kind
 
     # Build list of blob columns to reconstruct, honoring column projection
     ds_field_names = ds_schema.names
@@ -385,24 +411,25 @@ def _read_fragments(
     for batch in scanner.to_reader():
         # Fast path: no blob columns requested in this scan
         if not blob_columns:
-            table = pa.Table.from_batches([batch])
-
-            if with_metadata and "_rowaddr" in table.column_names:
-                rowaddr_col = table.column("_rowaddr")
+            if with_metadata and "_rowaddr" in batch.column_names:
+                batch_rowaddrs = batch.column("_rowaddr")
                 # pyarrow-stubs has no overload for shifting an array by a
                 # plain Python int, and types the result as a scalar.
-                fragid_values = cast(
-                    "pa.ChunkedArray[Any]",
-                    pc.cast(pc.shift_right(rowaddr_col, 32), pa.uint64()),
+                batch_fragids = cast(
+                    "pa.Array[Any]",
+                    pc.cast(pc.shift_right(batch_rowaddrs, 32), pa.uint64()),
                 )
-                table = table.append_column("_fragid", fragid_values)
+                batch = batch.append_column("_fragid", batch_fragids)
 
             if not with_metadata:
                 for col in ("_rowaddr", "_fragid"):
-                    if col in table.column_names:
-                        table = table.drop_columns([col])
+                    if col in batch.column_names:
+                        batch = batch.drop_columns([col])
 
-            yield table
+            if as_record_batches:
+                yield batch
+            else:
+                yield pa.Table.from_batches([batch])
             continue
 
         # Build a table so we can manipulate columns easily
@@ -567,4 +594,9 @@ def _read_fragments(
                 if col in table.column_names:
                     table = table.drop_columns([col])
 
-        yield table
+        if as_record_batches:
+            # Blob replacement currently uses Table column operations. Convert
+            # back before returning so callers can retain a RecordBatch stream.
+            yield table.combine_chunks().to_batches()[0]
+        else:
+            yield table
