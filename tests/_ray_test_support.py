@@ -6,6 +6,7 @@ inside Ray worker processes via ``runtime_env.worker_process_setup_hook``.
 
 from __future__ import annotations
 
+import importlib
 import threading
 from typing import Any, Optional
 
@@ -23,7 +24,12 @@ def patch_memory_profiler() -> None:
     except ImportError:
         return
 
-    original_init = ray_data_util.MemoryProfiler.__init__
+    memory_profiler = getattr(ray_data_util, "MemoryProfiler", None)
+    if memory_profiler is None:
+        # Ray 2.41-2.44 do not create this profiler, so no patch is needed.
+        return
+
+    original_init = memory_profiler.__init__
 
     def safe_init(self: Any, poll_interval_s: Optional[float]) -> None:
         self._poll_interval_s = poll_interval_s
@@ -38,13 +44,13 @@ def patch_memory_profiler() -> None:
 
     # Monkey-patching methods is the point of this module, so the
     # ``method-assign`` guard does not apply here.
-    ray_data_util.MemoryProfiler.__init__ = safe_init  # type: ignore[method-assign]
-    if hasattr(ray_data_util.MemoryProfiler, "_can_estimate_uss"):
+    memory_profiler.__init__ = safe_init
+    if hasattr(memory_profiler, "_can_estimate_uss"):
 
         def _cannot_estimate_uss(self: Any) -> bool:
             return False
 
-        ray_data_util.MemoryProfiler._can_estimate_uss = _cannot_estimate_uss  # type: ignore[method-assign,assignment]
+        memory_profiler._can_estimate_uss = _cannot_estimate_uss
 
 
 def patch_psutil_for_containers() -> None:
@@ -62,11 +68,16 @@ def patch_psutil_for_containers() -> None:
       — same call-chain as above.
     """
     try:
-        from ray._private.runtime_env import uv_runtime_env_hook
+        uv_runtime_env_hook = importlib.import_module(
+            "ray._private.runtime_env.uv_runtime_env_hook"
+        )
     except ImportError:
         return
 
-    original_fn = uv_runtime_env_hook._get_uv_run_cmdline
+    original_fn = getattr(uv_runtime_env_hook, "_get_uv_run_cmdline", None)
+    if original_fn is None:
+        # Older Ray releases have the module but not the uv hook being patched.
+        return
 
     def _safe_get_uv_run_cmdline() -> Any:
         try:
@@ -74,7 +85,7 @@ def patch_psutil_for_containers() -> None:
         except Exception:
             return None
 
-    uv_runtime_env_hook._get_uv_run_cmdline = _safe_get_uv_run_cmdline
+    uv_runtime_env_hook._get_uv_run_cmdline = _safe_get_uv_run_cmdline  # type: ignore[attr-defined]
 
     _patch_worker_log_offset()
 

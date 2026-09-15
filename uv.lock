@@ -514,6 +514,8 @@ source = { editable = "." }
 dependencies = [
     { name = "lance-namespace" },
     { name = "more-itertools", marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "packaging" },
     { name = "pyarrow" },
     { name = "pylance" },
@@ -548,6 +550,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.0.0" },
     { name = "more-itertools", marker = "python_full_version < '3.12'", specifier = ">=2.6.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.3.0" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "packaging" },
     { name = "pandas-stubs", marker = "extra == 'dev'" },
     { name = "pyarrow", specifier = ">=17.0.0" },

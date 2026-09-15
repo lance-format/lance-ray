@@ -26,6 +26,7 @@ dependencies = [
     "ray[data]>=2.41.0",
     "pylance>=10.0.0b7",
     "lance-namespace",
+    "numpy>=1.26",
     "packaging",
     "pyarrow>=17.0.0",
     "more_itertools>=2.6.0; python_version<'3.12'",
