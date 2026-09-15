@@ -246,7 +246,7 @@ def vector_search(
 |-----------|------|-------------|
 | `uri` | `str` or `lance.LanceDataset`, optional | Lance dataset object, or its URI. Either `uri` OR (`namespace_impl` + `table_id`) must be provided when using URI mode. If a `LanceDataset` object is provided, namespace parameters are ignored and workers reopen the same dataset URI/version. |
 | `nearest` | `dict[str, Any]` | Lance vector search options. Must include `column`, `q`, and `k`. Other Lance nearest options such as `minimum_nprobes`, `maximum_nprobes`, `refine_factor`, and distance range are forwarded to every worker. Lance-Ray raises worker-side `k` to at least `k * oversample_factor` before global merge. |
-| `index_name` | `str`, optional | Vector index name to use. If provided and not found, `vector_search()` raises `ValueError` instead of silently falling back. If omitted, Lance-Ray uses the first vector index covering `nearest["column"]`; if none exists, the search uses flat fallback plans unless `fast_search=True`. |
+| `index_name` | `str`, optional | Vector index name to use. If provided and not found, `vector_search()` raises `ValueError` instead of silently falling back. If omitted, Lance-Ray uses the first vector index covering `nearest["column"]` with a compatible metric; if none exists, the search uses flat fallback plans unless `fast_search=True`. |
 | `columns` | `list[str]` or `dict[str, str]`, optional | Projection passed to the Lance scanner. When a list is provided and `_distance` is missing, Lance-Ray appends `_distance` automatically because the driver needs it for global top-k merge. |
 | `filter` | `Any`, optional | Filter passed unchanged to every worker scanner. |
 | `storage_options` | `Dict[str, Any]`, optional | Storage options for the dataset. These are merged with namespace storage options when available. |
@@ -254,24 +254,196 @@ def vector_search(
 | `namespace_impl` | `str`, optional | Namespace implementation type, such as `"dir"` or `"rest"`. |
 | `namespace_properties` | `Dict[str, str]`, optional | Namespace connection properties used with `namespace_impl`. |
 | `table_id` | `list[str]`, optional | Table identifier used with namespace parameters. Must be provided together with `namespace_impl` in namespace mode. |
-| `num_workers` | `int`, optional | Maximum number of Ray Pool workers to use. Lance-Ray may create fewer worker tasks when there are fewer search plans. |
-| `ray_remote_args` | `Dict[str, Any]`, optional | Ray task options for Pool workers, such as `num_cpus` or custom resources. |
-| `oversample_factor` | `float`, optional | Multiplier for local worker candidates. Each worker returns at least `nearest["k"] * oversample_factor` rows before driver-side merge. Must be greater than or equal to 1. |
+| `num_workers` | `int`, optional | Maximum number of Ray actors to use. Lance-Ray may create fewer actors when there are fewer search plans. |
+| `ray_remote_args` | `Dict[str, Any]`, optional | Ray actor options, such as `num_cpus` or custom resources. |
+| `oversample_factor` | `float`, optional | Multiplier for local worker candidates. Each worker requests at least `nearest["k"] * oversample_factor` candidates before driver-side merge. Must be greater than or equal to 1. |
 | `include_unindexed` | `bool`, optional | Include fragments not covered by vector index segments using separate flat-search fallback plans. Fallback plans use regular fragment scans and compute vector distance in Lance-Ray. Ignored when `fast_search=True`. |
 | `fast_search` | `bool`, optional | Search only indexed data. When enabled, Lance-Ray does not schedule flat-search fallback plans for fragments not covered by vector index segments. |
 | `analyze_plan` | `bool`, optional | If `True`, execute `LanceScanner.analyze_plan()` for each planned shard and return runtime metrics as a string. This skips Lance-Ray's fallback distance computation and global top-k merge, but still executes the underlying scanners. |
-| `scanner_options` | `Dict[str, Any]`, optional | Extra Lance scanner options, such as `batch_size`, `prefilter`, `with_row_id`, or `late_materialization`. Lance-Ray manages `nearest`, `fragments`, `index_segments`, `fast_search`, `limit`, and `offset` internally, so those options cannot be supplied here. |
+| `scanner_options` | `Dict[str, Any]`, optional | Extra Lance scanner options, such as `batch_size`, `prefilter`, `with_row_id`, or `late_materialization`. Lance-Ray manages `nearest`, `fragments`, `index_segments`, `fast_search`, `limit`, and `offset` internally, so those options cannot be supplied here. Disabling prefilter is not supported for search results. |
 
 #### Return Value
 
-The function returns a `pyarrow.Table` containing the global top-k rows sorted by `_distance`. If `analyze_plan=True`, it returns a `str` containing one Lance scanner analysis section per planned shard.
+The function returns a `pyarrow.Table` containing the global top-k rows for each query. Single-query results omit `query_index`; explicit batches include a non-null Int64 `query_index` starting at zero for this call. Results are sorted by `query_index` (for batches), `_distance`, and `_rowid`; the internal `_rowid` is removed unless requested. Each query returns at most k rows. If `analyze_plan=True`, the function returns a `str` containing one Lance scanner analysis section per planned shard.
 
-Indexed and unindexed candidates use the same distance convention as Lance:
-L2 is squared Euclidean distance (`sum((q - v) ** 2)`), cosine is
-`1 - cosine_similarity(q, v)`, and dot is `1 - dot(q, v)`. All are sorted in
-ascending order. If `nearest["metric"]` is omitted, flat fallback plans use the
-selected index's metric; when no index exists, the default is L2. Approximate
-index scores can still differ from exact flat-search distances.
+Each ordinary call creates and closes a short-lived search instance using the
+same execution core as `open_vector_search()`. Use `open_vector_search()` to reuse
+actors and Lance caches across requests; ordinary `vector_search()` calls no
+longer reuse the global Ray Pool. `analyze_plan=True` retains the existing
+scanner-analysis path.
+
+### Reusable Vector Search
+
+`open_vector_search()` creates a long-lived search instance that pins the dataset
+snapshot, vector column, metric, and selected index. Actors reuse their Lance
+Session, dataset, and index cache across requests. Lance-Ray does not depend on
+Ray Serve. Online services and offline jobs can be deployed separately while
+using the same execution core.
+
+#### Synchronous and Asynchronous Requests
+
+```python
+import lance_ray as lr
+
+with lr.open_vector_search(
+    "path/to/dataset.lance",
+    column="embedding",
+    metric="cosine",
+    max_concurrent_requests=4,
+    actor_options=lr.VectorSearchActorOptions(num_actors=4),
+) as search:
+    result = search.search(
+        query_vectors,
+        nearest={"k": 20, "nprobes": 16},
+        filter="category = 'books'",
+        columns=["id"],
+    )
+```
+
+Calls on the same instance can independently specify `k`, `nprobes`,
+`refine_factor`, filters, and projections. All queries within a call use the same
+parameters. `nearest` excludes `q`, `column`, and `metric`: the query is a separate
+call argument, while the instance supplies the column and metric.
+
+An online wrapper creates the instance at startup, awaits `search_async()` in its
+request handler, and awaits `aclose()` at shutdown. A request can complete without
+waiting for another request to arrive. The wrapper handles serialization of Arrow
+results into HTTP responses.
+
+```python
+# search is the long-lived instance created at service startup.
+async def handle_query(query_vectors, k):
+    return await search.search_async(
+        query_vectors,
+        nearest={"k": k, "nprobes": 16, "refine_factor": 2},
+        columns=["id"],
+    )
+
+async def shutdown():
+    await search.aclose()
+```
+
+Synchronous and asynchronous calls can originate from different threads or event
+loops and share the instance's request limit. The instance also supports
+`async with`, which waits for accepted requests to finish on exit.
+
+#### Offline Batch and Streaming Input
+
+```python
+with lr.open_vector_search(
+    "path/to/dataset.lance",
+    column="embedding",
+    max_concurrent_requests=4,
+) as search:
+    for result in search.map_batches(
+        query_batch_reader,
+        nearest={"k": 20, "nprobes": 16},
+        columns=["id"],
+    ):
+        write_results(result)
+```
+
+The input is an iterable, so the complete query set does not need to fit in memory.
+Each input batch produces one result table, delivered in input order. Empty input
+batches and batches with no matches produce empty tables. Reading the next input
+batch is independent of delivering completed results, so a blocked input source
+does not delay earlier results. Close the iterator when stopping consumption early:
+
+```python
+from contextlib import closing
+
+with closing(search.map_batches(query_batch_reader, nearest={"k": 20})) as results:
+    first_result = next(results)
+```
+
+Each input batch is copied before requesting the next item, so input sources may
+reuse a buffer. The caller manages blocking I/O in the input source. Closing the
+result iterator does not forcibly interrupt the source iterator's `next()` call.
+
+#### Input Shapes and query_index
+
+| Vector column | Input shape | Meaning |
+|---|---|---|
+| `FixedSizeList<D>` | `[D]` | One query |
+| `FixedSizeList<D>` | `[B,D]` | B queries |
+| `List<FixedSizeList<D>>` | `[M,D]` | One multivector query |
+| `List<FixedSizeList<D>>` | `[B,M,D]` or a sequence of `[Mi,D]` | B multivector queries |
+
+Inputs can be NumPy arrays, Python lists, or corresponding Arrow arrays or tables.
+An Arrow query table must contain exactly one vector column. The instance's column
+schema determines how to interpret two-dimensional input; no separate batch or
+multivector mode flag is needed.
+
+Results are flat `pyarrow.Table` objects. A single query omits `query_index`;
+an explicit batch includes it even when the batch contains only one query.
+The batch result's `query_index` is a non-null Int64 column. Numbering starts at
+zero for each independent call and accumulates across the complete input stream
+within one `map_batches()` call. Queries with no matches do not change subsequent
+query indices. A multivector index identifies the complete query, not an individual
+subvector. Each query returns at most k rows and may return fewer.
+
+Candidates are merged independently for each query and sorted by
+`query_index → _distance → _rowid`. The internal `_rowid` column is removed unless
+requested. `query_index` is reserved and cannot be used as a dataset or projection
+field name. Empty results retain the output schema for the request.
+
+#### Parameter Scope and Search Coverage
+
+| Parameter | Scope and semantics |
+|---|---|
+| `column`, `metric`, `index_name` | Fixed when opening the instance. If metric is omitted, use the selected index's metric, or L2 when no index exists. |
+| `branch` / `version` | Resolved and pinned at open time; mutually exclusive. An already checked-out dataset retains its snapshot. |
+| `storage_options`, namespace parameters, `base_store_params`, `block_size` | Dataset opening options passed to actors. |
+| `actor_options` | `VectorSearchActorOptions` configures actor count and resources, index and metadata cache sizes, and `prewarm_index`. |
+| `nearest` | Per-request PyLance options such as k, nprobes, refine_factor, distance_range, and use_index. |
+| `filter`, `columns` | Per-request scalar prefilter and projection. columns accepts a list or a dictionary of expressions. |
+| `fast_search` | Determines whether this request skips unindexed fragments. |
+| `scanner_options` | Additional scanner options. Cannot override nearest, fragments, index_segments, fast_search, limit, or offset. prefilter=False is unsupported. |
+
+| use_index (in nearest) | fast_search | Search coverage |
+|---|---|---|
+| True (default) | False (default) | Indexed data plus flat fallback over uncovered fragments |
+| True | True | Indexed data only; returns an empty table when no usable index exists |
+| False | False | Flat search over the entire snapshot, including indexed data |
+| False | True | Invalid parameter combination |
+
+All paths apply scalar prefiltering. L2 is squared Euclidean distance, cosine is
+`1 - cosine_similarity`, dot is `1 - dot`, and Hamming counts differing bits in
+packed bytes. Multivector search uses additive MaxSim distance. All distances are
+sorted in ascending order.
+
+ANN global Top-K merges the candidates returned by all shards. It does not
+guarantee exact Top-K over the entire dataset, and approximate index scores may
+differ from exact flat-search distances. `refine_factor` retains Lance Core's
+reranking semantics. `nprobes=N` is not equivalent to setting only
+`minimum_nprobes=N`: the latter sets a lower bound and allows more partitions to
+be searched.
+
+#### Concurrency Limits and Shutdown
+
+`max_concurrent_requests` defaults to 4 and is shared by all entry points. One
+search/search_async call, or one input batch in a stream, counts as one request.
+Requests wait when capacity is full. Completed streaming results and errors retain
+their capacity until delivered in order. Large batches are split internally along
+logical query boundaries, with chunks from different requests submitted in an
+interleaved order. Cross-request batching is not required.
+
+The request limit does not provide a strict memory or latency bound. A single call
+still holds its complete input and result, so callers should control batch and
+output sizes. This version does not impose byte or candidate-count quotas.
+
+If a required shard fails, the entire request fails; it does not return a successful
+result with missing shards. An ordinary query error affects only that request.
+Once a required actor is confirmed dead, the instance stops accepting new requests;
+the caller must close and reopen it. A streaming error stops iteration, while
+previously delivered results remain valid.
+
+Cancellation stops submission of subsequent chunks and attempts to cancel work
+already submitted. It does not kill shared actors or release capacity before the
+work actually finishes. `close()` / `aclose()` stop accepting new requests, wait for
+accepted requests to finish, and then release actors. Closing is idempotent.
+Lance-Ray does not add automatic recovery, retries, or a shutdown timeout.
+
 
 ## Examples
 
@@ -431,38 +603,6 @@ updated_dataset = lr.create_scalar_index(
    ray_remote_args={"num_cpus": 2, "resources": {"custom_resource": 1}}
 )
 ```
-
-### Reusing a Ray Pool
-
-Creating a Ray Pool can be expensive if you repeatedly run distributed vector searches in the same process.  You can explicitly initialize a process-wide Pool with `init_global_pool()`.  After that, Lance-Ray will reuse this global Pool for `vector_search()` calls instead of creating a new local Pool each time.
-
-Use this when the same driver process will call `vector_search()` multiple times in a serial workflow:
-
-```python
-import lance_ray as lr
-
-lr.init_global_pool(
-    processes=16,
-    ray_remote_args={"num_cpus": 2},
-)
-
-try:
-    results = lr.vector_search(
-        uri="path/to/dataset.lance",
-        nearest={"column": "vector", "q": query_vector, "k": 10},
-        num_workers=16,
-    )
-finally:
-    lr.clear_global_pool(close=True)
-```
-
-`init_global_pool()` is idempotent while a global Pool exists: later calls return the existing Pool instead of replacing it.  If a global Pool exists, `vector_search()` reuses it and does not close it after the operation.  In that case, the Pool's original `processes` and `ray_remote_args` control the workers; per-call `num_workers` and `ray_remote_args` are only used when Lance-Ray has to create a local Pool for that call.  Lance-Ray logs a warning when it can determine that the requested worker count differs from the configured global Pool size.
-
-Call `clear_global_pool(close=True)` when the driver is done with the shared Pool.  If you manage the Pool lifecycle yourself, use `set_global_pool(pool)` to register it and `clear_global_pool(close=False)` to clear Lance-Ray's reference without closing the Pool.
-
-The global Pool registry is protected for basic set/get/clear operations, but the intended usage is still a single driver process that reuses the Pool serially across operations.  Avoid concurrently mutating the global Pool while other threads are running Lance-Ray operations.
-
-The current global Pool integration is limited to `vector_search()`.  The same pattern can be applied to I/O, index building, and compaction in follow-up changes.
 
 ### Index Replacement Control
 
