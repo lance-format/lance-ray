@@ -52,6 +52,7 @@ def write_fragment(
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     initial_bases: Optional[list[Any]] = None,
     target_bases: Optional[list[str]] = None,
+    target_all_bases: Optional[bool] = None,
     external_blob_mode: Literal["reference", "ingest"] = "reference",
     allow_external_blob_outside_bases: bool = False,
     namespace_impl: Optional[str] = None,
@@ -116,6 +117,7 @@ def write_fragment(
     optional_write_kwargs = _get_optional_write_fragments_kwargs(
         write_fragments,
         target_bases=target_bases,
+        target_all_bases=target_all_bases,
         base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -151,6 +153,7 @@ def _get_optional_write_fragments_kwargs(
     write_fragments: Callable[..., Any],
     *,
     target_bases: Optional[list[str]],
+    target_all_bases: Optional[bool],
     base_store_params: Optional[dict[str, dict[str, Any]]],
     external_blob_mode: Literal["reference", "ingest"],
     allow_external_blob_outside_bases: bool,
@@ -159,6 +162,7 @@ def _get_optional_write_fragments_kwargs(
     params, allow_external_blob_outside_bases = _prepare_write_fragments_options(
         write_fragments,
         target_bases=target_bases,
+        target_all_bases=target_all_bases,
         base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -168,6 +172,9 @@ def _get_optional_write_fragments_kwargs(
 
     if "target_bases" in params and target_bases is not None:
         kwargs["target_bases"] = target_bases
+
+    if "target_all_bases" in params and target_all_bases is not None:
+        kwargs["target_all_bases"] = target_all_bases
 
     if "base_store_params" in params and base_store_params is not None:
         kwargs["base_store_params"] = base_store_params
@@ -184,6 +191,7 @@ def _get_optional_write_fragments_kwargs(
 def prepare_fragment_write_options(
     *,
     target_bases: Optional[list[str]] = None,
+    target_all_bases: Optional[bool] = None,
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     external_blob_mode: Literal["reference", "ingest"],
     allow_external_blob_outside_bases: bool,
@@ -192,6 +200,7 @@ def prepare_fragment_write_options(
     """Validate fragment write options and return normalized allow flag."""
     if (
         target_bases is None
+        and target_all_bases is None
         and base_store_params is None
         and external_blob_mode == "reference"
         and not allow_external_blob_outside_bases
@@ -203,6 +212,7 @@ def prepare_fragment_write_options(
     _, allow_external_blob_outside_bases = _prepare_write_fragments_options(
         write_fragments,
         target_bases=target_bases,
+        target_all_bases=target_all_bases,
         base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -215,6 +225,7 @@ def _prepare_write_fragments_options(
     write_fragments: Callable[..., Any],
     *,
     target_bases: Optional[list[str]],
+    target_all_bases: Optional[bool],
     base_store_params: Optional[dict[str, dict[str, Any]]],
     external_blob_mode: Literal["reference", "ingest"],
     allow_external_blob_outside_bases: bool,
@@ -224,6 +235,9 @@ def _prepare_write_fragments_options(
 
     if target_bases is not None and "target_bases" not in params:
         raise _unsupported_write_fragments_option_error("target_bases")
+
+    if target_all_bases is not None and "target_all_bases" not in params:
+        raise _unsupported_write_fragments_option_error("target_all_bases")
 
     if base_store_params is not None and "base_store_params" not in params:
         raise _unsupported_write_fragments_option_error("base_store_params")
@@ -304,6 +318,10 @@ class LanceFragmentWriter:
         References to base paths where data should be written. Each string
         is resolved by matching base name or base path URI from registered
         bases.
+    target_all_bases : bool, optional
+        Select all registered bases, including primary storage when True and
+        excluding it when False. None preserves the default. Mutually exclusive
+        with non-empty target_bases. Round-robin restarts on each invocation.
     base_store_params : dict, optional
         Runtime-only storage options keyed by registered base path URI.
     external_blob_mode : {"reference", "ingest"}, default "reference"
@@ -346,6 +364,7 @@ class LanceFragmentWriter:
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
         target_bases: Optional[list[str]] = None,
+        target_all_bases: Optional[bool] = None,
         external_blob_mode: Literal["reference", "ingest"] = "reference",
         allow_external_blob_outside_bases: bool = False,
         namespace_impl: Optional[str] = None,
@@ -365,6 +384,7 @@ class LanceFragmentWriter:
 
         allow_external_blob_outside_bases = prepare_fragment_write_options(
             target_bases=target_bases,
+            target_all_bases=target_all_bases,
             base_store_params=base_store_params,
             external_blob_mode=external_blob_mode,
             allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -384,6 +404,7 @@ class LanceFragmentWriter:
         self.base_store_params = base_store_params
         self.initial_bases = normalize_initial_bases(initial_bases)
         self.target_bases = target_bases
+        self.target_all_bases = target_all_bases
         self.external_blob_mode = external_blob_mode
         self.allow_external_blob_outside_bases = allow_external_blob_outside_bases
         self.namespace_impl = namespace_impl
@@ -438,6 +459,7 @@ class LanceFragmentWriter:
             base_store_params=self.base_store_params,
             initial_bases=self.initial_bases,
             target_bases=self.target_bases,
+            target_all_bases=self.target_all_bases,
             external_blob_mode=self.external_blob_mode,
             allow_external_blob_outside_bases=self.allow_external_blob_outside_bases,
             namespace_impl=self.namespace_impl,

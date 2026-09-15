@@ -296,6 +296,11 @@ class LanceDatasink(_BaseLanceDatasink):
             References to base paths where data should be written. Each string
             is resolved by matching base name or base path URI from registered
             bases.
+        target_all_bases : bool, optional
+            Select all registered bases, including primary storage when True
+            and excluding it when False. None preserves the default. Mutually
+            exclusive with non-empty target_bases. Round-robin restarts for
+            each write task; it is not coordinated across workers.
         external_blob_mode : {"reference", "ingest"}, default "reference"
             How external blob URIs are handled on write. ``"reference"`` stores
             external blob references, while ``"ingest"`` reads external bytes
@@ -333,6 +338,7 @@ class LanceDatasink(_BaseLanceDatasink):
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
         target_bases: Optional[list[str]] = None,
+        target_all_bases: Optional[bool] = None,
         external_blob_mode: Literal["reference", "ingest"] = "reference",
         allow_external_blob_outside_bases: bool = False,
         namespace_impl: Optional[str] = None,
@@ -341,6 +347,7 @@ class LanceDatasink(_BaseLanceDatasink):
     ):
         allow_external_blob_outside_bases = prepare_fragment_write_options(
             target_bases=target_bases,
+            target_all_bases=target_all_bases,
             base_store_params=base_store_params,
             external_blob_mode=external_blob_mode,
             allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -375,6 +382,7 @@ class LanceDatasink(_BaseLanceDatasink):
         self.max_rows_per_file = max_rows_per_file
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
+        self.target_all_bases = target_all_bases
         self.external_blob_mode = external_blob_mode
         self.allow_external_blob_outside_bases = allow_external_blob_outside_bases
         # if mode is append, read_version is read from existing dataset.
@@ -414,6 +422,7 @@ class LanceDatasink(_BaseLanceDatasink):
             base_store_params=self.base_store_params,
             initial_bases=self.initial_bases if self.mode == "create" else None,
             target_bases=self.target_bases,
+            target_all_bases=self.target_all_bases,
             external_blob_mode=self.external_blob_mode,
             allow_external_blob_outside_bases=self.allow_external_blob_outside_bases,
             namespace_impl=self._namespace_impl,

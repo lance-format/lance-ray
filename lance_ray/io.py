@@ -171,6 +171,7 @@ def write_lance(
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     initial_bases: Optional[list[Any]] = None,
     target_bases: Optional[list[str]] = None,
+    target_all_bases: Optional[bool] = None,
     external_blob_mode: Literal["reference", "ingest"] = "reference",
     allow_external_blob_outside_bases: bool = False,
     namespace_impl: Optional[str] = None,
@@ -237,6 +238,10 @@ def write_lance(
             from registered bases.  In CREATE mode, references must match
             bases in ``initial_bases``.  In APPEND/OVERWRITE modes,
             references must match bases in the existing manifest.
+        target_all_bases: Select all registered bases, including primary storage
+            when True and excluding it when False. None preserves the default.
+            Mutually exclusive with non-empty target_bases. Round-robin restarts
+            for each write task or streaming batch, not across the dataset.
         external_blob_mode: How external blob URIs are handled on write.
             ``"reference"`` stores external blob references, while ``"ingest"``
             reads external bytes and writes them into Lance-managed storage.
@@ -256,6 +261,7 @@ def write_lance(
         raise ValueError("'initial_bases' can only be used with mode='create'")
     allow_external_blob_outside_bases = prepare_fragment_write_options(
         target_bases=target_bases,
+        target_all_bases=target_all_bases,
         base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
@@ -279,6 +285,7 @@ def write_lance(
             base_store_params=base_store_params,
             initial_bases=initial_bases,
             target_bases=target_bases,
+            target_all_bases=target_all_bases,
             external_blob_mode=external_blob_mode,
             allow_external_blob_outside_bases=allow_external_blob_outside_bases,
             namespace_impl=namespace_impl,
@@ -379,6 +386,7 @@ def write_lance(
             base_store_params=base_store_params,
             initial_bases=fragment_initial_bases,
             target_bases=target_bases,
+            target_all_bases=target_all_bases,
             external_blob_mode=external_blob_mode,
             allow_external_blob_outside_bases=allow_external_blob_outside_bases,
             namespace_impl=None,
