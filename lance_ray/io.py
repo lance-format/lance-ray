@@ -14,6 +14,7 @@ from ray.util.multiprocessing import Pool
 
 from .datasink import LanceDatasink
 from .datasource import LanceDatasource
+from .manifest_slice import ManifestMode, ManifestSlicer, field_id_witness
 from .utils import (
     get_explicit_namespace_kwargs,
     has_namespace_params,
@@ -50,6 +51,7 @@ def read_lance(
     ray_remote_args: Optional[dict[str, Any]] = None,
     concurrency: Optional[int] = None,
     override_num_blocks: Optional[int] = None,
+    manifest_mode: ManifestMode = "slice",
 ) -> Dataset:
     """
     Create a :class:`~ray.data.Dataset` from a
@@ -107,6 +109,9 @@ def read_lance(
             By default, the number of output blocks is dynamically decided based on
             input data size and available resources. You shouldn't manually set this
             value in most cases.
+        manifest_mode: "slice" (default) ships each read task the manifest header
+            plus its own fragments; "full" ships every task the whole manifest
+            (the previous behaviour).
 
     Returns:
         A :class:`~ray.data.Dataset` producing records read from the Lance dataset.
@@ -131,6 +136,7 @@ def read_lance(
         namespace_impl=namespace_impl,
         namespace_properties=namespace_properties,
         namespace=namespace,
+        manifest_mode=manifest_mode,
     )
 
     return read_datasource(
@@ -163,6 +169,7 @@ def write_lance(
     stream: bool = False,
     batch_size: Optional[int] = None,
     resume_rows: int = 0,
+    manifest_mode: ManifestMode = "slice",
 ) -> None:
     """Write the dataset to a Lance dataset.
 
@@ -217,6 +224,10 @@ def write_lance(
         stream: Enable incremental batch streaming write. Default False.
         batch_size: Batch size when streaming. If None, defaults to 1024.
         resume_rows: Number of leading rows to skip when streaming (for resume).
+        manifest_mode: "slice" (default) ships append write tasks the manifest
+            header instead of having each one load the whole manifest from
+            storage ("full", the previous behaviour). Streaming writes
+            (stream=True) always use "full".
     """
     _validate_write_args(uri, namespace_impl, table_id, mode, namespace)
     if initial_bases and mode != "create":
@@ -239,6 +250,7 @@ def write_lance(
             namespace_impl=namespace_impl,
             namespace_properties=namespace_properties,
             namespace=namespace,
+            manifest_mode=manifest_mode,
         )
 
         ds.write_datasink(
@@ -328,6 +340,8 @@ def write_lance(
             namespace_impl=None,
             namespace_properties=None,
             table_id=None,
+            # One writer per batch, used once in this process: nothing to ship.
+            manifest_mode="full",
         )
         frag_tbl = writer(tbl)
         fragments: list[Any] = []
@@ -442,21 +456,31 @@ def _handle_fragment(
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     table_id: Optional[list[str]] = None,
+    manifest_header: Optional[bytes] = None,
 ):
     """
     Handle a fragment of a Lance dataset.
+
+    Work items are ``(fragment_id, fragment_records)``. With a manifest header the
+    dataset is opened from ``manifest_header + fragment_records`` (a manifest
+    slice) instead of loading the whole manifest from storage.
     """
 
-    def func(fragment_id: int):
+    def func(item: tuple[int, Optional[bytes]]):
+        fragment_id, fragment_records = item
         namespace_kwargs = get_explicit_namespace_kwargs(
             uri,
             namespace_impl, namespace_properties, table_id
         )
+        serialized_manifest = None
+        if manifest_header is not None:
+            serialized_manifest = manifest_header + fragment_records
 
         lance_ds = LanceDataset(
             uri=uri,
             storage_options=storage_options,
             version=read_version,
+            serialized_manifest=serialized_manifest,
             **namespace_kwargs,
         )
         fragment = lance_ds.get_fragment(fragment_id)
@@ -483,6 +507,7 @@ def add_columns(
     table_id: Optional[list[str]] = None,
     batch_size: int = 1024,
     concurrency: Optional[int] = None,
+    manifest_mode: ManifestMode = "slice",
 ) -> None:
     """
     Add columns to a Lance dataset, currently use ray.util.multiprocessing.Pool to implement it. ray.data API is hard to implement.
@@ -511,7 +536,9 @@ def add_columns(
             `LanceDB API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset.get_fragments>`_.
         read_columns: The columns from the original dataset to read.
         reader_schema: The schema to use for the reader.
-        read_version: The version to read.
+        read_version: The version to read. It is resolved once on the driver and
+            every fragment task reads that version, in both manifest modes (tasks
+            used to resolve it themselves, so ``None`` meant "latest" per task).
         ray_remote_args: The arguments to pass to the ray remote function.
         storage_options: The storage options to use for the dataset.
         namespace_impl: The namespace implementation type (e.g., "rest", "dir").
@@ -524,6 +551,9 @@ def add_columns(
             credentials vending.
         batch_size: The batch size to use for the reader.
         concurrency: The number of processes to use for the pool.
+        manifest_mode: "slice" (default) ships each fragment task the manifest
+            header plus its own fragment; "full" makes every task load the whole
+            manifest from storage (the previous behaviour).
     """
     storage_options = storage_options or {}
 
@@ -538,6 +568,16 @@ def add_columns(
         **namespace_kwargs,
     )
     fragment_ids = [f.metadata.id for f in lance_ds.get_fragments()]
+    manifest_header = None
+    items = [(fid, None) for fid in fragment_ids]
+    if manifest_mode == "slice":
+        slicer = ManifestSlicer(lance_ds._ds.serialized_manifest())
+        manifest_header = slicer.header
+        # The witness keeps every slice's max_field_id equal to the table's, so
+        # a new column never reuses the field id of a dropped one.
+        witness = field_id_witness(lance_ds)
+        items = [(fid, slicer.fragments([fid, *witness])) for fid in fragment_ids]
+        del slicer  # holds the whole serialized manifest; items are copies
     pool = Pool(processes=concurrency, ray_remote_args=ray_remote_args)
     rst_futures = pool.map_async(
         _handle_fragment(
@@ -546,13 +586,15 @@ def add_columns(
             read_columns,
             batch_size,
             reader_schema,
-            read_version,
+            # Every task reads the version the driver planned against.
+            lance_ds.version,
             storage_options,
             namespace_impl,
             namespace_properties,
             table_id,
+            manifest_header,
         ),
-        fragment_ids,
+        items,
         chunksize=1,
     )
     try:

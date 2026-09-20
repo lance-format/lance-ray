@@ -16,6 +16,7 @@ import pyarrow as pa
 from ray.data._internal.util import call_with_retry
 
 if TYPE_CHECKING:
+    import lance
     from lance.fragment import FragmentMetadata
 
     import pandas as pd
@@ -25,6 +26,7 @@ __all__ = [
     "write_fragment",
 ]
 
+from .manifest_slice import ManifestMode, ManifestSlicer
 from .pandas import pd_to_arrow
 from .utils import (
     get_write_fragments_kwargs,
@@ -35,7 +37,7 @@ from .utils import (
 
 def write_fragment(
     stream: Iterable[Union[pa.Table, "pd.DataFrame"]],
-    uri: str,
+    uri: Union[str, "lance.LanceDataset"],
     *,
     schema: Optional[pa.Schema] = None,
     max_rows_per_file: int = 64 * 1024 * 1024,
@@ -175,6 +177,11 @@ class LanceFragmentWriter:
         Retry parameters for write operations. Default is None.
         If provided, should contain keys like 'description', 'match',
         'max_attempts', and 'max_backoff_s'.
+    manifest_mode : {"slice", "full"}, default "slice"
+        How batches are written into an existing dataset. "slice" opens it once,
+        where the writer is constructed, and writes every batch against its
+        manifest header; "full" loads the whole manifest for every batch (the
+        previous behaviour).
 
     """
 
@@ -195,6 +202,7 @@ class LanceFragmentWriter:
         namespace_properties: Optional[dict[str, str]] = None,
         table_id: Optional[list[str]] = None,
         retry_params: Optional[dict[str, Any]] = None,
+        manifest_mode: ManifestMode = "slice",
     ):
         if use_legacy_format is not None and data_storage_version is None:
             warnings.warn(
@@ -221,6 +229,22 @@ class LanceFragmentWriter:
         self.table_id = table_id
         self.retry_params = retry_params
 
+        self._version = self._manifest_header = None
+        if manifest_mode == "slice":
+            import lance
+
+            try:
+                dataset = lance.LanceDataset(uri, storage_options=storage_options)
+            except ValueError as e:
+                # No dataset yet: write_fragments creates it. Anything else
+                # must not silently degrade to loading the manifest per batch.
+                if "was not found" not in str(e):
+                    raise
+            else:
+                self._version = dataset.version
+                manifest = dataset._ds.serialized_manifest()
+                self._manifest_header = ManifestSlicer(manifest).header
+
     def __call__(self, batch: Union[pa.Table, "pd.DataFrame", dict]) -> pa.Table:
         """Write a Batch to the Lance fragment."""
         # Convert dict/numpy arrays to pyarrow table if needed
@@ -245,9 +269,19 @@ class LanceFragmentWriter:
         if not isinstance(transformed, Generator):
             transformed = (t for t in [transformed])
 
+        dest = self.uri
+        if self._manifest_header is not None:
+            import lance
+
+            dest = lance.LanceDataset(
+                self.uri,
+                version=self._version,
+                storage_options=self.storage_options,
+                serialized_manifest=self._manifest_header,
+            )
         fragments = write_fragment(
             transformed,
-            self.uri,
+            dest,
             schema=self.schema,
             max_rows_per_file=self.max_rows_per_file,
             max_rows_per_group=self.max_rows_per_group,
@@ -264,5 +298,11 @@ class LanceFragmentWriter:
             {
                 "fragment": [pickle.dumps(fragment) for fragment, _ in fragments],
                 "schema": [pickle.dumps(schema) for _, schema in fragments],
+                # The version whose schema these fragments were written against
+                # (slice mode). The committer commits from it, so lance rejects
+                # the append if the table was overwritten in between.
+                "read_version": pa.array(
+                    [self._version] * len(fragments), type=pa.int64()
+                ),
             }
         )

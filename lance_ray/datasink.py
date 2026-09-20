@@ -15,6 +15,7 @@ from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink
 
 from .fragment import write_fragment
+from .manifest_slice import ManifestMode, ManifestSlicer
 from .utils import (
     get_explicit_namespace_kwargs,
     get_or_create_namespace,
@@ -58,6 +59,14 @@ def _declare_table_with_fallback(
 
 class _BaseLanceDatasink(Datasink):
     """Base class for Lance Datasink."""
+
+    # Switch for the datasink classes only; reads and add_columns have their own
+    # manifest_mode. In "slice" mode append write tasks get the manifest header
+    # instead of opening the dataset from its URI. LanceDatasink sets this from
+    # its manifest_mode argument (default "slice"); LanceFragmentCommitter keeps
+    # "full" because it writes no data and has no use for a header.
+    manifest_mode: ManifestMode = "full"
+    _manifest_header: Optional[bytes] = None
 
     def __init__(
         self,
@@ -224,6 +233,9 @@ class _BaseLanceDatasink(Datasink):
             self.read_version = ds.version
             if self.schema is None:
                 self.schema = ds.schema
+            if self.manifest_mode == "slice":
+                manifest = ds._ds.serialized_manifest()
+                self._manifest_header = ManifestSlicer(manifest).header
 
         # A direct namespace is only needed for driver-side resolution. Workers
         # perform physical I/O using the resolved URI and storage options.
@@ -271,10 +283,20 @@ class _BaseLanceDatasink(Datasink):
         fragments = []
         schema = None
         for batch in write_results:
-            for fragment_str, schema_str in batch:
+            for fragment_str, schema_str, *writer_version in batch:
                 fragment = pickle.loads(fragment_str)
                 fragments.append(fragment)
                 schema = pickle.loads(schema_str)
+                # A LanceFragmentWriter in slice mode wrote against the version it
+                # pinned when constructed, which can be older than the one read in
+                # on_write_start. Commit from the oldest version any fragment was
+                # written against, so lance checks everything committed since.
+                if (
+                    self.mode == "append"
+                    and writer_version
+                    and writer_version[0] is not None
+                ):
+                    self.read_version = min(self.read_version, writer_version[0])
         # Skip commit when there are no fragments.
         if not schema:
             return
@@ -340,6 +362,10 @@ class LanceDatasink(_BaseLanceDatasink):
         namespace_properties : Dict[str, str], optional
             Properties for connecting to the namespace.
             Used together with namespace_impl and table_id for credentials vending.
+        manifest_mode : {"slice", "full"}, default "slice"
+            How append write tasks open the dataset: from the manifest header
+            shipped by the driver ("slice"), or by loading the whole manifest
+            from storage in every task ("full", the previous behaviour).
     """
 
     NAME = "Lance"
@@ -362,6 +388,7 @@ class LanceDatasink(_BaseLanceDatasink):
         initial_bases: Optional[list[Any]] = None,
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
+        manifest_mode: ManifestMode = "slice",
         **kwargs: Any,
     ):
         super().__init__(
@@ -377,6 +404,7 @@ class LanceDatasink(_BaseLanceDatasink):
             namespace_properties=namespace_properties,
             **kwargs,
         )
+        self.manifest_mode = manifest_mode
 
         if min_rows_per_file is None or min_rows_per_file <= 0:
             raise ValueError("min_rows_per_file must not be None and must be positive")
@@ -414,9 +442,20 @@ class LanceDatasink(_BaseLanceDatasink):
         blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         ctx: Any,
     ):
+        dest = self.uri
+        if self._manifest_header is not None:
+            import lance
+
+            # The dataset at read_version, opened from its manifest header alone.
+            dest = lance.LanceDataset(
+                self.uri,
+                version=self.read_version,
+                storage_options=self.storage_options,
+                serialized_manifest=self._manifest_header,
+            )
         fragments_and_schema = write_fragment(
             blocks,
-            self.uri,
+            dest,
             schema=self.schema,
             max_rows_per_file=self.max_rows_per_file,
             data_storage_version=self.data_storage_version,
@@ -456,8 +495,11 @@ class LanceFragmentCommitter(_BaseLanceDatasink):
             if len(block) == 0:
                 continue
 
-            for fragment, schema in zip(
-                block["fragment"].to_pylist(), block["schema"].to_pylist(), strict=False
+            for fragment, schema, read_version in zip(
+                block["fragment"].to_pylist(),
+                block["schema"].to_pylist(),
+                block["read_version"].to_pylist(),
+                strict=False,
             ):
-                v.append((fragment, schema))
+                v.append((fragment, schema, read_version))
         return v

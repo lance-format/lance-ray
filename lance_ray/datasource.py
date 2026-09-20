@@ -9,6 +9,7 @@ from ray.data.context import DataContext
 from ray.data.datasource import Datasource
 from ray.data.datasource.datasource import ReadTask
 
+from .manifest_slice import ManifestMode, ManifestSlicer
 from .utils import (
     array_split,
     get_explicit_namespace_kwargs,
@@ -43,9 +44,11 @@ class LanceDatasource(Datasource):
         namespace_impl: Optional[str] = None,
         namespace_properties: Optional[dict[str, str]] = None,
         namespace: Optional[Any] = None,
+        manifest_mode: ManifestMode = "slice",
     ):
         _check_import(self, module="lance", package="pylance")
 
+        self._manifest_mode = manifest_mode
         self._dataset_options = dict(dataset_options or {})
         dataset_base_store_params = self._dataset_options.pop(
             "base_store_params", None
@@ -174,6 +177,9 @@ class LanceDatasource(Datasource):
         dataset_version = self.lance_dataset.version
         dataset_storage_options = self._lance_ds._storage_options
         serialized_manifest = self._lance_ds._ds.serialized_manifest()
+        slicer = None
+        if self._manifest_mode == "slice":
+            slicer = ManifestSlicer(serialized_manifest)
         namespace_impl = self._namespace_impl
         namespace_properties = self._namespace_properties
         table_id = self._table_id
@@ -192,6 +198,8 @@ class LanceDatasource(Datasource):
             num_rows = scanner.count_rows()
 
             fragment_ids = [f.metadata.id for f in fragments]
+            # In slice mode the task's manifest holds only its own fragments.
+            manifest = slicer.slice(fragment_ids) if slicer else serialized_manifest
             input_files = [
                 data_file.path
                 for fragment in fragments
@@ -217,7 +225,7 @@ class LanceDatasource(Datasource):
                 )
 
             read_task = ReadTask(
-                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=serialized_manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, base_params=base_store_params, scanner_options=self._scanner_options, retry_params=self._retry_params: (
+                lambda fids=fragment_ids, uri=dataset_uri, version=dataset_version, storage_options=dataset_storage_options, manifest=manifest, ns_impl=namespace_impl, ns_props=namespace_properties, tbl_id=table_id, base_params=base_store_params, scanner_options=self._scanner_options, retry_params=self._retry_params: (
                     _read_fragments_with_retry(
                         fids,
                         uri,
