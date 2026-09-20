@@ -98,6 +98,7 @@ class LanceDatasource(Datasource):
 
         self._lance_ds: Optional[lance.LanceDataset] = None
         self._fragments: Optional[list[lance.LanceFragment]] = None
+        self._namespace_client_managed_versioning = False
 
     @property
     def lance_dataset(self) -> lance.LanceDataset:
@@ -105,18 +106,49 @@ class LanceDatasource(Datasource):
             import lance
 
             dataset_options = self._dataset_options.copy()
-            dataset_options["uri"] = self._uri
-            dataset_options["storage_options"] = self._storage_options
+            uri = self._uri
+            merged_storage_options = {}
+            namespace_mode = self._namespace is not None and self._table_id is not None
+            if self._storage_options:
+                merged_storage_options.update(self._storage_options)
+            if namespace_mode:
+                from lance_namespace import DescribeTableRequest
+
+                describe_request_kwargs: dict[str, Any] = {
+                    "id": self._table_id,
+                    "vend_credentials": True,
+                }
+                dataset_version = dataset_options.get("version")
+                if isinstance(dataset_version, int) and not isinstance(
+                    dataset_version, bool
+                ):
+                    describe_request_kwargs["version"] = dataset_version
+                assert self._namespace is not None
+                describe_response = self._namespace.describe_table(
+                    DescribeTableRequest(**describe_request_kwargs)
+                )
+                uri = describe_response.location
+                self._namespace_client_managed_versioning = (
+                    getattr(describe_response, "managed_versioning", None) is True
+                )
+                if describe_response.storage_options:
+                    merged_storage_options.update(describe_response.storage_options)
+
             ns_kwargs = get_namespace_kwargs(
                 self._namespace_impl, self._namespace_properties, self._table_id
             )
+            dataset_options["uri"] = uri
+            dataset_options["storage_options"] = merged_storage_options or None
             dataset_options.update(ns_kwargs)
+            if self._namespace_client_managed_versioning:
+                dataset_options["namespace_client_managed_versioning"] = True
             base_store_params_kwargs: dict[str, Any] = {}
             if self._base_store_params:
                 base_store_params_kwargs = {
                     "base_store_params": self._base_store_params
                 }
-            self._lance_ds = lance.dataset(
+            dataset_factory = lance.LanceDataset if namespace_mode else lance.dataset
+            self._lance_ds = dataset_factory(
                 **dataset_options,
                 **base_store_params_kwargs,
             )
@@ -169,6 +201,7 @@ class LanceDatasource(Datasource):
         namespace_properties = self._namespace_properties
         table_id = self._table_id
         base_store_params = self._base_store_params
+        namespace_client_managed_versioning = self._namespace_client_managed_versioning
 
         for fragments in array_split(self.fragments, parallelism):
             if len(fragments) == 0:
@@ -221,6 +254,7 @@ class LanceDatasource(Datasource):
                     namespace_properties,
                     table_id,
                     base_store_params,
+                    namespace_client_managed_versioning,
                     self._scanner_options,
                     self._retry_params,
                     self._with_metadata,
@@ -257,6 +291,7 @@ def _read_fragments_with_retry(
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
     base_store_params: Optional[dict[str, dict[str, Any]]],
+    namespace_client_managed_versioning: bool,
     scanner_options: dict[str, Any],
     retry_params: dict[str, Any],
     with_metadata: bool = False,
@@ -278,6 +313,8 @@ def _read_fragments_with_retry(
     if manifest is not None:
         ds_kwargs["serialized_manifest"] = manifest
     ds_kwargs.update(namespace_kwargs)
+    if namespace_client_managed_versioning:
+        ds_kwargs["namespace_client_managed_versioning"] = True
     ds_kwargs.update(base_store_params_kwargs)
 
     lance_ds = lance.LanceDataset(**ds_kwargs)
