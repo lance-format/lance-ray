@@ -121,8 +121,10 @@ def has_namespace_params(
 
     Returns:
         True if both namespace_impl and table_id are provided, False otherwise.
+        Empty values ("" or []) count as not provided, so they fail validation
+        at the API boundary instead of erroring inside the namespace client.
     """
-    return namespace_impl is not None and table_id is not None
+    return bool(namespace_impl) and bool(table_id)
 
 
 def validate_uri_or_namespace(
@@ -185,8 +187,11 @@ def get_or_create_namespace(
 
     Returns:
         A namespace client instance, or None if namespace_impl is not provided.
+        An empty ``namespace_impl`` ("") counts as not provided, so it never
+        reaches ``lance_namespace.connect("")``; callers fall back to the uri
+        path exactly as they do for ``None``.
     """
-    if namespace_impl is None:
+    if not namespace_impl:
         return None
 
     # Convert dict to hashable tuple for lru_cache (None if no properties)
