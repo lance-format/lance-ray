@@ -9,6 +9,9 @@ Tests cover:
 - Multiple blob columns round-trip
 - JPG blob integration test
 - Projection and filtering on blob columns
+
+Legacy blob columns are only supported by file formats up to 2.1, so every
+write pins ``data_storage_version`` to that format.
 """
 
 import hashlib
@@ -34,6 +37,8 @@ import pandas as pd
 pytest.importorskip("lance")
 
 import lance_ray.io as lr
+
+LEGACY_BLOB_FORMAT = "2.1"
 
 
 @pytest.fixture
@@ -93,7 +98,9 @@ def test_single_blob_roundtrip(temp_dir: str) -> None:
 
     # Write via lance-ray
     ds_ray = ray.data.from_arrow(table)
-    lr.write_lance(ds_ray, str(path), schema=schema)
+    lr.write_lance(
+        ds_ray, str(path), schema=schema, data_storage_version=LEGACY_BLOB_FORMAT
+    )
 
     # Read back via lance-ray
     ds_read = lr.read_lance(str(path))
@@ -134,7 +141,9 @@ def test_multi_blob_roundtrip(temp_dir: str) -> None:
 
     # Write via lance-ray
     ds_ray = ray.data.from_arrow(table)
-    lr.write_lance(ds_ray, str(path), schema=table.schema)
+    lr.write_lance(
+        ds_ray, str(path), schema=table.schema, data_storage_version=LEGACY_BLOB_FORMAT
+    )
 
     # Read back via lance-ray
     ds_read = lr.read_lance(str(path))
@@ -173,7 +182,9 @@ def test_jpg_blob_integration(
     # Write via lance-ray
     path = Path(temp_dir) / "jpg_blob_integration.lance"
     ds_ray = ray.data.from_arrow(table)
-    lr.write_lance(ds_ray, str(path), schema=schema)
+    lr.write_lance(
+        ds_ray, str(path), schema=schema, data_storage_version=LEGACY_BLOB_FORMAT
+    )
 
     # Read back via lance-ray
     ds_read = lr.read_lance(str(path))
@@ -223,7 +234,9 @@ def test_blob_projection_and_filter(temp_dir: str) -> None:
     )
 
     ds_ray = ray.data.from_arrow(table)
-    lr.write_lance(ds_ray, str(path), schema=schema)
+    lr.write_lance(
+        ds_ray, str(path), schema=schema, data_storage_version=LEGACY_BLOB_FORMAT
+    )
 
     # Read only blob column with a filter
     ds_read = lr.read_lance(str(path), columns=["blob"], filter="id >= 12")
@@ -259,7 +272,9 @@ def test_multi_blob_projection_and_filter(temp_dir: str) -> None:
     )
 
     ds_ray = ray.data.from_arrow(table)
-    lr.write_lance(ds_ray, str(path), schema=table.schema)
+    lr.write_lance(
+        ds_ray, str(path), schema=table.schema, data_storage_version=LEGACY_BLOB_FORMAT
+    )
 
     # Read only blob columns with a filter on id
     ds_read = lr.read_lance(str(path), columns=["blob1", "blob2"], filter="id >= 2")
@@ -309,11 +324,22 @@ def test_stream_copy_basic_local(temp_dir: str) -> None:
 
     # Write source with legacy data storage version
     ds_src_arrow = ray.data.from_arrow(table)
-    lr.write_lance(ds_src_arrow, str(src_path), schema=schema)
+    lr.write_lance(
+        ds_src_arrow,
+        str(src_path),
+        schema=schema,
+        data_storage_version=LEGACY_BLOB_FORMAT,
+    )
 
     ds_src = ray.data.from_arrow(table)
 
-    lr.write_lance(ds_src, str(dst_path), stream=True, batch_size=1)
+    lr.write_lance(
+        ds_src,
+        str(dst_path),
+        stream=True,
+        batch_size=1,
+        data_storage_version=LEGACY_BLOB_FORMAT,
+    )
 
     src = lance.dataset(str(src_path))
     dst = lance.dataset(str(dst_path))
@@ -357,11 +383,21 @@ def test_stream_copy_resume_local(temp_dir: str) -> None:
 
     # Write source as legacy format
     ds_src_arrow = ray.data.from_arrow(table)
-    lr.write_lance(ds_src_arrow, str(src_path), schema=schema)
+    lr.write_lance(
+        ds_src_arrow,
+        str(src_path),
+        schema=schema,
+        data_storage_version=LEGACY_BLOB_FORMAT,
+    )
 
-    # Pre-create destination with first 2 rows (default stable format)
+    # Pre-create destination with first 2 rows
     table_first2 = table.slice(0, 2)
-    lr.write_lance(ray.data.from_arrow(table_first2), str(dst_path), schema=schema)
+    lr.write_lance(
+        ray.data.from_arrow(table_first2),
+        str(dst_path),
+        schema=schema,
+        data_storage_version=LEGACY_BLOB_FORMAT,
+    )
 
     ds_src = ray.data.from_arrow(table)
 
@@ -372,6 +408,7 @@ def test_stream_copy_resume_local(temp_dir: str) -> None:
         batch_size=2,
         resume_rows=2,
         mode="append",
+        data_storage_version=LEGACY_BLOB_FORMAT,
     )
 
     src_df = (

@@ -24,7 +24,7 @@ classifiers = [
 
 dependencies = [
     "ray[data]>=2.41.0",
-    "pylance>=10.0.0b7",
+    "pylance>=12.0.0",
     "lance-namespace",
     "packaging",
     "pyarrow>=17.0.0",
@@ -96,11 +96,11 @@ ignore_missing_imports = true
 module = ["lance.*", "ray.*"]
 implicit_reexport = true
 
-# ``tests/_utils.py`` and ``tests/_ray_test_support.py`` are checked as part of
-# the ``tests`` package, but are imported as top-level modules because Ray
-# workers get ``tests/`` prepended to ``sys.path`` instead of the repo root.
+# ``tests/_ray_test_support.py`` is checked as part of the ``tests`` package,
+# but is imported as a top-level module because Ray workers get ``tests/``
+# prepended to ``sys.path`` instead of the repo root.
 [[tool.mypy.overrides]]
-module = ["_utils", "_ray_test_support"]
+module = ["_ray_test_support"]
 ignore_missing_imports = true
 
 

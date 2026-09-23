@@ -12,30 +12,9 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import ray
-from lance_ray.search import _scanner_accepts_index_segments
-from packaging import version
 from ray.data import Dataset
 
 import pandas as pd
-
-
-def check_lance_version_compatibility() -> bool:
-    """Check if lance version supports distributed indexing."""
-    try:
-        lance_version = version.parse(lance.__version__)
-        min_required_version = version.parse("0.36.0")
-        return lance_version >= min_required_version
-    except (AttributeError, Exception):
-        return False
-
-
-# Skip all distributed indexing tests if lance version is incompatible
-pytestmark = pytest.mark.skipif(
-    not check_lance_version_compatibility(),
-    reason="Distributed indexing requires pylance >= 0.36.0. Current version: {}".format(
-        getattr(lance, "__version__", "unknown")
-    ),
-)
 
 
 @pytest.fixture
@@ -988,22 +967,6 @@ class TestDistributedIndexing:
             )
 
 
-def check_btree_version_compatibility() -> bool:
-    """Check if lance version supports distributed B-tree indexing (>= 0.37.0)."""
-    try:
-        lance_version = version.parse(lance.__version__)
-        btree_min_version = version.parse("0.37.0")
-        return lance_version >= btree_min_version
-    except (AttributeError, Exception):
-        return False
-
-
-@pytest.mark.skipif(
-    not check_btree_version_compatibility(),
-    reason="B-tree indexing requires pylance >= 0.37.0. Current version: {}".format(
-        getattr(lance, "__version__", "unknown")
-    ),
-)
 class TestDistributedBTreeIndexing:
     """Distributed BTREE indexing tests using the unified lr.create_scalar_index entrypoint."""
 
@@ -1597,7 +1560,7 @@ class TestOptimizeIndices:
     def test_optimize_indices_success_with_uri(
         self, multi_fragment_lance_dataset: str
     ) -> None:
-        """optimize_indices returns LanceDataset and describe_indices is consistent when API is available."""
+        """optimize_indices returns the dataset and describe_indices is consistent."""
         dataset_uri = multi_fragment_lance_dataset
         lr.create_scalar_index(
             uri=dataset_uri,
@@ -1607,20 +1570,7 @@ class TestOptimizeIndices:
             num_workers=2,
         )
 
-        ds = lance.LanceDataset(dataset_uri)
-        has_optimize = (
-            getattr(ds, "optimize_indices", None) is not None
-            or getattr(ds, "optimize", None) is not None
-        )
-        if not has_optimize:
-            pytest.skip(
-                "Lance dataset does not expose optimize_indices or optimize; "
-                "skipping optimize_indices integration test."
-            )
-
         result = lr.optimize_indices(uri=dataset_uri)
-        assert result is not None
-        assert isinstance(result, lance.LanceDataset)
         assert result.count_rows() == lance.LanceDataset(dataset_uri).count_rows()
 
         indices = result.describe_indices()
@@ -1629,27 +1579,6 @@ class TestOptimizeIndices:
         )
         names = [idx.name for idx in indices]
         assert "text_idx" in names, f"Expected 'text_idx' in describe_indices: {names}"
-
-    def test_optimize_indices_runtime_error_when_api_missing(
-        self, temp_dir: str
-    ) -> None:
-        """optimize_indices raises RuntimeError when dataset has no optimize API."""
-        path = Path(temp_dir) / "no_optimize.lance"
-        df = pd.DataFrame({"id": [1, 2], "t": ["a", "b"]})
-        lr.write_lance(ray.data.from_pandas(df), str(path))
-        ds = lance.LanceDataset(str(path))
-
-        if (
-            getattr(ds, "optimize_indices", None) is not None
-            or getattr(ds, "optimize", None) is not None
-        ):
-            pytest.skip(
-                "This lance version exposes optimize_indices/optimize; "
-                "cannot test RuntimeError path."
-            )
-
-        with pytest.raises(RuntimeError, match="optimize_indices or optimize"):
-            lr.optimize_indices(uri=str(path))
 
 
 class TestNamespaceIndexing:
@@ -1760,7 +1689,7 @@ class TestNamespaceIndexing:
         """Test distributed vector index building using DirectoryNamespace.
 
         Verifies that create_index() correctly resolves the dataset URI and
-        passes a storage_options_provider to workers when namespace params
+        passes the namespace client to workers when namespace params
         are supplied, mirroring the behaviour of create_scalar_index().
         """
         table_id = ["vector_index_namespace_test"]
@@ -1788,23 +1717,18 @@ class TestNamespaceIndexing:
 
         # Build vector index via namespace params — no URI needed.
         # sample_rate=4: PQ requires 256 * sample_rate <= num_rows (256*4=1024 ✓)
-        try:
-            updated_dataset = lr.create_index(
-                column="vector",
-                index_type="IVF_PQ",
-                name="vec_namespace_idx",
-                num_workers=2,
-                num_partitions=4,
-                num_sub_vectors=4,
-                sample_rate=4,
-                namespace_impl="dir",
-                namespace_properties={"root": temp_dir},
-                table_id=table_id,
-            )
-        except RuntimeError as exc:
-            if "not yet implemented" in str(exc):
-                pytest.skip(f"Skipping: lance version limitation: {exc}")
-            raise
+        updated_dataset = lr.create_index(
+            column="vector",
+            index_type="IVF_PQ",
+            name="vec_namespace_idx",
+            num_workers=2,
+            num_partitions=4,
+            num_sub_vectors=4,
+            sample_rate=4,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
 
         indices = updated_dataset.describe_indices()
         assert len(indices) > 0, "No indices found after distributed vector build"
@@ -1921,32 +1845,16 @@ def test_build_distributed_vector_index(tmp_path: Path, index_type: str) -> None
     index_name = f"idx_{index_type}"
 
     # Build distributed vector index using the high-level Ray entrypoint.
-    try:
-        updated_dataset = lr.create_index(
-            uri=dataset_uri,
-            column="vector",
-            index_type=index_type,
-            name=index_name,
-            num_workers=2,
-            num_segments=4,
-            num_partitions=4,
-            **build_kwargs,
-        )
-    except RuntimeError as exc:
-        # Older pylance builds may not yet support creating empty distributed
-        # vector indices with train=False. In that case we skip the functional
-        # verification while still ensuring the Ray entrypoint is wired
-        # correctly.
-        msg = str(exc)
-        if (
-            "Creating empty vector indices with train=False is not yet implemented"
-            in msg
-        ):
-            pytest.skip(
-                "Current pylance build does not yet support distributed vector "
-                "indices with train=False; skipping functional test."
-            )
-        raise
+    updated_dataset = lr.create_index(
+        uri=dataset_uri,
+        column="vector",
+        index_type=index_type,
+        name=index_name,
+        num_workers=2,
+        num_segments=4,
+        num_partitions=4,
+        **build_kwargs,
+    )
 
     indices = updated_dataset.describe_indices()
     assert len(indices) > 0, "No indices found after distributed vector index build"
@@ -1992,41 +1900,20 @@ def test_distributed_nested_vector_index_and_search(
         {"num_sub_vectors": 2} if index_type == "IVF_PQ" else {}
     )
 
-    try:
-        updated_dataset = lr.create_index(
-            uri=dataset_uri,
-            column="meta.vector",
-            index_type=index_type,
-            name=f"nested_vector_{index_type.lower()}_idx",
-            num_workers=2,
-            num_partitions=1,
-            sample_rate=2,
-            **index_kwargs,
-        )
-    except RuntimeError as exc:
-        msg = str(exc)
-        if (
-            "Creating empty vector indices with train=False is not yet implemented"
-            in msg
-        ):
-            pytest.skip(f"Skipping: lance version limitation: {exc}")
-        raise
+    updated_dataset = lr.create_index(
+        uri=dataset_uri,
+        column="meta.vector",
+        index_type=index_type,
+        name=f"nested_vector_{index_type.lower()}_idx",
+        num_workers=2,
+        num_partitions=1,
+        sample_rate=2,
+        **index_kwargs,
+    )
 
     indices = {idx.name: idx for idx in updated_dataset.describe_indices()}
     index_name = f"nested_vector_{index_type.lower()}_idx"
     assert indices[index_name].field_names == ["meta.vector"]
-
-    if not _scanner_accepts_index_segments(updated_dataset):
-        with pytest.raises(RuntimeError, match="does not support index_segments"):
-            lr.vector_search(
-                uri=updated_dataset.uri,
-                nearest={"column": "`meta`.`vector`", "q": query, "k": 5},
-                index_name=index_name,
-                columns=["id"],
-                num_workers=2,
-                fast_search=True,
-            )
-        return
 
     result = lr.vector_search(
         uri=updated_dataset.uri,

@@ -12,9 +12,9 @@ from typing import Any, Literal, Optional, TypeAlias, cast, get_args
 import lance
 import pyarrow as pa
 import ray
+from lance.bitmap import Bitmap
 from lance.dataset import Index, IndexConfig, LanceDataset
 from lance.indices import IndicesBuilder
-from packaging import version
 from ray.util.multiprocessing import Pool
 
 from .field_path import resolve_arrow_field_path, resolve_dataset_field_path
@@ -289,9 +289,7 @@ def _handle_scalar_segment_index(
 
             segment_index = dataset.create_index_uncommitted(
                 column=column,
-                # pylance annotates this as ``str`` but accepts an
-                # ``IndexConfig`` too (see ``_prepare_scalar_index_request``).
-                index_type=index_type,  # type: ignore[arg-type]
+                index_type=index_type,
                 name=name,
                 replace=replace,
                 train=train,
@@ -416,21 +414,6 @@ def _handle_fragment_index(
     return func
 
 
-def merge_index_metadata_compat(
-    dataset: LanceDataset,
-    index_id: str,
-    index_type: str,
-    **kwargs: Any,
-) -> Any:
-    """Call ``merge_index_metadata`` with backwards compatible signature."""
-    try:
-        return dataset.merge_index_metadata(
-            index_id, index_type, batch_readhead=kwargs.get("batch_readhead")
-        )
-    except TypeError:
-        return dataset.merge_index_metadata(index_id)  # type: ignore[call-arg]
-
-
 def create_scalar_index(
     uri: Optional[str | lance.LanceDataset] = None,
     *,
@@ -488,30 +471,8 @@ def create_scalar_index(
     Raises:
         ValueError: If input parameters are invalid.
         TypeError: If the column type is incompatible with the index type.
-        RuntimeError: If index building fails or pylance version is incompatible.
+        RuntimeError: If index building fails.
     """
-    # Check pylance version compatibility
-    try:
-        lance_version = version.parse(lance.__version__)
-        min_required_version = version.parse("0.36.0")
-
-        if lance_version < min_required_version:
-            raise RuntimeError(
-                "Distributed indexing requires pylance >= 0.36.0, but found "
-                f"{lance.__version__}. The distribute-related interfaces are "
-                "not available in older versions. Please upgrade pylance by "
-                "running: pip install --upgrade pylance"
-            )
-
-        logger.info("Pylance version check passed: %s >= 0.36.0", lance.__version__)
-
-    except AttributeError as err:  # pragma: no cover - defensive
-        raise RuntimeError(
-            "Cannot determine pylance version. Distributed indexing requires "
-            "pylance >= 0.36.0. Please upgrade pylance by running: "
-            "pip install --upgrade pylance"
-        ) from err
-
     index_id = str(uuid.uuid4())
     logger.info("Starting distributed scalar index build with ID: %s", index_id)
 
@@ -774,7 +735,9 @@ def create_scalar_index(
     # Convert IndexConfig to string for merge_index_metadata which expects a string
     # (lance's create_scalar_index converts IndexConfig to "scalar" internally)
     index_type_str = "scalar" if isinstance(index_type, IndexConfig) else index_type
-    merge_index_metadata_compat(dataset, index_id, index_type=index_type_str, **kwargs)
+    dataset.merge_index_metadata(
+        index_id, index_type_str, batch_readhead=kwargs.get("batch_readhead")
+    )
 
     logger.info("Phase 3: Creating and committing scalar index '%s'", name)
 
@@ -785,7 +748,7 @@ def create_scalar_index(
         name=name,
         fields=fields,
         dataset_version=dataset.version,
-        fragment_ids=set(fragment_ids_to_use),
+        fragment_ids=Bitmap(fragment_ids_to_use),
         index_version=0,
     )
 
@@ -932,13 +895,7 @@ class _NestedVectorIndicesBuilder:
             fragment_ids,
             num_bits=num_bits,
         )
-        # ``train_pq_model`` is annotated as returning a generic ``pa.Array``
-        # upstream, but always produces a fixed-size-list codebook.
-        return PqModel(
-            num_subvectors,
-            cast("pa.FixedSizeListArray[Any]", codebook),
-            num_bits=num_bits,
-        )
+        return PqModel(num_subvectors, codebook, num_bits=num_bits)
 
 
 def _count_rows_for_fragments(
@@ -1095,31 +1052,6 @@ def _normalize_index_type(index_type: Any) -> str:
         )
 
     return index_type_name
-
-
-def _check_pylance_version() -> None:
-    """Ensure pylance (lance) provides distributed vector APIs."""
-
-    try:
-        lance_version = version.parse(lance.__version__)
-        min_required_version = version.parse("0.36.0")
-
-        if lance_version < min_required_version:
-            raise RuntimeError(
-                "Distributed vector indexing requires pylance >= 0.36.0, but found "
-                f"{lance.__version__}. The distributed vector interfaces are not "
-                "available in older versions. Please upgrade pylance by running: "
-                "pip install --upgrade pylance"
-            )
-
-        logger.info("Pylance version check passed: %s >= 0.36.0", lance.__version__)
-
-    except AttributeError as err:  # pragma: no cover - defensive
-        raise RuntimeError(
-            "Cannot determine pylance version. Distributed vector indexing requires "
-            "pylance >= 0.36.0. Please upgrade pylance by running: "
-            "pip install --upgrade pylance"
-        ) from err
 
 
 def _validate_metric(metric: str) -> str:
@@ -1295,8 +1227,6 @@ def create_index(
     Returns:
         Updated Lance dataset with the index created
     """
-
-    _check_pylance_version()
 
     if not column:
         raise ValueError("Column name cannot be empty")
@@ -1621,8 +1551,6 @@ def optimize_indices(
 
     Raises:
         ValueError: If input parameters are invalid.
-        RuntimeError: If optimize_indices is not supported by the current
-            lance version or if the operation fails.
 
     Example:
         >>> import lance_ray
@@ -1664,23 +1592,7 @@ def optimize_indices(
         storage_options=merged_storage_options,
         **namespace_kwargs,
     )
-    logger.info(
-        "Loaded dataset: uri=%s, version=%s",
-        uri,
-        getattr(dataset, "version", "unknown"),
-    )
-
-    if not hasattr(dataset, "optimize"):
-        raise RuntimeError(
-            "LanceDataset has no 'optimize' property. Please ensure "
-            "lance is installed with a version that provides DatasetOptimizer."
-        )
-    optimizer = dataset.optimize
-    if not hasattr(optimizer, "optimize_indices"):
-        raise RuntimeError(
-            "optimize_indices is not available on DatasetOptimizer. Please ensure "
-            "lance is installed with a version that provides optimize_indices."
-        )
+    logger.info("Loaded dataset: uri=%s, version=%s", uri, dataset.version)
 
     call_kw: dict[str, Any] = {
         "num_indices_to_merge": num_indices_to_merge,
@@ -1694,7 +1606,7 @@ def optimize_indices(
         "Calling DatasetOptimizer.optimize_indices with: %s",
         {k: v for k, v in call_kw.items() if k != "storage_options"},
     )
-    optimizer.optimize_indices(**call_kw)
+    dataset.optimize.optimize_indices(**call_kw)
     logger.info(
         "optimize_indices completed successfully for dataset uri=%s",
         uri,
