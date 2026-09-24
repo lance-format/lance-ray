@@ -602,12 +602,13 @@ def create_scalar_index(
                 is_supported = (
                     pa.types.is_integer(value_type)
                     or pa.types.is_floating(value_type)
+                    or pa.types.is_date32(value_type)
                     or pa.types.is_string(value_type)
                     or pa.types.is_large_string(value_type)
                 )
                 if not is_supported:
                     raise TypeError(
-                        f"Column {column} must be numeric or string type for "
+                        f"Column {column} must be numeric, date32, or string type for "
                         f"{index_type} index, got {value_type}"
                     )
             case "LABEL_LIST":
