@@ -5,8 +5,8 @@ from typing import Any, Optional, cast
 import lance
 from lance.lance import CompactionMetrics
 from lance.optimize import Compaction, CompactionOptions, CompactionTask
-from ray.util.multiprocessing import Pool
 
+from .pool import get_or_create_pool
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -158,10 +158,8 @@ def compact_files(
         num_workers = compaction_plan.num_tasks()
         logger.info(f"Adjusted num_workers to {num_workers} to match task count")
 
-    # Step 2: Execute tasks in parallel using Ray Pool
-    pool = Pool(processes=num_workers, ray_remote_args=ray_remote_args)
-
-    # Create the task handler function
+    # Step 2: Execute tasks in parallel using a Ray Pool, reusing the global
+    # Pool when one is configured via init_global_pool/set_global_pool.
     task_handler = _handle_compaction_task(
         dataset_uri=uri,
         storage_options=merged_storage_options,
@@ -170,21 +168,17 @@ def compact_files(
         table_id=table_id,
     )
 
-    # Submit tasks using Pool.map_async
-    rst_futures = pool.map_async(
-        task_handler,
-        compaction_plan.tasks,
-        chunksize=1,
-    )
-
-    # Wait for results
     try:
-        results = rst_futures.get()
+        with get_or_create_pool(
+            processes=num_workers, ray_remote_args=ray_remote_args
+        ) as pool:
+            results = pool.map_async(
+                task_handler,
+                compaction_plan.tasks,
+                chunksize=1,
+            ).get()
     except Exception as e:
         raise RuntimeError(f"Failed to complete distributed compaction: {e}") from e
-    finally:
-        pool.close()
-        pool.join()
 
     # Check for failures
     failed_results = [r for r in results if r["status"] == "error"]
