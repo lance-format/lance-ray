@@ -193,7 +193,7 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
         if not write_result:
             warnings.warn(
                 "write_results is empty.",
-                DeprecationWarning,
+                RuntimeWarning,
                 stacklevel=2,
             )
             return
@@ -209,7 +209,7 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
         if len(write_results) == 0:
             warnings.warn(
                 "write results is empty. please check ray version or internal error",
-                DeprecationWarning,
+                RuntimeWarning,
                 stacklevel=2,
             )
             return
