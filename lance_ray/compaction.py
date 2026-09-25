@@ -204,7 +204,7 @@ def compact_files(
     )
 
     # Step 4: Commit the compaction
-    metrics = Compaction.commit(dataset, rewrites)
+    metrics = Compaction.commit(dataset, rewrites, compaction_options)
 
     logger.info(f"Compaction completed successfully. Metrics: {metrics}")
 
