@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright The Lance Authors
 
-import inspect
 import pickle
 import warnings
-from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterable, Iterator
 from itertools import chain
 from typing import (
     TYPE_CHECKING,
@@ -30,7 +29,7 @@ __all__ = [
 
 from .pandas import pd_to_arrow
 from .utils import (
-    get_write_fragments_kwargs,
+    get_namespace_kwargs,
     materialize_initial_bases,
     normalize_initial_bases,
 )
@@ -107,18 +106,16 @@ def write_fragment(
             "max_backoff_s": 0,
         }
 
-    write_kwargs = get_write_fragments_kwargs(
+    namespace_kwargs = get_namespace_kwargs(
         namespace_impl, namespace_properties, table_id
     )
     initial_bases_kwargs: dict[str, Any] = {}
     if initial_bases:
         initial_bases_kwargs["initial_bases"] = materialize_initial_bases(initial_bases)
 
-    optional_write_kwargs = _get_optional_write_fragments_kwargs(
-        write_fragments,
+    allow_external_blob_outside_bases = prepare_fragment_write_options(
         target_bases=target_bases,
         target_all_bases=target_all_bases,
-        base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
     )
@@ -135,140 +132,41 @@ def write_fragment(
             data_storage_version=data_storage_version,
             enable_stable_row_ids=enable_stable_row_ids,
             storage_options=storage_options,
-            **write_kwargs,
+            target_bases=target_bases,
+            target_all_bases=target_all_bases,
+            base_store_params=base_store_params,
+            external_blob_mode=external_blob_mode,
+            allow_external_blob_outside_bases=allow_external_blob_outside_bases,
+            **namespace_kwargs,
             **initial_bases_kwargs,
-            **optional_write_kwargs,
         )
 
     fragments = call_with_retry(_write_fragments, **retry_params)
     return [(fragment, schema) for fragment in fragments]
 
 
-def _get_optional_write_fragments_kwargs(
-    write_fragments: Callable[..., Any],
-    *,
-    target_bases: Optional[list[str]],
-    target_all_bases: Optional[bool],
-    base_store_params: Optional[dict[str, dict[str, Any]]],
-    external_blob_mode: Literal["reference", "ingest"],
-    allow_external_blob_outside_bases: bool,
-) -> dict[str, Any]:
-    """Return kwargs supported by the installed pylance fragment writer."""
-    params, allow_external_blob_outside_bases = _prepare_write_fragments_options(
-        write_fragments,
-        target_bases=target_bases,
-        target_all_bases=target_all_bases,
-        base_store_params=base_store_params,
-        external_blob_mode=external_blob_mode,
-        allow_external_blob_outside_bases=allow_external_blob_outside_bases,
-        stacklevel=4,
-    )
-    kwargs: dict[str, Any] = {}
-
-    if "target_bases" in params and target_bases is not None:
-        kwargs["target_bases"] = target_bases
-
-    if "target_all_bases" in params and target_all_bases is not None:
-        kwargs["target_all_bases"] = target_all_bases
-
-    if "base_store_params" in params and base_store_params is not None:
-        kwargs["base_store_params"] = base_store_params
-
-    if "external_blob_mode" in params:
-        kwargs["external_blob_mode"] = external_blob_mode
-
-    if "allow_external_blob_outside_bases" in params:
-        kwargs["allow_external_blob_outside_bases"] = allow_external_blob_outside_bases
-
-    return kwargs
-
-
 def prepare_fragment_write_options(
     *,
     target_bases: Optional[list[str]] = None,
     target_all_bases: Optional[bool] = None,
-    base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     external_blob_mode: Literal["reference", "ingest"],
     allow_external_blob_outside_bases: bool,
     stacklevel: int = 2,
 ) -> bool:
     """Validate fragment write options and return normalized allow flag."""
-    if (
-        target_bases is None
-        and target_all_bases is None
-        and base_store_params is None
-        and external_blob_mode == "reference"
-        and not allow_external_blob_outside_bases
-    ):
-        return allow_external_blob_outside_bases
-
-    from lance.fragment import write_fragments
-
-    _, allow_external_blob_outside_bases = _prepare_write_fragments_options(
-        write_fragments,
-        target_bases=target_bases,
-        target_all_bases=target_all_bases,
-        base_store_params=base_store_params,
-        external_blob_mode=external_blob_mode,
-        allow_external_blob_outside_bases=allow_external_blob_outside_bases,
-        stacklevel=stacklevel + 2,
-    )
-    return allow_external_blob_outside_bases
-
-
-def _prepare_write_fragments_options(
-    write_fragments: Callable[..., Any],
-    *,
-    target_bases: Optional[list[str]],
-    target_all_bases: Optional[bool],
-    base_store_params: Optional[dict[str, dict[str, Any]]],
-    external_blob_mode: Literal["reference", "ingest"],
-    allow_external_blob_outside_bases: bool,
-    stacklevel: int,
-) -> tuple[Mapping[str, inspect.Parameter], bool]:
     if target_bases and target_all_bases is not None:
         raise ValueError("'target_bases' and 'target_all_bases' are mutually exclusive")
 
-    params = inspect.signature(write_fragments).parameters
-
-    if target_bases is not None and "target_bases" not in params:
-        raise _unsupported_write_fragments_option_error("target_bases")
-
-    if target_all_bases is not None and "target_all_bases" not in params:
-        raise _unsupported_write_fragments_option_error("target_all_bases")
-
-    if base_store_params is not None and "base_store_params" not in params:
-        raise _unsupported_write_fragments_option_error("base_store_params")
-
-    if "external_blob_mode" not in params and external_blob_mode != "reference":
-        raise _unsupported_write_fragments_option_error("external_blob_mode")
-
-    if external_blob_mode == "reference":
-        if (
-            "allow_external_blob_outside_bases" not in params
-            and allow_external_blob_outside_bases
-        ):
-            raise _unsupported_write_fragments_option_error(
-                "allow_external_blob_outside_bases"
-            )
-    elif external_blob_mode == "ingest" and allow_external_blob_outside_bases:
+    if external_blob_mode == "ingest" and allow_external_blob_outside_bases:
         warnings.warn(
             "'allow_external_blob_outside_bases' only applies when "
             "'external_blob_mode=\"reference\"' and will be ignored when "
             "'external_blob_mode=\"ingest\"'.",
-            stacklevel=stacklevel,
+            stacklevel=stacklevel + 1,
         )
-        allow_external_blob_outside_bases = False
+        return False
 
-    return params, allow_external_blob_outside_bases
-
-
-def _unsupported_write_fragments_option_error(option: str) -> RuntimeError:
-    return RuntimeError(
-        f"The installed pylance does not support '{option}' in "
-        "lance.fragment.write_fragments. Install a pylance build with the "
-        "required fragment write option."
-    )
+    return allow_external_blob_outside_bases
 
 
 class LanceFragmentWriter:
@@ -383,7 +281,6 @@ class LanceFragmentWriter:
         allow_external_blob_outside_bases = prepare_fragment_write_options(
             target_bases=target_bases,
             target_all_bases=target_all_bases,
-            base_store_params=base_store_params,
             external_blob_mode=external_blob_mode,
             allow_external_blob_outside_bases=allow_external_blob_outside_bases,
             stacklevel=2,

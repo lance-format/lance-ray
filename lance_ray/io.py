@@ -262,7 +262,6 @@ def write_lance(
     allow_external_blob_outside_bases = prepare_fragment_write_options(
         target_bases=target_bases,
         target_all_bases=target_all_bases,
-        base_store_params=base_store_params,
         external_blob_mode=external_blob_mode,
         allow_external_blob_outside_bases=allow_external_blob_outside_bases,
         stacklevel=2,
