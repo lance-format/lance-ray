@@ -12,13 +12,10 @@ import lance_ray as lr
 import pyarrow as pa
 import pytest
 import ray
+from lance import DatasetBasePath, blob_array, blob_field
 from ray.data import Dataset
 
 import pandas as pd
-from _utils import (
-    fragment_write_options_skip_reason,
-    missing_fragment_write_options,
-)
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[1] / "lance" / "python" / "python")
@@ -461,18 +458,6 @@ class TestDatasetOptions:
         assert dataset.count() == 10
 
 
-try:
-    from lance import DatasetBasePath, blob_array, blob_field
-except Exception:
-
-    class _Missing:
-        pass
-
-    DatasetBasePath = _Missing  # type: ignore[assignment,misc]
-    blob_array = _Missing  # type: ignore[assignment]
-    blob_field = _Missing  # type: ignore[assignment]
-
-
 class TestMultiBaseLayout:
     """Tests for multi-base layout (multiple DatasetBasePath) support.
 
@@ -493,10 +478,6 @@ class TestMultiBaseLayout:
         ``Duplicate base path ID 0`` error.
     """
 
-    @pytest.mark.skipif(
-        bool(missing_fragment_write_options("target_all_bases")),
-        reason=fragment_write_options_skip_reason("target_all_bases"),
-    )
     @pytest.mark.parametrize("stream", [False, True])
     @pytest.mark.parametrize("target_all_bases", [True, False])
     def test_target_all_bases_write_modes(
@@ -585,10 +566,6 @@ class TestMultiBaseLayout:
             f"Base path IDs must be unique, got: {base_paths}"
         )
 
-    @pytest.mark.skipif(
-        bool(missing_fragment_write_options("base_store_params")),
-        reason=fragment_write_options_skip_reason("base_store_params"),
-    )
     def test_multiple_initial_bases_with_blob_v2(self, temp_dir: str) -> None:
         """Multi-base write/read with blob v2 columns and no explicit IDs.
 
