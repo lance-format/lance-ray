@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Callable
-from typing import Any, Optional, cast
+from typing import Any, Optional
 
 import lance
 from lance.lance import CompactionMetrics
@@ -139,13 +139,7 @@ def compact_files(
     logger.info("Starting distributed compaction")
 
     # Step 1: Create the compaction plan
-    # Compaction.plan requires a dict; CompactionOptions is a TypedDict, so
-    # an empty instance stands in for "all defaults" when the caller omits it.
-    # It is declared with ``total=True`` upstream even though every key is
-    # optional at runtime, hence the cast instead of ``CompactionOptions()``.
-    compaction_plan = Compaction.plan(
-        dataset, compaction_options or cast(CompactionOptions, {})
-    )
+    compaction_plan = Compaction.plan(dataset, compaction_options or {})
 
     logger.info(f"Compaction plan created with {compaction_plan.num_tasks()} tasks")
 
