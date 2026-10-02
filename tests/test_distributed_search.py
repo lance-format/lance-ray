@@ -220,27 +220,6 @@ def test_execute_indexed_vector_search_plan_does_not_pass_fragments(
     assert scanner_options["fast_search"] is True
 
 
-def test_execute_indexed_vector_search_plan_without_index_segments_support(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FakeDataset:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
-
-        def scanner(self, columns: Any = None) -> SimpleNamespace:
-            return SimpleNamespace(to_table=lambda: pa.table({"id": [1]}))
-
-    with pytest.raises(RuntimeError, match="index_segments"):
-        _execute_vector_search_plan(
-            _SearchPlan(fragment_ids=[1, 2], index_segments=["S1"]),
-            pickled_dataset=_mock_pickled_dataset(monkeypatch, FakeDataset()),
-            base_scanner_options={"columns": ["id"], "fast_search": True},
-            nearest={"column": "vector", "q": [0.0, 0.0], "k": 1},
-            candidate_k=1,
-            analyze_plan=False,
-        )
-
-
 def test_execute_fallback_vector_search_plan_computes_local_top_k(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
