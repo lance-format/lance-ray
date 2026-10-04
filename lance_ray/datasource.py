@@ -134,20 +134,10 @@ class LanceDatasource(Datasource):
         return self._fragments
 
     def _get_storage_options(self) -> Optional[dict[str, str]]:
-        dataset = self.lance_dataset
-        try:
-            return dataset.initial_storage_options
-        except AttributeError:
-            # pylance < 5 only exposes the private attribute.
-            return cast(
-                Optional[dict[str, str]], getattr(dataset, "_storage_options", None)
-            )
+        return self.lance_dataset.initial_storage_options
 
     def _get_serialized_manifest(self) -> Optional[bytes]:
-        try:
-            return self.lance_dataset._ds.serialized_manifest()
-        except AttributeError:
-            return None
+        return self.lance_dataset._ds.serialized_manifest()
 
     def get_read_tasks(
         self, parallelism: int, *args: Any, **kwargs: Any

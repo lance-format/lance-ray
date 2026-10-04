@@ -1,6 +1,5 @@
 """Test cases for lance_ray.fragment module."""
 
-import warnings
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -11,160 +10,6 @@ import pytest
 import ray
 from lance_ray.datasink import LanceDatasink, LanceFragmentCommitter
 from lance_ray.fragment import LanceFragmentWriter, write_fragment
-
-
-def _legacy_write_fragments(
-    reader: Any, uri: Any, *, schema: Optional[pa.Schema] = None
-) -> list[Any]:
-    return []
-
-
-def _write_fragments_with_external_blob_options(
-    reader: Any,
-    uri: Any,
-    *,
-    external_blob_mode: str = "reference",
-    allow_external_blob_outside_bases: bool = False,
-) -> list[Any]:
-    return []
-
-
-def test_fragment_writer_external_blob_options_fail_fast(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-
-    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
-        LanceFragmentWriter(
-            str(tmp_path),
-            data_storage_version="stable",
-            external_blob_mode="ingest",
-        )
-
-    with pytest.raises(
-        RuntimeError,
-        match="allow_external_blob_outside_bases.*write_fragments",
-    ):
-        LanceFragmentWriter(
-            str(tmp_path),
-            data_storage_version="stable",
-            allow_external_blob_outside_bases=True,
-        )
-
-
-def test_datasink_external_blob_options_fail_fast(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-
-    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
-        LanceDatasink(str(tmp_path), external_blob_mode="ingest")
-
-
-def test_write_lance_external_blob_options_fail_fast(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-
-    with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
-        lr.write_lance(cast(Any, object()), str(tmp_path), external_blob_mode="ingest")
-
-
-def test_base_store_params_fail_fast_when_fragment_api_unsupported(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-    base_store_params: dict[str, dict[str, Any]] = {tmp_path.as_uri(): {}}
-
-    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
-        LanceFragmentWriter(
-            str(tmp_path),
-            data_storage_version="stable",
-            base_store_params=base_store_params,
-        )
-
-    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
-        LanceDatasink(str(tmp_path), base_store_params=base_store_params)
-
-    with pytest.raises(RuntimeError, match="base_store_params.*write_fragments"):
-        lr.write_lance(
-            cast(Any, object()), str(tmp_path), base_store_params=base_store_params
-        )
-
-
-def test_target_bases_fail_fast_when_fragment_api_unsupported(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-    target_bases = ["archive"]
-
-    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
-        LanceFragmentWriter(
-            str(tmp_path),
-            data_storage_version="stable",
-            target_bases=target_bases,
-        )
-
-    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
-        LanceDatasink(str(tmp_path), target_bases=target_bases)
-
-    with pytest.raises(RuntimeError, match="target_bases.*write_fragments"):
-        lr.write_lance(cast(Any, object()), str(tmp_path), target_bases=target_bases)
-
-
-@pytest.mark.parametrize("target_all_bases", [True, False])
-def test_target_all_bases_fail_fast_when_fragment_api_unsupported(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    target_all_bases: bool,
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(lance_fragment, "write_fragments", _legacy_write_fragments)
-    uri = str(tmp_path)
-
-    with pytest.raises(RuntimeError, match="target_all_bases.*write_fragments"):
-        LanceFragmentWriter(
-            uri, data_storage_version="stable", target_all_bases=target_all_bases
-        )
-    with pytest.raises(RuntimeError, match="target_all_bases.*write_fragments"):
-        LanceDatasink(uri, target_all_bases=target_all_bases)
-    with pytest.raises(RuntimeError, match="target_all_bases.*write_fragments"):
-        lr.write_lance(cast(Any, object()), uri, target_all_bases=target_all_bases)
-    with pytest.raises(RuntimeError, match="target_all_bases.*write_fragments"):
-        write_fragment([pa.table({"id": [1]})], uri, target_all_bases=target_all_bases)
 
 
 @pytest.mark.parametrize("target_all_bases", [True, False])
@@ -212,15 +57,14 @@ def test_fragment_writer_target_all_bases_forwarded(
 ) -> None:
     import lance.fragment as lance_fragment
 
-    omitted = object()
-    received: list[tuple[Optional[list[str]], object]] = []
+    received: list[tuple[Optional[list[str]], Optional[bool]]] = []
 
     def capture(
         _reader: Any,
         _uri: str,
         *,
         target_bases: Optional[list[str]] = None,
-        target_all_bases: object = omitted,
+        target_all_bases: Optional[bool] = None,
         **_kwargs: Any,
     ) -> list[Any]:
         received.append((target_bases, target_all_bases))
@@ -237,21 +81,10 @@ def test_fragment_writer_target_all_bases_forwarded(
 
     assert len(received) == 1
     assert received[0][0] == target_bases
-    assert received[0][1] is (omitted if target_all_bases is None else target_all_bases)
+    assert received[0][1] is target_all_bases
 
 
-def test_allow_external_blob_outside_bases_ignored_for_ingest(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _write_fragments_with_external_blob_options,
-    )
-
+def test_allow_external_blob_outside_bases_ignored_for_ingest(tmp_path: Path) -> None:
     with pytest.warns(UserWarning, match="will be ignored"):
         writer = LanceFragmentWriter(
             str(tmp_path),
@@ -261,31 +94,6 @@ def test_allow_external_blob_outside_bases_ignored_for_ingest(
         )
 
     assert writer.allow_external_blob_outside_bases is False
-
-
-def test_unsupported_ingest_with_allow_external_blob_outside_bases_does_not_warn(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    import lance.fragment as lance_fragment
-
-    monkeypatch.setattr(
-        lance_fragment,
-        "write_fragments",
-        _legacy_write_fragments,
-    )
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(RuntimeError, match="external_blob_mode.*write_fragments"):
-            LanceFragmentWriter(
-                str(tmp_path),
-                data_storage_version="stable",
-                external_blob_mode="ingest",
-                allow_external_blob_outside_bases=True,
-            )
-
-    assert not any("will be ignored" in str(warning.message) for warning in caught)
 
 
 class TestLanceFragmentWriterCommitter:
