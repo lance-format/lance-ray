@@ -56,3 +56,39 @@ write_lance(ds, uri, data_storage_version="2.1")
 
 To write blob columns in file formats 2.2 and later, use the Blob v2 extension
 type (`lance.blob.v2`), constructed with `lance.blob_field` and `lance.blob_array`.
+
+## Write retries
+
+`write_lance` uses `LanceDatasink`, which allows up to ten fragment write attempts
+for matching I/O errors. `write_fragment` and `LanceFragmentWriter` use one attempt
+unless `retry_params["max_attempts"]` is explicitly greater than one.
+
+Retries in `write_fragment` require a replayable iterable, such as a list or tuple,
+or a factory that returns fresh, logically equivalent input for each attempt.
+For a generator function `read_blocks`, pass the function itself to enable replay:
+
+```python
+write_fragment(read_blocks(), "single.lance")  # Single streaming attempt.
+
+write_fragment(
+    read_blocks,
+    "retry.lance",
+    retry_params={
+        "description": "write lance fragments",
+        "match": ["LanceError(IO)"],
+        "max_attempts": 3,
+        "max_backoff_s": 8,
+    },
+)
+```
+
+Retries use fresh readers without IPC or temporary-file staging. `LanceDatasink`
+retains all block references for a write call without copying Arrow data, which
+may extend their memory lifetime. `max_bytes_per_file` does not limit that memory.
+`LanceFragmentWriter` reruns its transform on each attempt; the transform must
+produce equivalent output and handle repeated side effects. Returning the same
+generator from a factory is not sufficient for replay.
+
+Before returning fragments, `write_fragment` checks their total row count against
+the input and raises `RuntimeError` on a mismatch. This does not validate row
+contents, provide job-wide exactly-once semantics, or clean up failed-write files.

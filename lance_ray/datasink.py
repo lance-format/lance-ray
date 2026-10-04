@@ -1,5 +1,5 @@
 import pickle
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -14,7 +14,12 @@ from ray.data import DataContext
 from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink, WriteResult
 
-from .fragment import prepare_fragment_write_options, write_fragment
+from .fragment import (
+    FragmentStream,
+    FragmentStreamFactory,
+    prepare_fragment_write_options,
+    write_fragment,
+)
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -391,7 +396,7 @@ class LanceDatasink(_BaseLanceDatasink):
         match = []
         match.extend(self.WRITE_FRAGMENTS_ERRORS_TO_RETRY)
         match.extend(DataContext.get_current().retried_io_errors)
-        self._retry_params = {
+        self._retry_params: dict[str, Any] = {
             "description": "write lance fragments",
             "match": match,
             "max_attempts": self.WRITE_FRAGMENTS_MAX_ATTEMPTS,
@@ -410,8 +415,18 @@ class LanceDatasink(_BaseLanceDatasink):
         blocks: Iterable[Union[pa.Table, "pd.DataFrame"]],
         ctx: Any,
     ) -> WriteReturn:
+        stream: FragmentStream | FragmentStreamFactory = blocks
+        if self._retry_params.get("max_attempts", 1) > 1:
+            # Retain the existing block objects, without copying their Arrow data.
+            replayable_blocks = list(blocks)
+
+            def stream_factory() -> Iterator[Union[pa.Table, "pd.DataFrame"]]:
+                return iter(replayable_blocks)
+
+            stream = stream_factory
+
         fragments_and_schema = write_fragment(
-            blocks,
+            stream,
             self.dataset_uri,
             schema=self.schema,
             max_rows_per_file=self.max_rows_per_file,
