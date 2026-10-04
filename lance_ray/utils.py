@@ -4,6 +4,8 @@ from collections.abc import Iterable, Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, TypeVar
 
+from lance.dataset import LANCE_COMMIT_MESSAGE_KEY, LanceOperation, Transaction
+
 if TYPE_CHECKING:
     from lance_namespace import LanceNamespace
 
@@ -13,6 +15,50 @@ T = TypeVar("T")
 _NAMESPACE_CACHE_SIZE = int(os.environ.get("LANCE_RAY_NAMESPACE_CACHE_SIZE", "16"))
 
 _PYLANCE_5 = (5, 0, 0)
+
+
+def normalize_transaction_properties(
+    transaction_properties: Optional[dict[str, str]],
+    commit_message: Optional[str],
+) -> Optional[dict[str, str]]:
+    """Copy transaction properties and merge the message with PyLance precedence."""
+    if transaction_properties is not None and (
+        not isinstance(transaction_properties, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in transaction_properties.items()
+        )
+    ):
+        raise TypeError("transaction_properties must be a dict[str, str] or None")
+    if commit_message is not None and not isinstance(commit_message, str):
+        raise TypeError("commit_message must be a str or None")
+    if transaction_properties is None and commit_message is None:
+        return None
+    properties = dict(transaction_properties or {})
+    if commit_message is not None:
+        properties[LANCE_COMMIT_MESSAGE_KEY] = commit_message
+    return properties
+
+
+def with_transaction_properties(
+    operation: LanceOperation.BaseOperation,
+    read_version: Optional[int],
+    transaction_properties: Optional[dict[str, str]],
+) -> LanceOperation.BaseOperation | Transaction:
+    """Attach properties without bypassing the commit API's version validation."""
+    if transaction_properties is None:
+        return operation
+    if read_version is None and not isinstance(
+        operation, LanceOperation.Overwrite | LanceOperation.Restore
+    ):
+        raise ValueError(
+            "read_version is required for all operations except Overwrite and Restore"
+        )
+    return Transaction(
+        read_version=read_version if read_version is not None else 0,
+        operation=operation,
+        transaction_properties=dict(transaction_properties),
+    )
 
 
 def normalize_initial_bases(

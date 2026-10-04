@@ -9,8 +9,10 @@ import lance_ray.io as lr
 import pyarrow as pa
 import pytest
 import ray
+from lance.dataset import LANCE_COMMIT_MESSAGE_KEY, LanceOperation
 from lance_ray.datasink import LanceDatasink, LanceFragmentCommitter
 from lance_ray.fragment import LanceFragmentWriter, write_fragment
+from lance_ray.utils import with_transaction_properties
 
 
 def _legacy_write_fragments(
@@ -288,6 +290,32 @@ def test_unsupported_ingest_with_allow_external_blob_outside_bases_does_not_warn
     assert not any("will be ignored" in str(warning.message) for warning in caught)
 
 
+@pytest.mark.parametrize("sink_type", [LanceDatasink, LanceFragmentCommitter])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"transaction_properties": []},
+        {"transaction_properties": {1: "value"}},
+        {"transaction_properties": {"key": 1}},
+        {"commit_message": 123},
+    ],
+)
+def test_datasink_invalid_metadata_fails_before_write(
+    tmp_path: Path,
+    sink_type: type[LanceDatasink] | type[LanceFragmentCommitter],
+    kwargs: dict[str, Any],
+) -> None:
+    uri = str(tmp_path / "invalid.lance")
+    with pytest.raises(TypeError, match="transaction_properties|commit_message"):
+        sink_type(uri, **kwargs)
+    assert not Path(uri).exists()
+
+
+def test_append_metadata_requires_read_version() -> None:
+    with pytest.raises(ValueError, match="read_version is required"):
+        with_transaction_properties(LanceOperation.Append([]), None, {"job": "123"})
+
+
 class TestLanceFragmentWriterCommitter:
     """Test cases for LanceFragmentWriter and LanceCommitter."""
 
@@ -501,3 +529,30 @@ class TestLanceFragmentWriterCommitter:
                 assert str_val == f"str-{id_val}", (
                     f"ID {id_val} should have 'str-{id_val}' but got {str_val}"
                 )
+
+    @pytest.mark.parametrize("committer", [False, True])
+    def test_direct_datasink_metadata(self, tmp_path: Path, committer: bool) -> None:
+        uri = str(tmp_path / "direct.lance")
+        properties = {"job_id": "original", LANCE_COMMIT_MESSAGE_KEY: "old"}
+        sink_type = LanceFragmentCommitter if committer else LanceDatasink
+        sink = sink_type(uri, transaction_properties=properties, commit_message="new")
+        assert properties[LANCE_COMMIT_MESSAGE_KEY] == "old"
+        properties["job_id"] = "changed after construction"
+        ds = ray.data.range(4)
+        if committer:
+            ds = ds.map_batches(LanceFragmentWriter(uri), batch_size=2)
+        ds.write_datasink(sink)
+        result = lance.dataset(uri)
+        txn = result.read_transaction(result.version)
+        assert txn is not None
+        assert txn.transaction_properties == {
+            "job_id": "original",
+            LANCE_COMMIT_MESSAGE_KEY: "new",
+        }
+        assert result.count_rows() == 4
+
+    def test_empty_commit_does_not_create_dataset(self, tmp_path: Path) -> None:
+        uri = str(tmp_path / "empty.lance")
+        sink = LanceFragmentCommitter(uri, commit_message="nothing to commit")
+        sink.on_write_complete([[]])
+        assert not Path(uri).exists()
