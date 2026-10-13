@@ -511,8 +511,14 @@ def _vector_column_to_numpy(
 
 
 def _take_top_k(table: pa.Table, k: int) -> pa.Table:
-    sort_indices = pc.sort_indices(table, sort_keys=[("_distance", "ascending")])
-    return table.take(sort_indices.slice(0, k))
+    # select_k_unstable is an O(n log k) partial sort, cheaper than fully
+    # sorting all candidates before slicing the global top-k. pyarrow-stubs only
+    # models Array/ChunkedArray/Expression inputs, not Table, though it is valid
+    # at runtime (sort_keys name the table's columns).
+    indices = pc.select_k_unstable(  # type: ignore[call-overload]
+        table, k=k, sort_keys=[("_distance", "ascending")]
+    )
+    return table.take(indices)
 
 
 def _merge_vector_search_results(tables: list[pa.Table], k: int) -> pa.Table:
