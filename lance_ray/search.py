@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import math
 import pickle
@@ -57,20 +56,6 @@ def _dataset_load_kwargs(
     if block_size is not None:
         kwargs["block_size"] = block_size
     return kwargs
-
-
-def _get_dataset_storage_options(dataset: LanceDataset) -> dict[str, Any]:
-    try:
-        return dataset.initial_storage_options or {}
-    except AttributeError:
-        return getattr(dataset, "_storage_options", None) or {}
-
-
-def _get_fragment_id(fragment: Any) -> int:
-    try:
-        return cast(int, fragment.fragment_id)
-    except AttributeError:
-        return cast(int, fragment.metadata.id)
 
 
 def _index_value(index: Any, name: str, default: Any = None) -> Any:
@@ -133,13 +118,13 @@ def _plan_vector_search(
     num_workers: int,
     include_unindexed: bool,
 ) -> list[_SearchPlan]:
-    fragment_ids = {_get_fragment_id(fragment) for fragment in fragments}
+    fragment_ids = {fragment.fragment_id for fragment in fragments}
     if not fragment_ids:
         return []
 
     fragment_weights: dict[int, int] = {}
     for fragment in fragments:
-        fragment_id = _get_fragment_id(fragment)
+        fragment_id = fragment.fragment_id
         try:
             fragment_weights[fragment_id] = fragment.count_rows()
         except Exception:  # pragma: no cover - defensive fallback
@@ -268,13 +253,6 @@ def _execute_vector_search_plan(
             analyze_plan=analyze_plan,
         )
 
-    if not _scanner_accepts_index_segments(dataset):
-        raise RuntimeError(
-            "The installed pylance scanner does not support index_segments, "
-            "which is required for distributed indexed vector search plans. "
-            "Upgrade pylance or run without an indexed plan."
-        )
-
     scanner_options = dict(base_scanner_options)
     search_nearest = dict(nearest)
     search_nearest["k"] = candidate_k
@@ -293,17 +271,6 @@ def _execute_vector_search_plan(
     if analyze_plan:
         return _SearchPlanAnalysis(plan=plan, analysis=scanner.analyze_plan())
     return scanner.to_table()
-
-
-def _scanner_accepts_index_segments(dataset: LanceDataset) -> bool:
-    try:
-        parameters = inspect.signature(dataset.scanner).parameters
-    except (TypeError, ValueError):  # pragma: no cover - defensive
-        return True
-    return "index_segments" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
 
 
 def _execute_flat_fallback_vector_search_plan(
@@ -705,7 +672,7 @@ def vector_search(
     else:
         dataset = uri
         if not merged_storage_options:
-            merged_storage_options.update(_get_dataset_storage_options(dataset))
+            merged_storage_options.update(dataset.initial_storage_options or {})
 
     try:
         resolved_column = resolve_arrow_field_path(dataset.schema, column)

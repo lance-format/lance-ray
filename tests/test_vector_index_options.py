@@ -18,7 +18,9 @@ def _load_index_module_with_stubs() -> ModuleType:
     package.__path__ = [str(repo_root / "lance_ray")]
 
     lance = ModuleType("lance")
-    lance.__version__ = "6.0.0"  # type: ignore[attr-defined]
+
+    lance_bitmap = ModuleType("lance.bitmap")
+    lance_bitmap.Bitmap = set  # type: ignore[attr-defined]
 
     lance_dataset = ModuleType("lance.dataset")
     lance_dataset.Index = type("Index", (), {})  # type: ignore[attr-defined]
@@ -36,6 +38,7 @@ def _load_index_module_with_stubs() -> ModuleType:
 
     sys.modules["lance_ray"] = package
     sys.modules["lance"] = lance
+    sys.modules["lance.bitmap"] = lance_bitmap
     sys.modules["lance.dataset"] = lance_dataset
     sys.modules["lance.indices"] = lance_indices
     sys.modules["ray"] = ray
@@ -221,7 +224,6 @@ def test_create_index_passes_global_training_options_to_segment_build(
         fragment_handler = kwargs["create_fragment_handler"]()
         return [fragment_handler([0, 1])]
 
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
     monkeypatch.setattr(index_mod, "IndicesBuilder", FakeIndicesBuilder)
     monkeypatch.setattr(index_mod, "LanceDataset", lambda *args, **kwargs: fake_dataset)
     monkeypatch.setattr(
@@ -310,7 +312,6 @@ def test_create_index_supports_ivf_rq(monkeypatch: pytest.MonkeyPatch) -> None:
             }
         ]
 
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
     monkeypatch.setattr(index_mod, "IndicesBuilder", FakeIndicesBuilder)
     monkeypatch.setattr(index_mod, "LanceDataset", lambda *args, **kwargs: fake_dataset)
     monkeypatch.setattr(
@@ -398,7 +399,6 @@ def test_create_index_uses_provided_ivf_rq_model(
             }
         ]
 
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
     monkeypatch.setattr(index_mod, "IndicesBuilder", FakeIndicesBuilder)
     monkeypatch.setattr(index_mod, "LanceDataset", lambda *args, **kwargs: fake_dataset)
     monkeypatch.setattr(
@@ -436,8 +436,6 @@ def test_create_index_rejects_non_positive_sample_rate(
 ) -> None:
     """Invalid sample rates should fail before training starts."""
 
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
-
     with pytest.raises(ValueError, match="sample_rate must be positive, got 0"):
         index_mod.create_index(
             uri=cast(Any, _FakeDataset()),
@@ -451,8 +449,6 @@ def test_create_index_rejects_invalid_num_segments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Invalid segment counts should fail before training starts."""
-
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
 
     with pytest.raises(ValueError, match="num_segments must be positive, got 0"):
         index_mod.create_index(
@@ -588,7 +584,6 @@ def test_create_index_passes_block_size_to_loads_and_handler(
             }
         ]
 
-    monkeypatch.setattr(index_mod, "_check_pylance_version", lambda: None)
     monkeypatch.setattr(index_mod, "IndicesBuilder", FakeIndicesBuilder)
     monkeypatch.setattr(index_mod, "LanceDataset", fake_lance_dataset)
     monkeypatch.setattr(
