@@ -21,6 +21,7 @@ from .io import (
     add_columns_from,
     merge_columns_from,
     read_lance,
+    update_columns_from,
     write_lance,
 )
 from .pool import clear_global_pool, get_global_pool, init_global_pool, set_global_pool
@@ -37,6 +38,7 @@ __all__ = [
     "add_columns",
     "add_columns_from",
     "merge_columns_from",
+    "update_columns_from",
     "create_scalar_index",
     "create_index",
     "optimize_indices",

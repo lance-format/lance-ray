@@ -19,7 +19,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # Make local Lance python package available for import
 sys.path.insert(
@@ -429,3 +429,93 @@ def test_stream_copy_resume_local(temp_dir: str) -> None:
         .reset_index(drop=True)
     )
     pd.testing.assert_frame_equal(src_df, dst_df)
+
+
+def test_blob_block_metadata_matches_reconstructed_batches(temp_dir: str) -> None:
+    """Ray block metadata must describe the large-binary values readers yield."""
+    import contextlib
+    import inspect
+
+    from lance_ray.datasource import LanceDatasource, _schema_with_ray_blob_types
+    from ray.data.block import BlockMetadata
+
+    class _BlobV2Type(pa.ExtensionType):
+        def __init__(self) -> None:
+            super().__init__(pa.large_binary(), "lance.blob.v2")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return b""
+
+        @classmethod
+        def __arrow_ext_deserialize__(
+            cls,
+            storage_type: pa.DataType,
+            serialized: bytes,
+        ) -> "_BlobV2Type":
+            return cls()
+
+    blob_v2_type = cast(pa.DataType, _BlobV2Type())
+    with contextlib.suppress(pa.ArrowKeyError):
+        pa.register_extension_type(cast(Any, _BlobV2Type()))
+
+    blob_fields: list[pa.Field[Any]] = [
+        pa.field(
+            "blob",
+            blob_v2_type,
+            nullable=True,
+            metadata={b"keep": b"no"},
+        ),
+        pa.field(
+            "legacy",
+            pa.large_binary(),
+            metadata={b"lance-encoding:blob": b"true"},
+        ),
+        pa.field("id", pa.int64()),
+    ]
+    rewritten = _schema_with_ray_blob_types(pa.schema(blob_fields))
+    legacy_metadata = rewritten.field("legacy").metadata
+    assert rewritten.field("blob").type == pa.large_binary()
+    assert rewritten.field("blob").metadata is None
+    assert rewritten.field("legacy").type == pa.large_binary()
+    assert legacy_metadata is not None
+    assert legacy_metadata[b"lance-encoding:blob"] == b"true"
+    assert rewritten.field("id").type == pa.int64()
+
+    if "schema" not in inspect.signature(BlockMetadata.__init__).parameters:
+        pytest.skip("Ray BlockMetadata has no schema")
+
+    path = Path(temp_dir) / "blob_block_metadata.lance"
+    blob_values = [b"foo", None, b"bar"]
+    written_fields: list[pa.Field[Any]] = [
+        pa.field(
+            "blob",
+            pa.large_binary(),
+            metadata={"lance-encoding:blob": "true"},
+        ),
+        pa.field("id", pa.int64()),
+    ]
+    schema = pa.schema(written_fields)
+    table = pa.table(
+        [
+            pa.array(blob_values, type=pa.large_binary()),
+            pa.array([1, 2, 3], type=pa.int64()),
+        ],
+        schema=schema,
+    )
+    lr.write_lance(
+        ray.data.from_arrow(table),
+        str(path),
+        schema=schema,
+        data_storage_version="2.1",
+    )
+
+    tasks = LanceDatasource(uri=str(path)).get_read_tasks(1)
+    block_schema = cast(pa.Schema | None, tasks[0].metadata.schema)
+    assert block_schema is not None
+    block_blob = block_schema.field("blob")
+    assert block_blob.type == pa.large_binary()
+    assert block_blob.metadata is not None
+    assert block_blob.metadata[b"lance-encoding:blob"] == b"true"
+    read_table = pa.concat_tables(cast(list[pa.Table], list(tasks[0].read_fn())))
+    assert read_table.schema.field("blob").type == block_blob.type
+    assert read_table.schema.field("blob").metadata == block_blob.metadata
