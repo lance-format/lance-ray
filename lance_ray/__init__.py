@@ -24,12 +24,26 @@ from .io import (
     write_lance,
 )
 from .pool import clear_global_pool, get_global_pool, init_global_pool, set_global_pool
+from .prewarm import (
+    IndexPrewarmAssignment,
+    IndexPrewarmError,
+    IndexPrewarmPlan,
+    IndexPrewarmReport,
+    plan_index_prewarm,
+    prewarm_index,
+)
 from .search import vector_search
 
 __all__ = [
     "read_lance",
     "write_lance",
     "vector_search",
+    "plan_index_prewarm",
+    "prewarm_index",
+    "IndexPrewarmAssignment",
+    "IndexPrewarmPlan",
+    "IndexPrewarmReport",
+    "IndexPrewarmError",
     "init_global_pool",
     "set_global_pool",
     "get_global_pool",
