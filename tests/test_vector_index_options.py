@@ -75,7 +75,7 @@ class _FakeLanceField:
 
 class _FakeLanceSchema:
     def field(self, column: str) -> "_FakeLanceField":
-        if column not in {"value", "text", "labels"}:
+        if column not in {"value", "text", "labels", "event_date"}:
             raise KeyError(column)
         return _FakeLanceField()
 
@@ -90,6 +90,8 @@ class _FakeSchema:
             return _FakeField(column, pa.string())
         if column == "labels":
             return _FakeField(column, pa.list_(pa.string()))
+        if column == "event_date":
+            return _FakeField(column, pa.date32())
         else:
             raise KeyError(column)
 
@@ -100,6 +102,7 @@ class _FakeSchema:
                 _FakeField("value", pa.int64()),
                 _FakeField("text", pa.string()),
                 _FakeField("labels", pa.list_(pa.string())),
+                _FakeField("event_date", pa.date32()),
             ]
         )
 
@@ -547,6 +550,7 @@ def test_create_index_rejects_invalid_num_segments(
     ("index_type", "column"),
     [
         ("BTREE", "value"),
+        ("BTREE", "event_date"),
         ("BITMAP", "value"),
         ("INVERTED", "text"),
         ("FTS", "text"),
@@ -554,6 +558,7 @@ def test_create_index_rejects_invalid_num_segments(
         ("BLOOMFILTER", "value"),
         ("RTREE", "value"),
         ("LABEL_LIST", "labels"),
+        ("ZONEMAP", "event_date"),
     ],
 )
 def test_create_scalar_index_uses_segment_path(
