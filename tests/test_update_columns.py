@@ -883,6 +883,36 @@ class TestDriverSideRejection:
 
         assert _dataset_fingerprint(path) == before
 
+    def test_rejects_batch_udf_with_checkpoint_file(
+        self, temp_dir: str, tmp_path: Path
+    ) -> None:
+        """A checkpoint Lance would drive in-process cannot be honored here.
+
+        Each transform runs in its own Ray task and Lance never sees the
+        ``BatchUDF``, so accepting the file would promise a resumable run that
+        nothing writes to.
+        """
+        path = Path(temp_dir) / "udf_checkpoint.lance"
+        _write_products(path, rows=4, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 2.0)}),
+            output_schema=pa.schema([pa.field("price", pa.float64())]),
+            checkpoint_file=str(tmp_path / "ckpt.sqlite"),
+        )
+        assert udf.cache is not None
+
+        with pytest.raises(ValueError, match="checkpoint_file"):
+            lr.update_columns(
+                str(path),
+                transform=udf,
+                columns=["price"],
+                read_columns=["price"],
+            )
+
+        assert _dataset_fingerprint(path) == before
+
 
 class TestStableRowIds:
     """Row-level version metadata must track exactly the rows that changed.

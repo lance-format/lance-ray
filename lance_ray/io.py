@@ -1592,6 +1592,13 @@ def update_columns(
             preserve row count and row order**; reordering cannot be detected
             and silently writes values to the wrong rows. Do not filter, sort,
             join, deduplicate, aggregate or explode inside the transform.
+
+            A ``BatchUDF`` is called for its function only. Its
+            ``output_schema`` is not consulted -- ``columns`` and the dataset's
+            own types define the result, and they are checked more strictly --
+            and a ``checkpoint_file`` is rejected, because the checkpoint
+            Lance would drive in-process cannot be honored across per-fragment
+            Ray tasks.
         columns: Names of the existing columns to overwrite. Required, and
             checked against the target dataset before any Ray task starts. The
             output Arrow type and nullability of each column are taken from the
@@ -1629,6 +1636,19 @@ def update_columns(
 
     """
     validate_uri_or_namespace(uri, namespace_impl, list(table_id) if table_id else None)
+
+    if isinstance(transform, BatchUDF) and transform.cache is not None:
+        # Lance drives a BatchUDF checkpoint itself while rewriting fragments
+        # one at a time in-process. Here the transform runs inside a Ray task
+        # per fragment and Lance never sees the BatchUDF, so the SQLite
+        # checkpoint would be neither read nor written. Refuse it instead of
+        # letting a caller believe an expensive run is resumable.
+        raise ValueError(
+            "update_columns does not support a BatchUDF with checkpoint_file: "
+            "the transform runs in a Ray task per fragment, so the checkpoint "
+            "would be silently ignored. Pass a BatchUDF without "
+            "checkpoint_file, or a plain callable."
+        )
 
     table_id_list = list(table_id) if table_id is not None else None
     namespace_properties_dict = (

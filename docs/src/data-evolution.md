@@ -58,10 +58,17 @@ Lance-Ray pins a dataset snapshot and processes each fragment in one Ray task.
 The task scans the fragment, applies `filter` and `transform`, then rewrites
 only the requested columns. Untouched columns retain their original data files.
 
-`transform` accepts and returns a `pyarrow.RecordBatch`. A `lance.udf.BatchUDF`
-is also accepted. Its result must contain exactly the fields named in `columns`.
-The transform must preserve both row count and row order: do not filter, sort,
-join, deduplicate, aggregate, or explode rows inside it.
+`transform` accepts and returns a `pyarrow.RecordBatch`. Its result must
+contain exactly the fields named in `columns`. The transform must preserve both
+row count and row order: do not filter, sort, join, deduplicate, aggregate, or
+explode rows inside it.
+
+A `lance.udf.BatchUDF` is accepted, but only its function is used: the
+`output_schema` is not consulted, since `columns` and the dataset's own types
+define the result and are checked more strictly, and a `checkpoint_file` is
+rejected up front. Lance drives that checkpoint while rewriting fragments
+in-process; here each transform runs in its own Ray task and Lance never sees
+the `BatchUDF`, so the checkpoint could not be honored.
 
 **Parameters:**
 
