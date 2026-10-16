@@ -1440,16 +1440,23 @@ def _handle_update_fragment(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
-) -> Callable[[int], Optional[tuple[int, bytes, bytes, int]]]:
+    with_offsets: bool,
+) -> Callable[[int], Optional[tuple[int, bytes, bytes, int, Optional[bytes]]]]:
     """Create the fragment-local fast-path worker for ``update_columns``.
 
     The input always originates from the same pinned Lance fragment.  Keeping
     scan, transform and rewrite in one Ray task avoids the Ray Data shuffle and
     regrouping required by ``merge_columns_from`` for externally-created data.
+
+    ``with_offsets`` is set for datasets with stable row ids, where the commit
+    needs the matched physical row offsets to refresh row-level version
+    metadata; each worker then returns them as RoaringBitmap bytes.
     """
     apply_transform = _apply_update_transform(transform, output_schema)
 
-    def _update_fragment(fragment_id: int) -> Optional[tuple[int, bytes, bytes, int]]:
+    def _update_fragment(
+        fragment_id: int,
+    ) -> Optional[tuple[int, bytes, bytes, int, Optional[bytes]]]:
         namespace_kwargs = get_namespace_kwargs(
             namespace_impl, namespace_properties, table_id
         )
@@ -1510,16 +1517,26 @@ def _handle_update_fragment(
         update_reader = pa.RecordBatchReader.from_batches(
             reader_schema, updated_batches()
         )
-        fragment_meta, fields_modified = fragment.update_columns(
-            update_reader,
-            left_on="_rowaddr",
-            right_on="_rowaddr",
-        )
+        matched_offsets: Optional[bytes] = None
+        if with_offsets:
+            fragment_meta, fields_modified, matched_offsets = fragment.update_columns(
+                update_reader,
+                left_on="_rowaddr",
+                right_on="_rowaddr",
+                with_offsets=True,
+            )
+        else:
+            fragment_meta, fields_modified = fragment.update_columns(
+                update_reader,
+                left_on="_rowaddr",
+                right_on="_rowaddr",
+            )
         return (
             fragment_id,
             pickle.dumps(fragment_meta),
             pickle.dumps(list(fields_modified)),
             rows_updated,
+            matched_offsets,
         )
 
     return _update_fragment
@@ -1641,14 +1658,11 @@ def update_columns(
     )
     resolved_read_version = lance_ds.version
 
-    if lance_ds.has_stable_row_ids:
-        raise NotImplementedError(
-            "Distributed update_columns does not yet support datasets with "
-            "stable row IDs: pylance does not expose the matched row offsets "
-            "that Lance needs to advance _row_last_updated_at_version, so the "
-            "change would be invisible to CDF consumers "
-            "(lance-format/lance#6734)."
-        )
+    # Over stable row ids a ``rewrite_columns`` commit only refreshes
+    # _row_last_updated_at_version for the offsets it is given, so the workers
+    # have to report which physical rows the join matched
+    # (lance-format/lance#6734).
+    stable_row_ids = lance_ds.has_stable_row_ids
 
     field_ids, output_schema = _resolve_update_targets(lance_ds, columns)
     projection = _resolve_read_columns(lance_ds, read_columns)
@@ -1667,6 +1681,7 @@ def update_columns(
         namespace_impl,
         namespace_properties_dict,
         table_id_list,
+        stable_row_ids,
     )
     pool = Pool(processes=concurrency, ray_remote_args=dict(ray_remote_args or {}))
     try:
@@ -1689,8 +1704,15 @@ def update_columns(
     seen_frag_ids: set[int] = set()
     rows_updated = 0
     observed_field_ids: Optional[list[int]] = None
+    fragment_offsets: dict[int, bytes] = {}
 
-    for frag_id, fragment_meta_bytes, fields_modified_bytes, updated_rows in rows:
+    for (
+        frag_id,
+        fragment_meta_bytes,
+        fields_modified_bytes,
+        updated_rows,
+        matched_offsets,
+    ) in rows:
         if frag_id in seen_frag_ids:
             raise ValueError(f"Duplicate fragment {frag_id} in worker output")
         seen_frag_ids.add(frag_id)
@@ -1703,6 +1725,16 @@ def update_columns(
             )
         updated_fragments.append(fragment_meta)
         rows_updated += updated_rows
+
+        if stable_row_ids:
+            if matched_offsets is None:
+                raise ValueError(
+                    f"Worker for fragment {frag_id} reported no matched row "
+                    "offsets while the dataset uses stable row ids; committing "
+                    "without them would leave _row_last_updated_at_version "
+                    "stale and hide the update from CDF consumers."
+                )
+            fragment_offsets[frag_id] = matched_offsets
 
         worker_field_ids = sorted(pickle.loads(fields_modified_bytes))
         if observed_field_ids is None:
@@ -1727,6 +1759,9 @@ def update_columns(
         fields_modified=observed_field_ids,
         fields_for_preserving_frag_bitmap=[],
         update_mode="rewrite_columns",
+        # Empty unless the dataset uses stable row ids; Lance then refreshes
+        # _row_last_updated_at_version for exactly these rows.
+        updated_fragment_offsets=fragment_offsets or None,
     )
     # Unmodified fragments are intentionally not resubmitted: Lance's Update
     # transaction merges by fragment id and carries the rest through untouched.

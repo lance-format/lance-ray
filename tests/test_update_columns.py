@@ -883,27 +883,103 @@ class TestDriverSideRejection:
 
         assert _dataset_fingerprint(path) == before
 
-    def test_stable_row_ids_rejected_without_touching_the_dataset(
-        self, temp_dir: str
-    ) -> None:
-        path = Path(temp_dir) / "stable_untouched.lance"
+
+class TestStableRowIds:
+    """Row-level version metadata must track exactly the rows that changed.
+
+    A ``rewrite_columns`` commit only refreshes
+    ``_row_last_updated_at_version`` for the physical offsets it is handed, so
+    each fragment task reports the offsets its join matched
+    (lance-format/lance#6734).
+    """
+
+    @staticmethod
+    def _write(path: Path, rows: int = 6, max_rows_per_file: int = 3) -> None:
         table = pa.table(
             {
-                "id": pa.array([1, 2], pa.int32()),
-                "price": pa.array([1.0, 2.0], pa.float64()),
+                "id": pa.array(list(range(1, rows + 1)), pa.int32()),
+                "price": pa.array([float(i * 10) for i in range(1, rows + 1)]),
             }
         )
-        lance.write_dataset(table, str(path), enable_stable_row_ids=True)
-        before = _dataset_fingerprint(path)
+        lance.write_dataset(
+            table,
+            str(path),
+            max_rows_per_file=max_rows_per_file,
+            enable_stable_row_ids=True,
+        )
 
-        with pytest.raises(NotImplementedError, match="stable row IDs"):
-            lr.update_columns(
-                str(path),
-                transform=_double_price,
-                columns=["price"],
-            )
+    @staticmethod
+    def _rows(path: Path) -> dict[str, list[Any]]:
+        table = lance.dataset(str(path)).to_table(
+            columns=["id", "price", "_rowid", "_row_last_updated_at_version"]
+        )
+        return {name: table.column(name).to_pylist() for name in table.column_names}
 
-        assert _dataset_fingerprint(path) == before
+    def test_filtered_update_advances_only_matched_rows(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "stable_filtered.lance"
+        self._write(path)
+        before = self._rows(path)
+        read_version = lance.dataset(str(path)).version
+        assert set(before["_row_last_updated_at_version"]) == {read_version}
+
+        result = lr.update_columns(
+            str(path),
+            transform=_double_price,
+            columns=["price"],
+            filter="id >= 5",
+        )
+
+        after = self._rows(path)
+        assert result.rows_updated == 2
+        assert result.version > read_version
+        # Values: only the matched rows changed.
+        assert after["price"] == [10.0, 20.0, 30.0, 40.0, 100.0, 120.0]
+        # Identity: stable row ids survive a RewriteColumns update.
+        assert after["_rowid"] == before["_rowid"]
+        assert after["id"] == before["id"]
+        # CDF metadata: advanced for the matched rows, untouched for the rest.
+        assert after["_row_last_updated_at_version"] == [
+            read_version,
+            read_version,
+            read_version,
+            read_version,
+            result.version,
+            result.version,
+        ]
+
+    def test_unfiltered_update_advances_every_row(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "stable_all.lance"
+        self._write(path)
+        read_version = lance.dataset(str(path)).version
+
+        result = lr.update_columns(
+            str(path),
+            transform=_double_price,
+            columns=["price"],
+        )
+
+        after = self._rows(path)
+        assert result.rows_updated == 6
+        assert result.version > read_version
+        assert after["price"] == [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+        assert set(after["_row_last_updated_at_version"]) == {result.version}
+
+    def test_non_matching_filter_leaves_versions_alone(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "stable_noop.lance"
+        self._write(path)
+        before = self._rows(path)
+        fingerprint = _dataset_fingerprint(path)
+
+        result = lr.update_columns(
+            str(path),
+            transform=_double_price,
+            columns=["price"],
+            filter="id > 1000",
+        )
+
+        assert result.rows_updated == 0
+        assert _dataset_fingerprint(path) == fingerprint
+        assert self._rows(path) == before
 
 
 class TestRejectedScenarios:

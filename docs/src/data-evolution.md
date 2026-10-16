@@ -97,8 +97,10 @@ matches no rows succeeds without a transaction; `rows_updated` is `0` and
 
 ### Limitations and operational notes
 
-- Datasets with stable row IDs are rejected. The underlying Python binding does
-  not expose the updated row offsets required for correct CDF metadata.
+- Datasets with stable row IDs are supported. Each fragment task reports the
+  physical row offsets its join matched, and the commit refreshes
+  `_row_last_updated_at_version` for those rows only, so CDF consumers observe
+  the update. This requires the matched-offsets support added in pylance 12.
 - Updating an indexed column is allowed, but current Lance index maintenance
   may leave the affected index stale. Rebuild indexes before relying on them
   after such an update.
