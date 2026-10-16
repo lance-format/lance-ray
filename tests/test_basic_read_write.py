@@ -579,7 +579,7 @@ class TestMultiBaseLayout:
         ds = lance.dataset(uri)
         assert ds.count_rows() == 3
 
-        base_paths = ds._ds.base_paths()  # type: ignore[attr-defined]
+        base_paths = ds._ds.base_paths()
         assert len(base_paths) >= 2
         base_ids = list(base_paths.keys())
         assert len(set(base_ids)) == len(base_ids), (
@@ -642,7 +642,7 @@ class TestMultiBaseLayout:
         ds = lance.dataset(uri, base_store_params=base_store_params)
         assert ds.count_rows() == 2
 
-        base_paths = ds._ds.base_paths()  # type: ignore[attr-defined]
+        base_paths = ds._ds.base_paths()
         assert len(base_paths) >= 2
         base_ids = list(base_paths.keys())
         assert len(set(base_ids)) == len(base_ids), (
@@ -679,7 +679,7 @@ class TestMultiBaseLayout:
         ds = lance.dataset(uri)
         assert ds.count_rows() == 2
 
-        base_paths = ds._ds.base_paths()  # type: ignore[attr-defined]
+        base_paths = ds._ds.base_paths()
         assert 5 in base_paths
         assert 10 in base_paths
 
@@ -713,7 +713,7 @@ class TestMultiBaseLayout:
         ds = lance.dataset(uri)
         assert ds.count_rows() == 2
 
-        base_paths = ds._ds.base_paths()  # type: ignore[attr-defined]
+        base_paths = ds._ds.base_paths()
         assert 3 in base_paths
         base_ids = list(base_paths.keys())
         assert len(set(base_ids)) == len(base_ids), (
@@ -752,5 +752,5 @@ class TestMultiBaseLayout:
         ds = lance.dataset(uri)
         assert ds.count_rows() == 2
 
-        base_paths = ds._ds.base_paths()  # type: ignore[attr-defined]
+        base_paths = ds._ds.base_paths()
         assert 0 in base_paths
