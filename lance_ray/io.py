@@ -1330,8 +1330,7 @@ def _resolve_update_targets(
                 "supported by update_columns yet."
             )
 
-        # ``LanceSchema.field()`` is missing from pylance's schema stub.
-        lance_field = lance_schema.field(name)  # type: ignore[attr-defined]
+        lance_field = lance_schema.field(name)
         if lance_field is None:
             raise ValueError(
                 f"Column '{name}' has no Lance field id; cannot update it."

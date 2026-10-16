@@ -593,8 +593,8 @@ class TestTransactionBehavior:
 
         before_ds = lance.dataset(str(path))
         read_version = before_ds.version
-        # ``LanceSchema.field()`` is missing from pylance's schema stub.
-        price_field = before_ds.lance_schema.field("price")  # type: ignore[attr-defined]
+        price_field = before_ds.lance_schema.field("price")
+        assert price_field is not None
         price_field_id = price_field.id()
 
         result = lr.update_columns(
@@ -791,8 +791,8 @@ class TestNestedFieldIds:
         lance.write_dataset(table, str(path), max_rows_per_file=2)
 
         ds = lance.dataset(str(path))
-        # ``LanceSchema.field()`` is missing from pylance's schema stub.
-        tags = ds.lance_schema.field("tags")  # type: ignore[attr-defined]
+        tags = ds.lance_schema.field("tags")
+        assert tags is not None
         leaf_ids = [child.id() for child in tags.children()]
         # Precondition for this test to mean anything.
         assert leaf_ids and leaf_ids != [tags.id()]
@@ -957,7 +957,11 @@ class TestBlobInput:
             },
             schema=schema,
         )
-        lance.write_dataset(table, str(path), max_rows_per_file=2)
+        # pylance >= 12 rejects legacy blob columns for file version >= 2.2,
+        # so legacy-blob fixtures pin the storage version, as tests/test_blob.py does.
+        lance.write_dataset(
+            table, str(path), max_rows_per_file=2, data_storage_version="2.1"
+        )
         return table
 
     def test_legacy_blob_can_be_read_to_compute_a_plain_column(
