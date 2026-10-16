@@ -10,7 +10,8 @@ import lance
 import lance_ray as lr
 import pytest
 import ray
-from lance.optimize import CompactionOptions
+from lance.lance import CompactionMetrics
+from lance.optimize import Compaction, CompactionOptions
 
 import pandas as pd
 
@@ -119,6 +120,42 @@ class TestDistributedCompaction:
         assert len(fragments) == 1, "Should have 1 fragment after compaction"
         assert fragments[0].count_rows() == 20, "Fragment should have 20 rows"
         assert dataset.count_rows() == 20, "Should still have 20 total rows"
+
+    def test_compaction_options_are_passed_to_commit(
+        self, temp_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dataset_path = Path(temp_dir) / "test_dataset_commit_options"
+
+        fragments = [
+            pd.DataFrame({"id": range(i * 10, (i + 1) * 10)}) for i in range(2)
+        ]
+        create_dataset_with_fragments(dataset_path, fragments)
+
+        compaction_options = _compaction_options(
+            target_rows_per_fragment=100,
+            defer_index_remap=True,
+        )
+        commit_options: list[CompactionOptions | None] = []
+        real_commit = Compaction.commit
+
+        def record_commit(
+            dataset: lance.LanceDataset,
+            rewrites: list[Any],
+            options: CompactionOptions | None = None,
+        ) -> CompactionMetrics:
+            commit_options.append(options)
+            return real_commit(dataset, rewrites, options)
+
+        monkeypatch.setattr("lance_ray.compaction.Compaction.commit", record_commit)
+
+        metrics = lr.compact_files(
+            uri=str(dataset_path),
+            compaction_options=compaction_options,
+            num_workers=1,
+        )
+
+        assert metrics is not None
+        assert commit_options == [compaction_options]
 
     def test_compaction_without_options(self, temp_dir: str) -> None:
         """
