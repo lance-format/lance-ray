@@ -58,7 +58,26 @@ Lance-Ray pins a dataset snapshot and processes each fragment in one Ray task.
 The task scans the fragment, applies `filter` and `transform`, then rewrites
 only the requested columns. Untouched columns retain their original data files.
 
-`transform` accepts and returns a `pyarrow.RecordBatch`. Its result must
+`transform` takes either a mapping of SQL expressions or a callable.
+
+A mapping is the same expression form `add_columns` accepts, and is the simplest
+way to express an update Lance can compute itself:
+
+```python
+result = update_columns(
+    "products.lance",
+    transform={"price": "price * 1.1"},
+    filter="status = 'active'",
+)
+```
+
+Lance evaluates the expressions as a scanner projection, so no Python runs per
+batch. The keys name the columns to update and each expression names its own
+inputs, so `columns` and `read_columns` are rejected with this form. Every
+expression is compiled against the dataset on the driver before any Ray task
+starts.
+
+A callable accepts and returns a `pyarrow.RecordBatch`. Its result must
 contain exactly the fields named in `columns`. The transform must preserve both
 row count and row order: do not filter, sort, join, deduplicate, aggregate, or
 explode rows inside it.
@@ -74,9 +93,10 @@ the `BatchUDF`, so the checkpoint could not be honored.
 
 - `uri`: Path to the target Lance dataset. Alternatively, resolve the table
   with `namespace_impl` and `table_id`.
-- `transform`: A `RecordBatch` transform or `BatchUDF` that produces replacement
-  values.
-- `columns`: Required names of the columns to overwrite. Each must already exist
+- `transform`: A `{column: SQL expression}` mapping, or a `RecordBatch`
+  transform or `BatchUDF` that produces replacement values.
+- `columns`: Names of the columns to overwrite. Required for a callable
+  transform; rejected for an expression mapping, whose keys already name them. Each must already exist
   in the dataset. Their Arrow type and nullability are taken from the dataset —
   `update_columns` cannot change them — and the transform result is cast to them
   with `safe=True`. That rejects out-of-range integers, truncating time-unit

@@ -443,6 +443,150 @@ class TestTransformContract:
         assert got.to_pydict()["price"] == [2.0, 4.0]
 
 
+class TestExpressionTransform:
+    """``transform={column: SQL expression}``, the form ``add_columns`` takes.
+
+    Lance evaluates these as a scanner projection, so the rewrite runs without
+    any Python per batch while reusing the same commit path.
+    """
+
+    def test_rewrites_every_fragment(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "expr_all.lance"
+        _write_products(path, rows=6, max_rows_per_file=2)
+        before = lance.dataset(str(path)).to_table(
+            columns=["id"], with_row_address=True
+        )
+
+        result = lr.update_columns(
+            str(path),
+            transform={"price": "price * 2"},
+        )
+
+        after = lance.dataset(str(path)).to_table(
+            columns=["id", "price"], with_row_address=True
+        )
+        assert result.rows_updated == 6
+        assert after["price"].to_pylist() == [20.0, 40.0, 60.0, 80.0, 100.0, 120.0]
+        # RewriteColumns keeps rows in place for the expression path too.
+        assert after["_rowaddr"].to_pylist() == before["_rowaddr"].to_pylist()
+        assert after["id"].to_pylist() == before["id"].to_pylist()
+
+    def test_filter_limits_the_rows_that_change(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "expr_filter.lance"
+        _write_products(path, rows=6, max_rows_per_file=2)
+
+        result = lr.update_columns(
+            str(path),
+            transform={"price": "price + 1"},
+            filter="status = 'a'",
+        )
+
+        table = lance.dataset(str(path)).to_table(columns=["id", "status", "price"])
+        # status alternates a, b, a, b, ... starting at id 1.
+        assert result.rows_updated == 3
+        assert table["price"].to_pylist() == [11.0, 20.0, 31.0, 40.0, 51.0, 60.0]
+
+    def test_updates_several_columns_at_once(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "expr_multi.lance"
+        _write_products(path, rows=4, max_rows_per_file=2)
+
+        result = lr.update_columns(
+            str(path),
+            transform={"price": "price * 10", "status": "'done'"},
+        )
+
+        table = lance.dataset(str(path)).to_table(columns=["price", "status"])
+        assert result.rows_updated == 4
+        assert table["price"].to_pylist() == [100.0, 200.0, 300.0, 400.0]
+        assert table["status"].to_pylist() == ["done"] * 4
+
+    def test_expression_may_reference_unprojected_columns(self, temp_dir: str) -> None:
+        """No read_columns to declare: the expression names its own inputs."""
+        path = Path(temp_dir) / "expr_inputs.lance"
+        _write_products(path, rows=3, max_rows_per_file=2)
+
+        lr.update_columns(
+            str(path),
+            transform={"price": "price + id"},
+        )
+
+        table = lance.dataset(str(path)).to_table(columns=["price"])
+        assert table["price"].to_pylist() == [11.0, 22.0, 33.0]
+
+    def test_non_matching_filter_is_a_no_op(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "expr_noop.lance"
+        _write_products(path, rows=4, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        result = lr.update_columns(
+            str(path),
+            transform={"price": "price * 2"},
+            filter="id > 1000",
+        )
+
+        assert result.rows_updated == 0
+        assert _dataset_fingerprint(path) == before
+
+    @pytest.mark.parametrize(
+        "kwargs, exc, match",
+        [
+            ({"columns": ["price"]}, ValueError, "'columns' is not accepted"),
+            ({"read_columns": ["price"]}, ValueError, "'read_columns' is not accepted"),
+        ],
+    )
+    def test_rejects_redundant_arguments(
+        self, temp_dir: str, kwargs: dict[str, Any], exc: type[Exception], match: str
+    ) -> None:
+        path = Path(temp_dir) / "expr_redundant.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        with pytest.raises(exc, match=match):
+            lr.update_columns(
+                str(path),
+                transform={"price": "price * 2"},
+                **kwargs,
+            )
+
+        assert _dataset_fingerprint(path) == before
+
+    @pytest.mark.parametrize(
+        "transform, exc, match",
+        [
+            ({"price": "price *"}, ValueError, "Invalid update expression"),
+            ({"price": "nosuchcol + 1"}, ValueError, "Invalid update expression"),
+            ({"brand_new": "1"}, ValueError, "non-existent column"),
+            ({"price": 2.0}, TypeError, "must be a SQL expression"),
+        ],
+    )
+    def test_rejects_bad_expressions_without_touching_the_dataset(
+        self,
+        temp_dir: str,
+        transform: Any,
+        exc: type[Exception],
+        match: str,
+    ) -> None:
+        """A bad expression must not rewrite part of the fragments first."""
+        path = Path(temp_dir) / "expr_bad.lance"
+        _write_products(path, rows=4, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        with pytest.raises(exc, match=match):
+            lr.update_columns(str(path), transform=transform)
+
+        assert _dataset_fingerprint(path) == before
+
+    def test_callable_still_requires_columns(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "expr_missing_columns.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        with pytest.raises(ValueError, match="'columns' is required"):
+            lr.update_columns(str(path), transform=_double_price)
+
+        assert _dataset_fingerprint(path) == before
+
+
 class TestPhysicalCorrectness:
     def test_preserves_row_address_schema_and_field_ids(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "identity.lance"

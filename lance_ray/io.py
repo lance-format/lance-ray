@@ -52,11 +52,16 @@ logger = logging.getLogger(__name__)
 
 #: Internal transform contract for :func:`update_columns`.
 #:
-#: This is deliberately not exported as a public type alias.  The transform
-#: receives a ``pa.RecordBatch`` holding only user columns and must return a
-#: record batch whose columns are exactly the requested ``columns``, with the
-#: same number of rows **in the same order**.
-_UpdateColumnsTransform = BatchUDF | Callable[[pa.RecordBatch], pa.RecordBatch]
+#: This is deliberately not exported as a public type alias.  A callable
+#: transform receives a ``pa.RecordBatch`` holding only user columns and must
+#: return a record batch whose columns are exactly the requested ``columns``,
+#: with the same number of rows **in the same order**.
+_UpdateColumnsCallable = BatchUDF | Callable[[pa.RecordBatch], pa.RecordBatch]
+
+#: ``update_columns`` also takes ``{column: SQL expression}``, the same
+#: expression form ``add_columns`` accepts.  Lance then evaluates the
+#: expressions as a scanner projection, so no Python runs per batch.
+_UpdateColumnsTransform = dict[str, str] | _UpdateColumnsCallable
 
 _METADATA_COLUMNS = frozenset({"_rowaddr", "_fragid", "_rowid"})
 
@@ -1374,8 +1379,62 @@ def _resolve_read_columns(
     return resolved
 
 
+def _normalize_update_batch(
+    result: pa.RecordBatch,
+    rowaddr: "pa.Array[Any]",
+    output_schema: pa.Schema,
+    non_nullable: Sequence[str],
+    source: str,
+) -> pa.RecordBatch:
+    """Project to the target columns, cast to their types, re-attach _rowaddr.
+
+    Column order and types come from the target dataset rather than from
+    whatever produced the values; the cast is ``safe=True`` so precision loss
+    raises.  ``source`` names the producer in error messages.
+    """
+    out = (
+        pa.Table.from_batches([result])
+        .select(list(output_schema.names))
+        .cast(output_schema)
+    )
+    normalized = out.to_batches()[0]
+
+    for name in non_nullable:
+        if normalized.column(name).null_count:
+            raise ValueError(
+                f"{source} produced nulls for non-nullable column '{name}'."
+            )
+
+    return normalized.append_column("_rowaddr", rowaddr)
+
+
+def _apply_update_expressions(
+    output_schema: pa.Schema,
+) -> Callable[[pa.RecordBatch], pa.RecordBatch]:
+    """Build the per-batch step for a ``{column: SQL expression}`` update.
+
+    The scanner projection already evaluated the expressions in Lance, so each
+    batch only has to be normalized to the target schema.
+    """
+    non_nullable = [f.name for f in output_schema if not f.nullable]
+
+    def _wrapped(batch: pa.RecordBatch) -> pa.RecordBatch:
+        rowaddr = batch.column("_rowaddr")
+        return _normalize_update_batch(
+            batch.drop_columns(
+                [c for c in _METADATA_COLUMNS if c in batch.column_names]
+            ),
+            rowaddr,
+            output_schema,
+            non_nullable,
+            "the update expressions",
+        )
+
+    return _wrapped
+
+
 def _apply_update_transform(
-    transform: "_UpdateColumnsTransform",
+    transform: "_UpdateColumnsCallable",
     output_schema: pa.Schema,
 ) -> Callable[[pa.RecordBatch], pa.RecordBatch]:
     """Build the per-batch transform used by a fragment-local worker."""
@@ -1411,27 +1470,18 @@ def _apply_update_transform(
                 f"Unexpected: {unexpected}; missing: {missing}."
             )
 
-        # Column order and types come from the target dataset, not from the
-        # user's return value; cast is safe=True so precision loss raises.
-        out = pa.Table.from_batches([result]).select(column_list).cast(output_schema)
-        normalized = out.to_batches()[0]
-
-        for name in non_nullable:
-            if normalized.column(name).null_count:
-                raise ValueError(
-                    f"transform produced nulls for non-nullable column '{name}'."
-                )
-
-        return normalized.append_column("_rowaddr", rowaddr)
+        return _normalize_update_batch(
+            result, rowaddr, output_schema, non_nullable, "transform"
+        )
 
     return _wrapped
 
 
 def _handle_update_fragment(
     uri: str,
-    transform: "_UpdateColumnsTransform",
+    transform: Optional["_UpdateColumnsCallable"],
     output_schema: pa.Schema,
-    projection: list[str],
+    projection: list[str] | dict[str, str],
     filter: Optional[str],
     batch_size: int,
     read_version: int,
@@ -1448,11 +1498,19 @@ def _handle_update_fragment(
     scan, transform and rewrite in one Ray task avoids the Ray Data shuffle and
     regrouping required by ``merge_columns_from`` for externally-created data.
 
+    ``transform`` is ``None`` for an expression update: ``projection`` then
+    maps each target column to its SQL expression and Lance evaluates them in
+    the scan, so no Python runs per batch.
+
     ``with_offsets`` is set for datasets with stable row ids, where the commit
     needs the matched physical row offsets to refresh row-level version
     metadata; each worker then returns them as RoaringBitmap bytes.
     """
-    apply_transform = _apply_update_transform(transform, output_schema)
+    apply_transform = (
+        _apply_update_expressions(output_schema)
+        if transform is None
+        else _apply_update_transform(transform, output_schema)
+    )
 
     def _update_fragment(
         fragment_id: int,
@@ -1546,7 +1604,7 @@ def update_columns(
     uri: Optional[str] = None,
     *,
     transform: "_UpdateColumnsTransform",
-    columns: Sequence[str],
+    columns: Optional[Sequence[str]] = None,
     filter: Optional[str] = None,
     read_columns: Optional[Sequence[str]] = None,
     batch_size: int = 1024,
@@ -1583,10 +1641,25 @@ def update_columns(
         ...     read_columns=["price"],
         ... )
 
+        The same update as a SQL expression, evaluated by Lance itself:
+
+        >>> lr.update_columns(  # doctest: +SKIP
+        ...     "/tmp/products.lance",
+        ...     transform={"price": "price * 1.1"},
+        ...     filter="status = 'active'",
+        ... )
+
     Args:
         uri: The path to the target Lance dataset. If omitted, provide
             ``namespace_impl`` and ``table_id`` to resolve it from a namespace.
-        transform: A callable or :class:`lance.udf.BatchUDF` taking a
+        transform: Either a mapping of ``{column: SQL expression}``, the same
+            expression form :func:`add_columns` takes, or a callable. A mapping
+            is evaluated by Lance as a scanner projection, so no Python runs
+            per batch and ``columns`` and ``read_columns`` are not accepted:
+            the keys name the columns to update and the expressions name their
+            own inputs.
+
+            A callable or :class:`lance.udf.BatchUDF` takes a
             ``pa.RecordBatch`` of the requested columns and returning a
             ``pa.RecordBatch`` whose columns are exactly ``columns``. It **must
             preserve row count and row order**; reordering cannot be detected
@@ -1599,7 +1672,9 @@ def update_columns(
             and a ``checkpoint_file`` is rejected, because the checkpoint
             Lance would drive in-process cannot be honored across per-fragment
             Ray tasks.
-        columns: Names of the existing columns to overwrite. Required, and
+        columns: Names of the existing columns to overwrite. Required for a
+            callable transform, and rejected for an expression mapping, whose
+            keys already name them. Also,
             checked against the target dataset before any Ray task starts. The
             output Arrow type and nullability of each column are taken from the
             dataset -- update_columns cannot change them -- and the transform
@@ -1636,6 +1711,48 @@ def update_columns(
 
     """
     validate_uri_or_namespace(uri, namespace_impl, list(table_id) if table_id else None)
+
+    expressions: Optional[dict[str, str]] = None
+    if isinstance(transform, Mapping):
+        # The expression form: Lance evaluates `{column: expr}` in the scan,
+        # so the keys are the columns and the expressions name their own
+        # inputs. Rejecting the redundant arguments keeps one source of truth
+        # and avoids silently ignoring them.
+        if columns is not None:
+            raise ValueError(
+                "'columns' is not accepted with an expression mapping: its "
+                "keys already name the columns to update."
+            )
+        if read_columns is not None:
+            raise ValueError(
+                "'read_columns' is not accepted with an expression mapping: "
+                "each expression names its own inputs."
+            )
+        expressions = {}
+        for name, expr in transform.items():
+            if not isinstance(name, str):
+                raise TypeError(
+                    "An expression mapping must be keyed by column name as "
+                    f"str, got {type(name).__name__}."
+                )
+            if not isinstance(expr, str):
+                raise TypeError(
+                    f"The update expression for '{name}' must be a SQL "
+                    f"expression as str, got {type(expr).__name__}."
+                )
+            expressions[name] = expr
+        resolved_columns: Sequence[str] = list(expressions)
+    elif columns is None:
+        raise ValueError(
+            "'columns' is required: it names the existing columns the "
+            "transform overwrites. Pass a mapping of "
+            "{column: SQL expression} as 'transform' to have Lance compute "
+            "them instead."
+        )
+    else:
+        # Left unconverted: _resolve_update_targets rejects a bare string, an
+        # empty sequence and non-str entries below.
+        resolved_columns = columns
 
     if isinstance(transform, BatchUDF) and transform.cache is not None:
         # Lance drives a BatchUDF checkpoint itself while rewriting fragments
@@ -1684,13 +1801,23 @@ def update_columns(
     # (lance-format/lance#6734).
     stable_row_ids = lance_ds.has_stable_row_ids
 
-    field_ids, output_schema = _resolve_update_targets(lance_ds, columns)
-    projection = _resolve_read_columns(lance_ds, read_columns)
+    field_ids, output_schema = _resolve_update_targets(lance_ds, resolved_columns)
+    projection: list[str] | dict[str, str]
+    if expressions is not None:
+        # Fail here rather than inside a Ray task: a 0-row scan compiles every
+        # expression against the dataset schema without reading data.
+        try:
+            lance_ds.scanner(columns=expressions, limit=0).to_table()
+        except Exception as exc:
+            raise ValueError(f"Invalid update expression: {exc}") from exc
+        projection = dict(expressions)
+    else:
+        projection = _resolve_read_columns(lance_ds, read_columns)
 
     fragment_ids = [f.metadata.id for f in lance_ds.get_fragments()]
     worker = _handle_update_fragment(
         uri,
-        transform,
+        None if expressions is not None else cast("_UpdateColumnsCallable", transform),
         output_schema,
         projection,
         filter,
@@ -1769,7 +1896,7 @@ def update_columns(
         raise ValueError(
             f"Modified field ids {observed_field_ids} do not match the leaf "
             f"field ids {sorted(field_ids)} of the target columns "
-            f"{list(columns)}."
+            f"{list(resolved_columns)}."
         )
 
     op = LanceOperation.Update(
@@ -1788,7 +1915,7 @@ def update_columns(
 
     logger.info(
         "Committing update_columns: columns=%s read_version=%s fragments=%s",
-        list(columns),
+        list(resolved_columns),
         resolved_read_version,
         len(updated_fragments),
     )
