@@ -1490,8 +1490,7 @@ def _handle_update_fragment(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
-    with_offsets: bool,
-) -> Callable[[int], Optional[tuple[int, bytes, bytes, int, Optional[bytes]]]]:
+) -> Callable[[int], Optional[tuple[int, bytes, bytes, int, bytes]]]:
     """Create the fragment-local fast-path worker for ``update_columns``.
 
     The input always originates from the same pinned Lance fragment.  Keeping
@@ -1502,9 +1501,10 @@ def _handle_update_fragment(
     maps each target column to its SQL expression and Lance evaluates them in
     the scan, so no Python runs per batch.
 
-    ``with_offsets`` is set for datasets with stable row ids, where the commit
-    needs the matched physical row offsets to refresh row-level version
-    metadata; each worker then returns them as RoaringBitmap bytes.
+    Every worker reports the physical row offsets its join matched, as
+    RoaringBitmap bytes. The commit needs them over stable row ids, to refresh
+    row-level version metadata for those rows only, and they are a few bytes
+    per fragment otherwise, so they are always requested.
     """
     apply_transform = (
         _apply_update_expressions(output_schema)
@@ -1514,7 +1514,7 @@ def _handle_update_fragment(
 
     def _update_fragment(
         fragment_id: int,
-    ) -> Optional[tuple[int, bytes, bytes, int, Optional[bytes]]]:
+    ) -> Optional[tuple[int, bytes, bytes, int, bytes]]:
         namespace_kwargs = get_namespace_kwargs(
             namespace_impl, namespace_properties, table_id
         )
@@ -1575,20 +1575,12 @@ def _handle_update_fragment(
         update_reader = pa.RecordBatchReader.from_batches(
             reader_schema, updated_batches()
         )
-        matched_offsets: Optional[bytes] = None
-        if with_offsets:
-            fragment_meta, fields_modified, matched_offsets = fragment.update_columns(
-                update_reader,
-                left_on="_rowaddr",
-                right_on="_rowaddr",
-                with_offsets=True,
-            )
-        else:
-            fragment_meta, fields_modified = fragment.update_columns(
-                update_reader,
-                left_on="_rowaddr",
-                right_on="_rowaddr",
-            )
+        fragment_meta, fields_modified, matched_offsets = fragment.update_columns(
+            update_reader,
+            left_on="_rowaddr",
+            right_on="_rowaddr",
+            with_offsets=True,
+        )
         return (
             fragment_id,
             pickle.dumps(fragment_meta),
@@ -1666,15 +1658,17 @@ def update_columns(
             and silently writes values to the wrong rows. Do not filter, sort,
             join, deduplicate, aggregate or explode inside the transform.
 
-            A ``BatchUDF`` is called for its function only. Its
-            ``output_schema`` is not consulted -- ``columns`` and the dataset's
-            own types define the result, and they are checked more strictly --
-            and a ``checkpoint_file`` is rejected, because the checkpoint
-            Lance would drive in-process cannot be honored across per-fragment
-            Ray tasks.
+            A ``BatchUDF`` is called for its function, and its
+            ``output_schema`` names the columns it produces, so ``columns`` can
+            be left out. The schema's *types* are not used -- those come from
+            the dataset, and the result is checked against them more strictly.
+            A ``checkpoint_file`` is rejected, because the checkpoint Lance
+            would drive in-process cannot be honored across per-fragment Ray
+            tasks.
         columns: Names of the existing columns to overwrite. Required for a
-            callable transform, and rejected for an expression mapping, whose
-            keys already name them. Also,
+            plain callable; optional for a ``BatchUDF`` with an
+            ``output_schema``, which must then agree with it; rejected for an
+            expression mapping, whose keys already name them. Also,
             checked against the target dataset before any Ray task starts. The
             output Arrow type and nullability of each column are taken from the
             dataset -- update_columns cannot change them -- and the transform
@@ -1742,17 +1736,39 @@ def update_columns(
                 )
             expressions[name] = expr
         resolved_columns: Sequence[str] = list(expressions)
-    elif columns is None:
-        raise ValueError(
-            "'columns' is required: it names the existing columns the "
-            "transform overwrites. Pass a mapping of "
-            "{column: SQL expression} as 'transform' to have Lance compute "
-            "them instead."
-        )
     else:
-        # Left unconverted: _resolve_update_targets rejects a bare string, an
-        # empty sequence and non-str entries below.
-        resolved_columns = columns
+        # A BatchUDF carries the names of the columns it produces, so they do
+        # not have to be repeated. Unlike an expression mapping, a BatchUDF may
+        # also arrive without one, so 'columns' stays a legitimate argument and
+        # is accepted when it agrees rather than rejected outright.
+        inferred: Optional[list[str]] = None
+        if isinstance(transform, BatchUDF) and transform.output_schema is not None:
+            inferred = list(transform.output_schema.names)
+
+        if columns is None:
+            if inferred is None:
+                raise ValueError(
+                    "'columns' is required: it names the existing columns the "
+                    "transform overwrites. It can be left out for a BatchUDF "
+                    "carrying an output_schema, or pass a mapping of "
+                    "{column: SQL expression} as 'transform' to have Lance "
+                    "compute the values instead."
+                )
+            resolved_columns = inferred
+        else:
+            # Left unconverted: _resolve_update_targets rejects a bare string,
+            # an empty sequence and non-str entries below.
+            resolved_columns = columns
+            if (
+                inferred is not None
+                and not isinstance(columns, str)
+                and set(columns) != set(inferred)
+            ):
+                raise ValueError(
+                    "'columns' must name exactly the columns the BatchUDF "
+                    f"output_schema produces. Got {sorted(set(columns))}, "
+                    f"schema has {sorted(set(inferred))}."
+                )
 
     if isinstance(transform, BatchUDF) and transform.cache is not None:
         # Lance drives a BatchUDF checkpoint itself while rewriting fragments
@@ -1795,12 +1811,6 @@ def update_columns(
     )
     resolved_read_version = lance_ds.version
 
-    # Over stable row ids a ``rewrite_columns`` commit only refreshes
-    # _row_last_updated_at_version for the offsets it is given, so the workers
-    # have to report which physical rows the join matched
-    # (lance-format/lance#6734).
-    stable_row_ids = lance_ds.has_stable_row_ids
-
     field_ids, output_schema = _resolve_update_targets(lance_ds, resolved_columns)
     projection: list[str] | dict[str, str]
     if expressions is not None:
@@ -1828,7 +1838,6 @@ def update_columns(
         namespace_impl,
         namespace_properties_dict,
         table_id_list,
-        stable_row_ids,
     )
     pool = Pool(processes=concurrency, ray_remote_args=dict(ray_remote_args or {}))
     try:
@@ -1873,15 +1882,7 @@ def update_columns(
         updated_fragments.append(fragment_meta)
         rows_updated += updated_rows
 
-        if stable_row_ids:
-            if matched_offsets is None:
-                raise ValueError(
-                    f"Worker for fragment {frag_id} reported no matched row "
-                    "offsets while the dataset uses stable row ids; committing "
-                    "without them would leave _row_last_updated_at_version "
-                    "stale and hide the update from CDF consumers."
-                )
-            fragment_offsets[frag_id] = matched_offsets
+        fragment_offsets[frag_id] = matched_offsets
 
         worker_field_ids = sorted(pickle.loads(fields_modified_bytes))
         if observed_field_ids is None:
@@ -1906,9 +1907,10 @@ def update_columns(
         fields_modified=observed_field_ids,
         fields_for_preserving_frag_bitmap=[],
         update_mode="rewrite_columns",
-        # Empty unless the dataset uses stable row ids; Lance then refreshes
-        # _row_last_updated_at_version for exactly these rows.
-        updated_fragment_offsets=fragment_offsets or None,
+        # Over stable row ids Lance refreshes _row_last_updated_at_version
+        # for exactly these rows (lance-format/lance#6734); without them it
+        # has no row-level metadata to refresh.
+        updated_fragment_offsets=fragment_offsets,
     )
     # Unmodified fragments are intentionally not resubmitted: Lance's Update
     # transaction merges by fragment id and carries the rest through untouched.

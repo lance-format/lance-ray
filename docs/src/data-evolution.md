@@ -82,12 +82,13 @@ contain exactly the fields named in `columns`. The transform must preserve both
 row count and row order: do not filter, sort, join, deduplicate, aggregate, or
 explode rows inside it.
 
-A `lance.udf.BatchUDF` is accepted, but only its function is used: the
-`output_schema` is not consulted, since `columns` and the dataset's own types
-define the result and are checked more strictly, and a `checkpoint_file` is
-rejected up front. Lance drives that checkpoint while rewriting fragments
-in-process; here each transform runs in its own Ray task and Lance never sees
-the `BatchUDF`, so the checkpoint could not be honored.
+A `lance.udf.BatchUDF` is accepted. Its `output_schema` names the columns it
+produces, so `columns` can be left out; passing both is allowed as long as they
+agree. The schema's *types* are not used — those come from the dataset, and the
+result is checked against them more strictly. A `checkpoint_file` is rejected up
+front: Lance drives that checkpoint while rewriting fragments in-process, but
+here each transform runs in its own Ray task and Lance never sees the
+`BatchUDF`, so the checkpoint could not be honored.
 
 **Parameters:**
 

@@ -273,6 +273,60 @@ class TestTransformContract:
         got = lance.dataset(str(path)).to_table().to_pydict()
         assert got["price"] == [30.0, 60.0, 90.0, 120.0]
 
+    def test_batch_udf_output_schema_infers_columns(self, temp_dir: str) -> None:
+        """A BatchUDF already names the columns it produces."""
+        path = Path(temp_dir) / "batch_udf_inferred.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 3.0)}),
+            output_schema=pa.schema([pa.field("price", pa.float64())]),
+        )
+        result = lr.update_columns(str(path), transform=udf, read_columns=["price"])
+
+        assert result.rows_updated == 2
+        assert lance.dataset(str(path)).to_table()["price"].to_pylist() == [30.0, 60.0]
+
+    def test_batch_udf_accepts_matching_columns(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "batch_udf_agree.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 3.0)}),
+            output_schema=pa.schema([pa.field("price", pa.float64())]),
+        )
+        lr.update_columns(
+            str(path), transform=udf, columns=["price"], read_columns=["price"]
+        )
+
+        assert lance.dataset(str(path)).to_table()["price"].to_pylist() == [30.0, 60.0]
+
+    def test_batch_udf_rejects_disagreeing_columns(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "batch_udf_disagree.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+        before = _dataset_fingerprint(path)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 3.0)}),
+            output_schema=pa.schema([pa.field("price", pa.float64())]),
+        )
+        with pytest.raises(ValueError, match="output_schema produces"):
+            lr.update_columns(str(path), transform=udf, columns=["status"])
+
+        assert _dataset_fingerprint(path) == before
+
+    def test_batch_udf_without_output_schema_requires_columns(
+        self, temp_dir: str
+    ) -> None:
+        path = Path(temp_dir) / "batch_udf_no_schema.lance"
+        _write_products(path, rows=2, max_rows_per_file=2)
+
+        udf = BatchUDF(
+            lambda batch: _record_batch({"price": pc.multiply(batch["price"], 3.0)})
+        )
+        with pytest.raises(ValueError, match="'columns' is required"):
+            lr.update_columns(str(path), transform=udf)
+
     def test_accepts_batch_udf(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "batch_udf.lance"
         _write_products(path, rows=2, max_rows_per_file=2)
