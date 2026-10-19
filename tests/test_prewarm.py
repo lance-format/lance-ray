@@ -142,12 +142,10 @@ def test_empty_generator_skips_native(
     kwargs = {"index_segments" if selection == "segments" else "fragment_ids": iter(())}
     plan = prewarm.plan_index_prewarm(dataset, "text_fts", **kwargs)
     assert plan.assignments == ()
-    report = prewarm.prewarm_index(
-        dataset, "text_fts", **{key: iter(()) for key in kwargs}
-    )
+    report = prewarm.prewarm_index(dataset, "text_fts", index_segments=iter(()))
     assert report.status == "skipped"
     assert report.index_segments == ()
-    assert report.fragment_ids == ()
+    assert report.covered_fragment_ids == ()
     assert dataset.calls == []
 
 
@@ -156,12 +154,42 @@ def test_fragment_selection_reports_whole_segment_and_uncovered(
 ) -> None:
     plan = prewarm.plan_index_prewarm(dataset, "text_fts", fragment_ids=iter([1, 1, 3]))
     assert plan.assignments[0].index_segments == (str(UUID(int=1)), str(UUID(int=2)))
-    assert plan.assignments[0].fragment_ids == (0, 1)
+    assert plan.assignments[0].covered_fragment_ids == (0, 1)
     assert plan.uncovered_fragment_ids == (3,)
-    report = prewarm.prewarm_index(dataset, "text_fts", fragment_ids=[3])
-    assert report.status == "skipped"
-    assert report.uncovered_fragment_ids == (3,)
+    uncovered = prewarm.plan_index_prewarm(dataset, "text_fts", fragment_ids=[3])
+    assert uncovered.assignments == ()
+    assert uncovered.uncovered_fragment_ids == (3,)
     assert dataset.calls == []
+
+
+def test_fragment_coverage_cannot_be_replayed_as_execution_scope(
+    prewarm: ModuleType, dataset: FakeDataset
+) -> None:
+    plan = prewarm.plan_index_prewarm(dataset, "text_fts", fragment_ids=[0])
+    assignment = plan.assignments[0]
+    assert assignment.index_segments == (str(UUID(int=1)),)
+    assert assignment.covered_fragment_ids == (0, 1)
+    # Coverage contains fragment 1, which also overlaps the unassigned segment 2.
+    expanded = prewarm.plan_index_prewarm(
+        dataset, "text_fts", fragment_ids=assignment.covered_fragment_ids
+    )
+    assert selected(expanded) == {str(UUID(int=1)), str(UUID(int=2))}
+    with pytest.raises(TypeError, match="fragment_ids"):
+        prewarm.prewarm_index(
+            dataset, "text_fts", fragment_ids=assignment.covered_fragment_ids
+        )
+    assert dataset.calls == []
+    report = prewarm.prewarm_index(
+        dataset,
+        "text_fts",
+        index_segments=assignment.index_segments,
+        expected_version=plan.dataset_version,
+    )
+    assert report.index_segments == assignment.index_segments
+    assert report.covered_fragment_ids == (0, 1)
+    # Retry from the report must retain the exact UUID selection too.
+    prewarm.prewarm_index(dataset, "text_fts", index_segments=report.index_segments)
+    assert dataset.calls == [("text_fts", [str(UUID(int=1))], False)] * 2
 
 
 @pytest.mark.parametrize(
@@ -262,7 +290,7 @@ def test_worker_call_reuses_dataset_session_and_namespace(
     assert report.process_id == os.getpid()
     assert report.dataset_version == 7
     assert report.dataset_uri == dataset.uri
-    assert report.fragment_ids == (0, 1)
+    assert report.covered_fragment_ids == (0, 1)
     assert report.with_position is True
     assert report.cache_bytes_before == 10
     assert report.cache_bytes_after == 30
@@ -381,7 +409,7 @@ def test_native_failure_preserves_cause_and_report(
     dataset.telemetry_error = broken_telemetry
     with pytest.raises(prewarm.IndexPrewarmError) as captured:
         prewarm.prewarm_index(
-            dataset, "text_fts", fragment_ids=[0], worker_id="worker-a"
+            dataset, "text_fts", index_segments=[UUID(int=1)], worker_id="worker-a"
         )
     assert captured.value.__cause__ is failure
     report = captured.value.report
@@ -389,19 +417,31 @@ def test_native_failure_preserves_cause_and_report(
     assert report.error == "OSError: object store read failed"
     assert report.worker_id == "worker-a"
     assert report.index_segments == (str(UUID(int=1)),)
-    assert report.fragment_ids == (0, 1)
+    assert report.covered_fragment_ids == (0, 1)
     assert report.cache_bytes_before == (None if broken_telemetry else 10)
     assert report.cache_bytes_after == (None if broken_telemetry else 30)
     assert report.elapsed_seconds >= 0
 
 
-def test_error_pickle_roundtrip(prewarm: ModuleType, dataset: FakeDataset) -> None:
-    dataset.native_error = OSError("failed")
+@pytest.mark.parametrize("unpickleable", [False, True])
+def test_error_pickle_roundtrip(
+    prewarm: ModuleType, dataset: FakeDataset, unpickleable: bool
+) -> None:
+    class NativeError(OSError):
+        """A local exception type cannot be pickled."""
+
+    dataset.native_error = NativeError("failed") if unpickleable else OSError("failed")
+    reason = f"{type(dataset.native_error).__name__}: failed"
     with pytest.raises(prewarm.IndexPrewarmError) as captured:
         prewarm.prewarm_index(dataset, "text_fts")
+    assert captured.value.__cause__ is dataset.native_error
     restored = pickle.loads(pickle.dumps(captured.value))
     assert restored.report == captured.value.report
     assert str(restored) == str(captured.value)
+    assert isinstance(restored.__cause__, RuntimeError)
+    assert str(restored.__cause__) == reason
+    restored_again = pickle.loads(pickle.dumps(restored))
+    assert str(restored_again.__cause__) == reason
 
 
 def test_varargs_segments_are_rejected(

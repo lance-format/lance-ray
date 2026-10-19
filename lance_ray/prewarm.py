@@ -34,13 +34,14 @@ __all__ = [
 class IndexPrewarmAssignment:
     """Indivisible segments assigned to one logical worker slot.
 
-    ``fragment_ids`` is actual whole-segment coverage. Estimated bytes are
+    ``covered_fragment_ids`` is diagnostic whole-segment coverage, not an execution
+    selector. Execute assignments using ``index_segments``. Estimated bytes are
     index storage bytes, not a cache memory requirement.
     """
 
     worker_id: int
     index_segments: tuple[str, ...]
-    fragment_ids: tuple[int, ...]
+    covered_fragment_ids: tuple[int, ...]
     estimated_size_bytes: int | None
 
 
@@ -66,8 +67,7 @@ class IndexPrewarmReport:
     index_name: str
     with_position: bool
     index_segments: tuple[str, ...]
-    fragment_ids: tuple[int, ...]
-    uncovered_fragment_ids: tuple[int, ...]
+    covered_fragment_ids: tuple[int, ...]
     worker_id: str | None
     process_id: int
     elapsed_seconds: float
@@ -78,10 +78,18 @@ class IndexPrewarmReport:
 
 
 class IndexPrewarmError(RuntimeError):
-    """Native prewarm failed; ``report`` contains context and ``__cause__`` the error."""
+    """Native failure with a report and cause.
+
+    The original exception is chained locally. Pickle restores a RuntimeError
+    cause from ``report.error`` so even unpickleable native errors can cross
+    worker boundaries with their type name and message intact.
+    """
 
     def __init__(self, report: IndexPrewarmReport):
         self.report = report
+        self.__cause__ = (
+            RuntimeError(report.error) if report.error is not None else None
+        )
         super().__init__(
             f"Prewarming index {report.index_name!r} failed: {report.error}"
         )
@@ -203,7 +211,9 @@ def plan_index_prewarm(
         IndexPrewarmAssignment(
             worker_id=slot,
             index_segments=tuple(sorted(segment.uuid for segment in group)),
-            fragment_ids=tuple(sorted({fid for s in group for fid in s.fragments})),
+            covered_fragment_ids=tuple(
+                sorted({fid for s in group for fid in s.fragments})
+            ),
             estimated_size_bytes=(
                 sum(s.size_bytes or 0 for s in group)
                 if all(s.size_bytes is not None for s in group)
@@ -240,7 +250,6 @@ def prewarm_index(
     index_name: str,
     *,
     index_segments: Iterable[str | UUID] | None = None,
-    fragment_ids: Iterable[int] | None = None,
     with_position: bool = False,
     expected_version: int | None = None,
     worker_id: str | None = None,
@@ -249,8 +258,10 @@ def prewarm_index(
 
     Execute inside the worker that will query this same Dataset. This function
     neither reopens nor closes the Dataset. ``expected_version`` can guard a
-    previously generated plan. Native errors raise ``IndexPrewarmError`` with a
-    failed report and preserve the original exception as their cause.
+    previously generated plan. Use ``plan_index_prewarm`` for fragment selection,
+    then pass each assignment's ``index_segments`` unchanged. Native errors raise
+    ``IndexPrewarmError`` with a failed report and preserve the original exception
+    as their cause.
     """
     if expected_version is not None:
         if (
@@ -270,7 +281,6 @@ def prewarm_index(
         dataset,
         index_name,
         index_segments=index_segments,
-        fragment_ids=fragment_ids,
         with_position=with_position,
     )
     assignment = plan.assignments[0] if plan.assignments else None
@@ -318,8 +328,7 @@ def prewarm_index(
         index_name=index_name,
         with_position=with_position,
         index_segments=assignment.index_segments if assignment else (),
-        fragment_ids=assignment.fragment_ids if assignment else (),
-        uncovered_fragment_ids=plan.uncovered_fragment_ids,
+        covered_fragment_ids=assignment.covered_fragment_ids if assignment else (),
         worker_id=worker_id,
         process_id=os.getpid(),
         elapsed_seconds=elapsed,

@@ -22,7 +22,7 @@ for assignment in plan.assignments:
     print(
         assignment.worker_id,
         assignment.index_segments,
-        assignment.fragment_ids,
+        assignment.covered_fragment_ids,
         assignment.estimated_size_bytes,
     )
 ```
@@ -34,7 +34,7 @@ bytes when every selected segment has size metadata; otherwise it balances
 segment counts. `plan.scheduling_basis` is `"bytes"` or `"segments"` respectively.
 Estimated bytes describe index files, not the memory required by the index cache.
 
-Choose one scope:
+Choose one planning scope:
 
 - Omit both `index_segments` and `fragment_ids` to plan every segment of the
   named index.
@@ -68,6 +68,11 @@ def warm_assignment(worker_dataset, plan, assignment):
     )
 ```
 
+`prewarm_index` accepts segment UUIDs only. `covered_fragment_ids` on assignments
+and reports is diagnostic coverage. Feeding it back into the planner as
+`fragment_ids` can select additional overlapping segments; always execute or
+retry with `index_segments` to retain the exact scope.
+
 The worker Dataset must refer to the same table and version used for planning.
 `expected_version` rejects a version mismatch before prewarming. Worker labels
 are reporting metadata; they do not enforce Ray placement or routing. Retain the
@@ -75,15 +80,17 @@ worker Dataset for subsequent queries so its Session and cache can be reused.
 An already-open namespace-backed Dataset keeps its existing credentials and
 storage configuration because the helper neither reopens nor clones it.
 
-For a single worker, plan and execute directly:
+For a single worker, select fragments during planning and execute the resulting
+segment UUIDs:
 
 ```python
-report = lr.prewarm_index(
+plan = lr.plan_index_prewarm(
     dataset,
     "text_fts",
     fragment_ids=[0, 1],  # use actual fragment IDs from your Dataset
     with_position=True,
 )
+reports = [warm_assignment(dataset, plan, assignment) for assignment in plan.assignments]
 ```
 
 `with_position=True` is supported only for an `INVERTED` index. It also warms
@@ -100,7 +107,8 @@ empty selections return a `"skipped"` report without calling native prewarm.
 `IndexPrewarmReport` records:
 
 - Dataset URI and version, index name and position option.
-- Selected segment UUIDs, full fragment coverage and uncovered requested fragments.
+- Selected segment UUIDs and diagnostic `covered_fragment_ids`. Uncovered
+  requested fragments are reported by the plan.
 - Caller-supplied worker label and the executing process ID.
 - Elapsed seconds and status (`"success"`, `"skipped"`, or `"failed"`).
 - Index-cache bytes before and after the call, when available, and an error string
@@ -114,7 +122,11 @@ more than the cache can hold can waste I/O.
 
 Invalid selections and unsupported capabilities raise before native prewarm.
 Native execution failures raise `IndexPrewarmError`, retaining the report and
-the native exception as the cause:
+the native exception as the cause in the executing process. After pickle, the
+cause is a `RuntimeError` containing the original exception's type name and
+message from `report.error`. This keeps the failure reason available even when
+the native exception itself cannot be pickled; native exception objects and
+tracebacks are not transported:
 
 ```python
 try:
