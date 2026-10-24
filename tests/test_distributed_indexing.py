@@ -1760,7 +1760,7 @@ class TestNamespaceIndexing:
         """Test distributed vector index building using DirectoryNamespace.
 
         Verifies that create_index() correctly resolves the dataset URI and
-        passes a storage_options_provider to workers when namespace params
+        passes the namespace client to workers when namespace params
         are supplied, mirroring the behaviour of create_scalar_index().
         """
         table_id = ["vector_index_namespace_test"]
