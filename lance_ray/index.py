@@ -697,23 +697,9 @@ def create_scalar_index(
     if name is None:
         name = f"{column}_idx"
 
-    if _index_exists(dataset, name):
-        if not replace:
-            raise ValueError(
-                f"Index with name '{name}' already exists. Set replace=True "
-                "to replace it."
-            )
-        if not use_segment_workflow:
-            # Lance 4.0.0: fragment_ids + replace=True may hit an unimplemented path.
-            # Keep the existing driver-side replacement behavior for the legacy workflow.
-            dataset.drop_index(name)
-            dataset = LanceDataset(
-                dataset_uri,
-                **_dataset_load_kwargs(
-                    merged_storage_options, namespace_kwargs, block_size
-                ),
-            )
-
+    # Run every non-destructive precondition before the replacement below:
+    # dropping an existing index is irreversible here, so a call that fails
+    # validation must not leave the dataset without its previous index.
     fragments = dataset.get_fragments()
     if not fragments:
         raise ValueError("Dataset contains no fragments")
@@ -736,6 +722,26 @@ def create_scalar_index(
             "Adjusted num_segments to %d to match fragment count",
             requested_num_segments,
         )
+
+    if _index_exists(dataset, name):
+        if not replace:
+            raise ValueError(
+                f"Index with name '{name}' already exists. Set replace=True "
+                "to replace it."
+            )
+        if not use_segment_workflow:
+            # Lance 4.0.0: fragment_ids + replace=True may hit an unimplemented path.
+            # Keep the existing driver-side replacement behavior for the legacy workflow.
+            dataset.drop_index(name)
+            dataset = LanceDataset(
+                dataset_uri,
+                **_dataset_load_kwargs(
+                    merged_storage_options, namespace_kwargs, block_size
+                ),
+            )
+            fragments = dataset.get_fragments()
+            if fragment_ids is not None:
+                fragments = [f for f in fragments if f.fragment_id in fragment_ids]
 
     fragment_batches = _distribute_fragments_balanced(
         fragments, num_segments=requested_num_segments, logger=logger
