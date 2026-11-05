@@ -67,16 +67,18 @@ def _index_exists(dataset: LanceDataset, name: str) -> bool:
 def _distribute_fragments_balanced(
     fragments: list[Any], num_segments: int, logger: logging.Logger
 ) -> list[list[int]]:
-    """Distribute fragments across index segments using a balanced algorithm.
+    """Partition fragments into contiguous, row-balanced index segments.
 
-    This function implements a greedy algorithm that assigns fragments to the
-    segment with the currently smallest total workload, helping to balance the
-    processing time across segment batches.
+    Preserve dataset fragment order so that segment coverage does not prevent
+    adjacent small fragments from being compacted. Binary search finds the
+    smallest possible maximum row count across contiguous batches; a greedy
+    pass then creates exactly the requested number of non-empty batches (capped
+    at the fragment count). Boundaries are deterministic for identical inputs.
 
     Parameters
     ----------
     fragments : list
-        List of Lance fragment objects.
+        List of Lance fragment objects in dataset order.
     num_segments : int
         Number of segment batches to distribute fragments across.
     logger : logging.Logger
@@ -87,8 +89,11 @@ def _distribute_fragments_balanced(
     list[list[int]]
         Each inner list contains fragment IDs for one segment batch.
     """
+    if num_segments <= 0:
+        raise ValueError("num_segments must be positive")
     if not fragments:
-        return [[] for _ in range(num_segments)]
+        return []
+    num_segments = min(num_segments, len(fragments))
 
     fragment_info: list[dict[str, int]] = []
     for fragment in fragments:
@@ -97,30 +102,48 @@ def _distribute_fragments_balanced(
             # fragment.count_rows() gives us the number of rows in the fragment
             row_count = fragment.count_rows()
             fragment_info.append({"id": fragment.fragment_id, "size": row_count})
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             logger.warning(
-                "Could not get size for fragment %s: %s. Using fragment_id as size estimate.",
+                "Could not get size for fragment %s: %s. Using 1 as size estimate.",
                 fragment.fragment_id,
                 exc,
             )
-            fragment_info.append(
-                {"id": fragment.fragment_id, "size": fragment.fragment_id}
-            )
-
-    # Sort fragments by size in descending order (largest first)
-    # This helps with better load balancing using the greedy algorithm
-    fragment_info.sort(key=lambda x: x["size"], reverse=True)
-
-    segment_batches: list[list[int]] = [[] for _ in range(num_segments)]
-    segment_workloads = [0] * num_segments
-
-    # Greedy assignment: assign each fragment to the segment with minimum workload
-    for frag_info in fragment_info:
-        min_workload_idx = min(range(num_segments), key=lambda i: segment_workloads[i])
-        segment_batches[min_workload_idx].append(frag_info["id"])
-        segment_workloads[min_workload_idx] += frag_info["size"]
+            fragment_info.append({"id": fragment.fragment_id, "size": 1})
 
     total_size = sum(info["size"] for info in fragment_info)
+    lower = max(
+        max(info["size"] for info in fragment_info),
+        (total_size + num_segments - 1) // num_segments,
+    )
+    upper = total_size
+    while lower < upper:
+        limit = (lower + upper) // 2
+        batches_needed = 1
+        workload = 0
+        for info in fragment_info:
+            if workload + info["size"] > limit:
+                batches_needed += 1
+                workload = 0
+            workload += info["size"]
+        if batches_needed <= num_segments:
+            upper = limit
+        else:
+            lower = limit + 1
+
+    segment_batches: list[list[int]] = [[]]
+    segment_workloads = [0]
+    for i, info in enumerate(fragment_info):
+        # Reserve one fragment for every remaining batch, including when all
+        # remaining fragments have zero rows.
+        if segment_batches[-1] and (
+            segment_workloads[-1] + info["size"] > lower
+            or len(fragment_info) - i == num_segments - len(segment_batches)
+        ):
+            segment_batches.append([])
+            segment_workloads.append(0)
+        segment_batches[-1].append(info["id"])
+        segment_workloads[-1] += info["size"]
+
     logger.info("Fragment distribution statistics:")
     logger.info("  Total fragments: %d", len(fragment_info))
     logger.info("  Total size: %d", total_size)
@@ -138,8 +161,7 @@ def _distribute_fragments_balanced(
             percentage,
         )
 
-    non_empty_batches = [batch for batch in segment_batches if batch]
-    return non_empty_batches
+    return segment_batches
 
 
 class _BatchWorker:
