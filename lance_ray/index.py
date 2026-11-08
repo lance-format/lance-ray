@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable
-from typing import Any, Literal, Optional, TypeAlias, cast, get_args
+from typing import Any, Literal, Optional, TypeAlias, TypeVar, cast, get_args
 
 import lance
 import pyarrow as pa
@@ -44,6 +44,10 @@ _VectorIndexArtifactRefs: TypeAlias = (
 
 #: The closure a fragment handler factory hands to the worker pool.
 _FragmentHandler: TypeAlias = Callable[[list[int]], dict[str, Any]]
+
+#: One unit of work handed to `_map_async_with_pool`: a list of fragment ids
+#: for index builds, a compaction task for compaction.
+_Batch = TypeVar("_Batch")
 
 
 def _dataset_load_kwargs(
@@ -143,20 +147,23 @@ def _distribute_fragments_balanced(
 
 
 class _BatchWorker:
-    """Ray actor that runs one fragment-batch handler call at a time."""
+    """Ray actor that runs one batch handler call at a time."""
 
-    def run(self, handler: _FragmentHandler, fragment_ids: list[int]) -> dict[str, Any]:
-        return handler(fragment_ids)
+    def run(
+        self, handler: Callable[[Any], dict[str, Any]], batch: Any
+    ) -> dict[str, Any]:
+        return handler(batch)
 
 
 def _map_async_with_pool(
-    create_fragment_handler: Callable[[], _FragmentHandler],
-    fragment_batches: list[list[int]],
+    create_fragment_handler: Callable[[], Callable[[_Batch], dict[str, Any]]],
+    fragment_batches: list[_Batch],
     *,
     num_workers: int,
     ray_remote_args: Optional[dict[str, Any]],
     error_prefix: str,
     max_task_retries: int = 0,
+    fail_fast: bool = False,
 ) -> list[dict[str, Any]]:
     """Run fragment batches on a pool of Ray actors, one batch per idle worker.
 
@@ -168,6 +175,15 @@ def _map_async_with_pool(
     Ray task/actor failed are resubmitted immediately, up to
     ``max_task_retries`` times each, rather than after every other batch has
     finished; handlers must therefore be idempotent.
+
+    By default a batch that still fails after its retries is reported in the
+    returned list and the remaining batches keep running. With ``fail_fast``,
+    the first such batch instead stops the run: nothing more is dispatched, the
+    workers (and the batches still on them) are killed, and the error is raised
+    as a ``RuntimeError`` prefixed with ``error_prefix``. A retry then goes to
+    the front of the queue, ahead of every batch that has not started; batches
+    already running on other workers are not waited for. Use it when the
+    results of the other batches are worthless once one fails.
 
     Workers are actors created with ``ray_remote_args`` (``num_cpus=0`` unless
     given, like Ray's Pool). A worker whose process dies is dropped from the
@@ -223,7 +239,9 @@ def _map_async_with_pool(
                 # (or, with max_restarts, restarted) by the start path above.
                 starting[worker.__ray_ready__.remote()] = worker
             results[index] = result
-            if result.get("status") != "success" and attempt < max_task_retries:
+            if result.get("status") == "success":
+                continue
+            if attempt < max_task_retries:
                 logger.warning(
                     "Batch %d failed (attempt %d of %d): %s; resubmitting",
                     index,
@@ -231,7 +249,12 @@ def _map_async_with_pool(
                     max_task_retries + 1,
                     result.get("error"),
                 )
-                pending.append((index, attempt + 1))
+                if fail_fast:
+                    pending.appendleft((index, attempt + 1))
+                else:
+                    pending.append((index, attempt + 1))
+            elif fail_fast:
+                raise RuntimeError(result.get("error"))
         return [results[i] for i in range(len(fragment_batches))]
     except Exception as exc:
         raise RuntimeError(f"{error_prefix}: {exc}") from exc

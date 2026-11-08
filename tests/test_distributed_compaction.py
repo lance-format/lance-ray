@@ -1,5 +1,6 @@
 """Test cases for lance_ray.compaction module."""
 
+import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -9,9 +10,11 @@ import lance
 import lance_ray as lr
 import pytest
 import ray
-from lance.optimize import CompactionOptions
+from lance.optimize import Compaction, CompactionOptions
+from lance_ray import compaction as compaction_mod
 
 import pandas as pd
+from _ray_test_support import fail_first_attempt
 
 
 @pytest.fixture
@@ -518,6 +521,147 @@ class TestDistributedCompaction:
         assert dataset.count_rows() == 20, "Should still have 20 total rows"
 
 
+def _create_small_fragments(path: Path, count: int = 8) -> lance.LanceDataset:
+    return create_dataset_with_fragments(
+        path,
+        [pd.DataFrame({"id": range(i * 10, (i + 1) * 10)}) for i in range(count)],
+    )
+
+
+class TestCompactionTaskFailures:
+    """Failed compaction tasks stop the run early or are retried."""
+
+    @pytest.mark.parametrize("retries", [0, 2])
+    def test_failed_task_stops_the_run(self, temp_dir: str, retries: int) -> None:
+        """Once a task fails for good, no further task is started.
+
+        With one worker the failing task runs first, and its retries run before
+        any other task, so no other task may write a rewritten fragment.
+        """
+        path = Path(temp_dir) / "fail_fast"
+        dataset = _create_small_fragments(path)
+        options = CompactionOptions(target_rows_per_fragment=20, num_threads=1)
+        plan = Compaction.plan(dataset, options)
+        assert plan.num_tasks() >= 3
+        first_fragment = plan.tasks[0].fragments[0].id
+        fragment = next(
+            f for f in dataset.get_fragments() if f.fragment_id == first_fragment
+        )
+        os.remove(path / "data" / fragment.data_files()[0].path)
+        files_before = set(os.listdir(path / "data"))
+        version_before = lance.dataset(str(path)).version
+
+        with pytest.raises(RuntimeError, match="Compaction failed: task for fragments"):
+            lr.compact_files(
+                uri=str(path),
+                compaction_options=options,
+                num_workers=1,
+                max_task_retries=retries,
+            )
+
+        assert set(os.listdir(path / "data")) == files_before
+        assert lance.dataset(str(path)).version == version_before
+
+    def test_failed_tasks_are_retried(
+        self, temp_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every task fails once; with a retry each succeeds and the table commits."""
+        path = Path(temp_dir) / "retry"
+        _create_small_fragments(path)
+        markers = Path(temp_dir) / "markers"
+        markers.mkdir()
+        real_handler = compaction_mod._handle_compaction_task
+        monkeypatch.setattr(
+            compaction_mod,
+            "_handle_compaction_task",
+            lambda **kwargs: fail_first_attempt(real_handler(**kwargs), str(markers)),
+        )
+        options = CompactionOptions(target_rows_per_fragment=20, num_threads=1)
+
+        metrics = lr.compact_files(
+            uri=str(path),
+            compaction_options=options,
+            num_workers=2,
+            max_task_retries=1,
+        )
+
+        assert metrics is not None
+        assert metrics.fragments_removed == 8
+        assert len(os.listdir(markers)) == metrics.fragments_added
+        dataset = lance.dataset(str(path))
+        assert sorted(dataset.to_table()["id"].to_pylist()) == list(range(80))
+
+    def test_task_failure_without_retries_raises(
+        self, temp_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The default of zero retries keeps a failing task fatal."""
+        path = Path(temp_dir) / "no_retry"
+        _create_small_fragments(path)
+        markers = Path(temp_dir) / "markers"
+        markers.mkdir()
+        real_handler = compaction_mod._handle_compaction_task
+        monkeypatch.setattr(
+            compaction_mod,
+            "_handle_compaction_task",
+            lambda **kwargs: fail_first_attempt(real_handler(**kwargs), str(markers)),
+        )
+        version_before = lance.dataset(str(path)).version
+
+        with pytest.raises(RuntimeError, match="Compaction failed: transient failure"):
+            lr.compact_files(
+                uri=str(path),
+                compaction_options=CompactionOptions(
+                    target_rows_per_fragment=20, num_threads=1
+                ),
+                num_workers=2,
+            )
+
+        assert lance.dataset(str(path)).version == version_before
+
+    def test_invalid_max_task_retries_raises(self, temp_dir: str) -> None:
+        with pytest.raises(ValueError, match="max_task_retries must be non-negative"):
+            lr.compact_files(uri=str(Path(temp_dir) / "any"), max_task_retries=-1)
+        with pytest.raises(ValueError, match="max_task_retries must be non-negative"):
+            lr.compact_database(
+                database=["db"],
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                max_task_retries=-1,
+            )
+
+    def test_compact_database_non_positive_num_workers_raises(
+        self, temp_dir: str
+    ) -> None:
+        with pytest.raises(ValueError, match="num_workers must be positive"):
+            lr.compact_database(
+                database=["db"],
+                namespace_impl="dir",
+                namespace_properties={"root": temp_dir},
+                num_workers=0,
+            )
+
+    def test_non_positive_num_workers_raises(self, temp_dir: str) -> None:
+        path = Path(temp_dir) / "workers"
+        _create_small_fragments(path, count=2)
+
+        for count in (0, -1):
+            with pytest.raises(ValueError, match="num_workers must be positive"):
+                lr.compact_files(
+                    uri=str(path),
+                    compaction_options=CompactionOptions(target_rows_per_fragment=100),
+                    num_workers=count,
+                )
+
+    def test_non_positive_num_workers_raises_when_nothing_to_compact(
+        self, temp_dir: str
+    ) -> None:
+        path = Path(temp_dir) / "workers_idle"
+        _create_small_fragments(path, count=1)
+
+        with pytest.raises(ValueError, match="num_workers must be positive"):
+            lr.compact_files(uri=str(path), num_workers=0)
+
+
 class TestCompactDatabase:
     """Test cases for compact_database functionality."""
 
@@ -564,6 +708,34 @@ class TestCompactDatabase:
         args, kwargs = mock_namespace.list_tables.call_args
         request = args[0] if args else kwargs.get("request")
         assert request is not None and request.id == ["my_db"]
+
+    def test_compact_database_passes_max_task_retries_to_every_table(self) -> None:
+        mock_response = MagicMock()
+        mock_response.tables = ["t1", "t2"]
+        mock_response.page_token = None
+        mock_namespace = MagicMock()
+        mock_namespace.list_tables.return_value = mock_response
+
+        with (
+            patch(
+                "lance_ray.compaction.get_or_create_namespace",
+                return_value=mock_namespace,
+            ),
+            patch("lance_ray.compaction.compact_files") as compact_files,
+        ):
+            lr.compact_database(
+                database=["db"],
+                namespace_impl="dir",
+                namespace_properties={"root": "/tmp"},
+                max_task_retries=3,
+            )
+
+        assert [c.kwargs["table_id"] for c in compact_files.call_args_list] == [
+            ["db", "t1"],
+            ["db", "t2"],
+        ]
+        retries = {c.kwargs["max_task_retries"] for c in compact_files.call_args_list}
+        assert retries == {3}
 
     def test_compact_database_two_tables_both_compacted(self, temp_dir: str) -> None:
         """compact_database compacts all tables under the given database."""
