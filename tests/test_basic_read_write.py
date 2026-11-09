@@ -359,6 +359,327 @@ class TestReadWrite:
         overwritten_df = overwritten_dataset.to_pandas()
         assert len(overwritten_df) == 2  # Should have 2 rows after overwrite
 
+    def test_overwrite_mode_allows_schema_change(self, temp_dir: str) -> None:
+        """Overwrite writes fragments with the new schema, not append validation."""
+        path = Path(temp_dir) / "overwrite_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        ray_ds = lr.read_lance(str(path))
+        updated_ds = ray_ds.map_batches(
+            lambda batch: batch.assign(id_2=batch["id"] * 2),
+            batch_format="pandas",
+        )
+
+        lr.write_lance(updated_ds, str(path), mode="overwrite")
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [1, 2]
+        assert result["id_2"].tolist() == [2, 4]
+
+    def test_stream_overwrite_mode_allows_schema_change(self, temp_dir: str) -> None:
+        """Streaming overwrite also writes fragments with the new schema."""
+        path = Path(temp_dir) / "stream_overwrite_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        updated_data = pd.DataFrame({"id": [3, 4], "value": [30, 40], "id_2": [6, 8]})
+        lr.write_lance(
+            ray.data.from_pandas(updated_data),
+            str(path),
+            mode="overwrite",
+            stream=True,
+            batch_size=1,
+        )
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [3, 4]
+        assert result["id_2"].tolist() == [6, 8]
+
+    def test_append_mode_uses_existing_schema(self, temp_dir: str) -> None:
+        """Append keeps the existing schema instead of evolving it."""
+        path = Path(temp_dir) / "append_schema_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        additional_data = pd.DataFrame({"id": [3], "value": [30], "id_2": [6]})
+        lr.write_lance(
+            ray.data.from_pandas(additional_data),
+            str(path),
+            mode="append",
+        )
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result.columns.tolist() == ["id", "value"]
+        assert result["id"].tolist() == [1, 2, 3]
+
+    def test_append_arrow_extra_column_raises(self, temp_dir: str) -> None:
+        """Reordering columns to the existing schema must not drop extra ones."""
+        path = Path(temp_dir) / "append_arrow_extra.lance"
+        lr.write_lance(
+            ray.data.from_arrow(pa.table({"id": [1], "value": [10]})), str(path)
+        )
+
+        extra = ray.data.from_arrow(pa.table({"value": [20], "id": [2], "id_2": [4]}))
+        with pytest.raises(Exception, match="field names are not matching"):
+            lr.write_lance(extra, str(path), mode="append")
+        assert lance.dataset(str(path)).count_rows() == 1
+
+    def test_overwrite_multi_fragment_schema_change(self, temp_dir: str) -> None:
+        """Distributed overwrite across many fragments evolves the schema and
+        writes complete, correct data.
+
+        Forcing many small fragments exercises the path where independent Ray
+        write tasks each produce overwrite-mode fragments that are committed
+        together under one schema. It guards the per-fragment ``mode`` plumbing:
+        if overwrite fell back to append validation, the write would reject the
+        new ``id_2`` column.
+        """
+        path = Path(temp_dir) / "overwrite_multi_fragment.lance"
+        original_data = pd.DataFrame(
+            {"id": list(range(12)), "value": [x * 10 for x in range(12)]}
+        )
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        updated_ds = (
+            lr.read_lance(str(path))
+            .repartition(4)
+            .map_batches(
+                lambda batch: batch.assign(id_2=batch["id"] * 2),
+                batch_format="pandas",
+            )
+        )
+        lr.write_lance(
+            updated_ds,
+            str(path),
+            mode="overwrite",
+            min_rows_per_file=1,
+            max_rows_per_file=2,
+        )
+
+        dataset = lance.dataset(str(path))
+        assert len(dataset.get_fragments()) > 1  # truly multi-fragment
+        assert dataset.schema.names == ["id", "value", "id_2"]
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == list(range(12))
+        assert result["id_2"].tolist() == [x * 2 for x in range(12)]
+        assert result["id_2"].notna().all()  # every fragment carries the new column
+
+    def test_overwrite_mode_drops_column(self, temp_dir: str) -> None:
+        """Overwrite with fewer columns replaces the schema, dropping the rest."""
+        path = Path(temp_dir) / "overwrite_drop_column.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        reduced_data = pd.DataFrame({"id": [3, 4]})
+        lr.write_lance(ray.data.from_pandas(reduced_data), str(path), mode="overwrite")
+
+        dataset = lance.dataset(str(path))
+        assert dataset.schema.names == ["id"]
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [3, 4]
+
+    def test_overwrite_mode_changes_column_type(self, temp_dir: str) -> None:
+        """Overwrite can change a column's type (int -> string)."""
+        path = Path(temp_dir) / "overwrite_type_change.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        retyped_data = pd.DataFrame({"id": [3, 4], "value": ["a", "b"]})
+        lr.write_lance(ray.data.from_pandas(retyped_data), str(path), mode="overwrite")
+
+        dataset = lance.dataset(str(path))
+        value_type = dataset.schema.field("value").type
+        assert pa.types.is_string(value_type) or pa.types.is_large_string(value_type)
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["value"].tolist() == ["a", "b"]
+
+    def test_append_incompatible_type_raises(self, temp_dir: str) -> None:
+        """Append coerces each block to the existing dataset schema, so a
+        type-incompatible value fails the write.
+
+        Append pins the existing schema (int64 ``value``) and casts each block to
+        it; the string value cannot be cast to int64, so the write raises. With
+        overwrite the same data would instead evolve ``value`` to string.
+        """
+        path = Path(temp_dir) / "append_type_conflict.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        conflicting_data = pd.DataFrame({"id": [3], "value": ["not_an_int"]})
+        with pytest.raises(OSError):
+            lr.write_lance(
+                ray.data.from_pandas(conflicting_data), str(path), mode="append"
+            )
+
+    def test_stream_overwrite_resume_rows_schema_change(self, temp_dir: str) -> None:
+        """Streaming overwrite still evolves the schema when resume_rows skips the
+        first batch: the first *committed* batch must carry the overwrite mode."""
+        path = Path(temp_dir) / "stream_overwrite_resume.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        updated_data = pd.DataFrame(
+            {"id": [3, 4, 5], "value": [30, 40, 50], "id_2": [6, 8, 10]}
+        )
+        lr.write_lance(
+            ray.data.from_pandas(updated_data),
+            str(path),
+            mode="overwrite",
+            stream=True,
+            batch_size=1,
+            resume_rows=1,
+        )
+
+        result = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert result["id"].tolist() == [4, 5]  # first input row skipped
+        assert result["id_2"].tolist() == [8, 10]  # new column evolved on overwrite
+
+    def test_stream_append_extra_column_raises(self, temp_dir: str) -> None:
+        """Streaming append rejects columns absent from the existing schema."""
+        path = Path(temp_dir) / "stream_append_extra.lance"
+        original_data = pd.DataFrame({"id": [1, 2], "value": [10, 20]})
+        lr.write_lance(ray.data.from_pandas(original_data), str(path))
+
+        extra_col_data = pd.DataFrame({"id": [3], "value": [30], "id_2": [6]})
+        with pytest.raises(OSError):
+            lr.write_lance(
+                ray.data.from_pandas(extra_col_data),
+                str(path),
+                mode="append",
+                stream=True,
+                batch_size=1,
+            )
+
+    def test_create_inconsistent_column_order_raises(self, temp_dir: str) -> None:
+        """Distributed create with blocks in different column orders raises
+        before committing a version that cannot be read back."""
+        path = Path(temp_dir) / "inconsistent_order.lance"
+        ds1 = ray.data.from_items([{"a": i, "b": i * 10} for i in range(6)])
+        ds2 = ray.data.from_items([{"b": i * 10, "a": i} for i in range(6, 12)])
+        with pytest.raises(ValueError, match="different columns or column types"):
+            lr.write_lance(
+                ds1.union(ds2),
+                str(path),
+                mode="create",
+                concurrency=4,
+                min_rows_per_file=1,
+                max_rows_per_file=2,
+            )
+
+    def test_overwrite_inconsistent_column_types_raises(self, temp_dir: str) -> None:
+        """Blocks with the same column order but different types must not
+        commit an overwrite whose data cannot be read back."""
+        path = Path(temp_dir) / "inconsistent_types.lance"
+        lr.write_lance(ray.data.from_items([{"id": 0}]), str(path))
+        version = lance.dataset(str(path)).version
+
+        ds1 = ray.data.from_arrow(pa.table({"id": pa.array([1, 2], pa.int32())}))
+        ds2 = ray.data.from_arrow(pa.table({"id": pa.array([3, 4], pa.int64())}))
+        with pytest.raises(ValueError, match="different columns or column types"):
+            lr.write_lance(
+                ds1.union(ds2),
+                str(path),
+                mode="overwrite",
+                min_rows_per_file=2,
+                max_rows_per_file=2,
+            )
+        assert lance.dataset(str(path)).version == version
+
+    @pytest.mark.parametrize("null_first", [True, False])
+    def test_create_all_null_block_takes_other_type(
+        self, temp_dir: str, null_first: bool
+    ) -> None:
+        """A block whose column is all null (type ``null``) must not make the
+        write fail, whichever block comes first."""
+        path = Path(temp_dir) / "all_null_block.lance"
+        nulls = pa.table({"id": [1, 2], "x": pa.nulls(2)})
+        ints = pa.table({"id": [3, 4], "x": [7, 8]})
+        first, second = (nulls, ints) if null_first else (ints, nulls)
+        lr.write_lance(
+            ray.data.from_arrow(first).union(ray.data.from_arrow(second)),
+            str(path),
+            min_rows_per_file=2,
+            max_rows_per_file=2,
+        )
+
+        table = lance.dataset(str(path)).to_table().sort_by("id")
+        assert table.schema.field("x").type == pa.int64()
+        assert table["x"].to_pylist() == [None, None, 7, 8]
+
+    @pytest.mark.parametrize("non_nullable_first", [True, False])
+    def test_create_mixed_nullability_commits_nullable(
+        self, temp_dir: str, non_nullable_first: bool
+    ) -> None:
+        """A column non-nullable in one block and holding nulls in another must
+        be committed as nullable so every fragment can be read."""
+        path = Path(temp_dir) / "mixed_nullability.lance"
+        required = pa.schema([pa.field("v", pa.int64(), nullable=False)])
+        no_nulls = pa.table({"v": [1, 2]}, schema=required)
+        with_nulls = pa.table({"v": [3, None]})
+        first, second = (
+            (no_nulls, with_nulls) if non_nullable_first else (with_nulls, no_nulls)
+        )
+        lr.write_lance(
+            ray.data.from_arrow(first).union(ray.data.from_arrow(second)),
+            str(path),
+            min_rows_per_file=2,
+            max_rows_per_file=2,
+        )
+
+        table = lance.dataset(str(path)).to_table()
+        assert table.schema.field("v").nullable
+        assert sorted(table["v"].to_pylist(), key=lambda v: (v is None, v)) == [
+            1,
+            2,
+            3,
+            None,
+        ]
+
+    def test_create_list_child_names_differ(self, temp_dir: str) -> None:
+        """``list<item>`` and ``list<element>`` are the same type."""
+        path = Path(temp_dir) / "list_child_names.lance"
+        item = pa.table(
+            {"v": pa.array([[1], [2]], pa.list_(pa.field("item", pa.int64())))}
+        )
+        element = pa.table(
+            {"v": pa.array([[3], [4]], pa.list_(pa.field("element", pa.int64())))}
+        )
+        lr.write_lance(
+            ray.data.from_arrow(item).union(ray.data.from_arrow(element)),
+            str(path),
+            min_rows_per_file=2,
+            max_rows_per_file=2,
+        )
+
+        values = lance.dataset(str(path)).to_table()["v"].to_pylist()
+        assert sorted(value[0] for value in values if value) == [1, 2, 3, 4]
+
+    def test_create_inconsistent_order_with_explicit_schema(
+        self, temp_dir: str
+    ) -> None:
+        """An explicit schema aligns differently-ordered blocks by name, so the
+        distributed create writes correctly with no transposition."""
+        path = Path(temp_dir) / "inconsistent_order_fixed.lance"
+        ds1 = ray.data.from_items([{"a": i, "b": i * 10} for i in range(6)])
+        ds2 = ray.data.from_items([{"b": i * 10, "a": i} for i in range(6, 12)])
+        schema = pa.schema([("a", pa.int64()), ("b", pa.int64())])
+        lr.write_lance(
+            ds1.union(ds2),
+            str(path),
+            mode="create",
+            schema=schema,
+            concurrency=4,
+            min_rows_per_file=1,
+            max_rows_per_file=2,
+        )
+        result = (
+            lr.read_lance(str(path)).to_pandas().sort_values("a").reset_index(drop=True)
+        )
+        assert len(result) == 12
+        assert (result["b"] == result["a"] * 10).all()  # no transposition
+
     def test_read_lance_with_fragment_ids(
         self, sample_dataset: Dataset, temp_dir: str
     ) -> None:
@@ -430,6 +751,47 @@ class TestNamespaceReadWrite:
         read_sorted = read_df.sort_values("id").reset_index(drop=True)
 
         pd.testing.assert_frame_equal(original_sorted, read_sorted)
+
+    def test_overwrite_with_directory_namespace_allows_schema_change(
+        self, sample_data: pd.DataFrame, temp_dir: str
+    ) -> None:
+        """Namespace overwrite writes fragments with the new schema."""
+        table_id = ["schema_change_table"]
+
+        lr.write_lance(
+            ray.data.from_pandas(sample_data[["id", "score"]]),
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+
+        ray_ds = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        )
+        updated_ds = ray_ds.map_batches(
+            lambda batch: batch.assign(id_2=batch["id"] * 2),
+            batch_format="pandas",
+        )
+
+        lr.write_lance(
+            updated_ds,
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+            mode="overwrite",
+        )
+
+        result = lr.read_lance(
+            namespace_impl="dir",
+            namespace_properties={"root": temp_dir},
+            table_id=table_id,
+        ).to_pandas()
+        result = result.sort_values("id").reset_index(drop=True)
+
+        assert result["id"].tolist() == sample_data["id"].tolist()
+        assert result["id_2"].tolist() == (sample_data["id"] * 2).tolist()
 
 
 class TestDatasetOptions:
