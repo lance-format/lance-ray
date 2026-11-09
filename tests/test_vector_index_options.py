@@ -62,6 +62,28 @@ except ImportError:  # pragma: no cover - environment dependent
     index_mod = _load_index_module_with_stubs()
 
 
+_TEMPORAL_TYPES = {
+    "event_date": pa.date32(),
+    "event_date64": pa.date64(),
+    "event_time32_s": pa.time32("s"),
+    "event_time32_ms": pa.time32("ms"),
+    "event_time64_us": pa.time64("us"),
+    "event_time64_ns": pa.time64("ns"),
+    "event_timestamp_s": pa.timestamp("s"),
+    "event_timestamp_ms": pa.timestamp("ms"),
+    "event_timestamp_us": pa.timestamp("us"),
+    "event_timestamp_ns": pa.timestamp("ns"),
+    "event_timestamp_s_utc": pa.timestamp("s", tz="UTC"),
+    "event_timestamp_ms_utc": pa.timestamp("ms", tz="UTC"),
+    "event_timestamp_us_utc": pa.timestamp("us", tz="UTC"),
+    "event_timestamp_ns_utc": pa.timestamp("ns", tz="UTC"),
+    "event_duration_s": pa.duration("s"),
+    "event_duration_ms": pa.duration("ms"),
+    "event_duration_us": pa.duration("us"),
+    "event_duration_ns": pa.duration("ns"),
+}
+
+
 class _FakeField:
     def __init__(self, name: str, field_type: Any = None) -> None:
         self.name = name
@@ -75,7 +97,7 @@ class _FakeLanceField:
 
 class _FakeLanceSchema:
     def field(self, column: str) -> "_FakeLanceField":
-        if column not in {"value", "text", "labels"}:
+        if column not in {"value", "text", "labels"} and column not in _TEMPORAL_TYPES:
             raise KeyError(column)
         return _FakeLanceField()
 
@@ -90,6 +112,8 @@ class _FakeSchema:
             return _FakeField(column, pa.string())
         if column == "labels":
             return _FakeField(column, pa.list_(pa.string()))
+        if column in _TEMPORAL_TYPES:
+            return _FakeField(column, _TEMPORAL_TYPES[column])
         else:
             raise KeyError(column)
 
@@ -100,6 +124,7 @@ class _FakeSchema:
                 _FakeField("value", pa.int64()),
                 _FakeField("text", pa.string()),
                 _FakeField("labels", pa.list_(pa.string())),
+                *[_FakeField(name, dtype) for name, dtype in _TEMPORAL_TYPES.items()],
             ]
         )
 
@@ -554,6 +579,11 @@ def test_create_index_rejects_invalid_num_segments(
         ("BLOOMFILTER", "value"),
         ("RTREE", "value"),
         ("LABEL_LIST", "labels"),
+        *[
+            (index_type, column)
+            for index_type in ("BTREE", "ZONEMAP")
+            for column in _TEMPORAL_TYPES
+        ],
     ],
 )
 def test_create_scalar_index_uses_segment_path(
@@ -608,6 +638,27 @@ def test_create_scalar_index_uses_segment_path(
     assert captured["fragment_handler_kwargs"]["index_type"] == index_type
     assert captured["fragment_handler_kwargs"]["block_size"] == 4096
     assert fake_dataset.commit_kwargs["segments"] == ["segment"]
+
+
+@pytest.mark.parametrize("index_type", ["BTREE", "ZONEMAP"])
+def test_create_ordered_scalar_index_rejects_interval_column(
+    monkeypatch: pytest.MonkeyPatch, index_type: str
+) -> None:
+    """Intervals should fail validation before Ray workers start."""
+
+    fake_dataset: Any = _FakeDataset()
+    monkeypatch.setattr(
+        fake_dataset,
+        "schema",
+        pa.schema([pa.field("event_date", pa.month_day_nano_interval())]),
+    )
+
+    with pytest.raises(TypeError, match=r"temporal \(except interval\)"):
+        index_mod.create_scalar_index(
+            uri=fake_dataset,
+            column="event_date",
+            index_type=cast(Any, index_type),
+        )
 
 
 def test_create_label_list_index_rejects_non_list_column() -> None:
