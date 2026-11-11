@@ -5,8 +5,8 @@ from typing import Any, Optional
 import lance
 from lance.lance import CompactionMetrics
 from lance.optimize import Compaction, CompactionOptions, CompactionTask
-from ray.util.multiprocessing import Pool
 
+from .index import _map_async_with_pool
 from .utils import (
     get_namespace_kwargs,
     get_or_create_namespace,
@@ -25,9 +25,7 @@ def _handle_compaction_task(
     table_id: Optional[list[str]] = None,
 ) -> Callable[[CompactionTask], dict[str, Any]]:
     """
-    Create a function to handle compaction task execution for use with Pool.
-    This function returns a callable that can be used with Pool.map_async
-    to execute compaction tasks.
+    Create a function that executes one compaction task on a Ray worker.
     """
 
     def func(task: CompactionTask) -> dict[str, Any]:
@@ -69,13 +67,26 @@ def _handle_compaction_task(
 
         except Exception as e:
             logger.error(f"Compaction task failed for fragments {task.fragments}: {e}")
+            fragment_ids = [fragment.id for fragment in task.fragments]
             return {
                 "status": "error",
                 "fragments": task.fragments,
-                "error": str(e),
+                "error": f"task for fragments {fragment_ids} failed: {e}",
             }
 
     return func
+
+
+def _validate_num_workers(num_workers: int) -> None:
+    if num_workers <= 0:
+        raise ValueError(f"num_workers must be positive, got {num_workers}")
+
+
+def _validate_max_task_retries(max_task_retries: int) -> None:
+    if max_task_retries < 0:
+        raise ValueError(
+            f"max_task_retries must be non-negative, got {max_task_retries}"
+        )
 
 
 def compact_files(
@@ -88,6 +99,7 @@ def compact_files(
     namespace_impl: Optional[str] = None,
     namespace_properties: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
+    max_task_retries: int = 0,
 ) -> Optional[CompactionMetrics]:
     """
     Compact files in a Lance dataset using distributed Ray workers.
@@ -109,16 +121,25 @@ def compact_files(
             credentials vending in distributed workers.
         namespace_properties: Properties for connecting to the namespace.
             Used together with namespace_impl and table_id.
-        ray_remote_args: Options for Ray tasks (e.g., num_cpus, resources).
+        ray_remote_args: Options for the Ray worker actors (e.g., num_cpus,
+            resources); num_cpus defaults to 0, as in Ray's Pool.
+        max_task_retries: How many times a failed compaction task is
+            resubmitted before the compaction fails (default: 0). A transient
+            object-store error then costs one task rather than the whole run.
+            A failed attempt may leave unreferenced data files behind.
 
     Returns:
         CompactionMetrics with statistics from the compaction operation.
 
     Raises:
         ValueError: If input parameters are invalid.
-        RuntimeError: If compaction fails.
+        RuntimeError: If compaction fails. Once a task has failed for good, no
+            further task is started, nothing is committed, and the message
+            names that first failure only.
     """
     validate_uri_or_namespace(uri, namespace_impl, table_id)
+    _validate_num_workers(num_workers)
+    _validate_max_task_retries(max_task_retries)
 
     # Resolve URI and get storage options from namespace if provided
     uri, merged_storage_options = resolve_namespace_table(
@@ -152,10 +173,9 @@ def compact_files(
         num_workers = compaction_plan.num_tasks()
         logger.info(f"Adjusted num_workers to {num_workers} to match task count")
 
-    # Step 2: Execute tasks in parallel using Ray Pool
-    pool = Pool(processes=num_workers, ray_remote_args=ray_remote_args)
-
-    # Create the task handler function
+    # Step 2: Execute tasks in parallel on idle Ray workers. The rewrites of
+    # the other tasks are worthless once one task has failed for good, so stop
+    # at the first such failure.
     task_handler = _handle_compaction_task(
         dataset_uri=uri,
         storage_options=merged_storage_options,
@@ -163,35 +183,18 @@ def compact_files(
         namespace_properties=namespace_properties,
         table_id=table_id,
     )
-
-    # Submit tasks using Pool.map_async
-    rst_futures = pool.map_async(
-        task_handler,
-        compaction_plan.tasks,
-        chunksize=1,
+    results = _map_async_with_pool(
+        create_fragment_handler=lambda: task_handler,
+        fragment_batches=compaction_plan.tasks,
+        num_workers=num_workers,
+        ray_remote_args=ray_remote_args,
+        error_prefix="Compaction failed",
+        max_task_retries=max_task_retries,
+        fail_fast=True,
     )
 
-    # Wait for results
-    try:
-        results = rst_futures.get()
-    except Exception as e:
-        raise RuntimeError(f"Failed to complete distributed compaction: {e}") from e
-    finally:
-        pool.close()
-        pool.join()
-
-    # Check for failures
-    failed_results = [r for r in results if r["status"] == "error"]
-    if failed_results:
-        error_messages = [r["error"] for r in failed_results]
-        raise RuntimeError(f"Compaction failed: {'; '.join(error_messages)}")
-
-    # Step 3: Collect successful RewriteResult objects
-    successful_results = [r for r in results if r["status"] == "success"]
-    if not successful_results:
-        raise RuntimeError("No successful compaction results found")
-
-    rewrites = [r["result"] for r in successful_results]
+    # Step 3: Collect the RewriteResult objects
+    rewrites = [r["result"] for r in results]
 
     logger.info(
         f"Collected {len(rewrites)} successful compaction results, committing..."
@@ -214,6 +217,7 @@ def compact_database(
     num_workers: int = 4,
     storage_options: Optional[dict[str, str]] = None,
     ray_remote_args: Optional[dict[str, Any]] = None,
+    max_task_retries: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Compact all tables under a given database (namespace) using distributed Ray workers.
@@ -231,7 +235,11 @@ def compact_database(
         compaction_options: Options for the compaction operation (used for every table).
         num_workers: Number of Ray workers per table (default: 4).
         storage_options: Storage options for the datasets.
-        ray_remote_args: Options for Ray tasks (e.g. num_cpus, resources).
+        ray_remote_args: Options for the Ray worker actors (e.g. num_cpus,
+            resources); see :func:`compact_files`.
+        max_task_retries: How many times a failed compaction task is resubmitted
+            before the table's compaction fails (default: 0). See
+            :func:`compact_files`.
 
     Returns:
         A list of dicts, one per table, with keys:
@@ -258,6 +266,8 @@ def compact_database(
         raise ValueError("'database' must be a non-empty list of path segments.")
     if not namespace_impl:
         raise ValueError("'namespace_impl' is required when using compact_database.")
+    _validate_num_workers(num_workers)
+    _validate_max_task_retries(max_task_retries)
 
     from lance_namespace import ListTablesRequest
 
@@ -304,6 +314,7 @@ def compact_database(
                 namespace_impl=namespace_impl,
                 namespace_properties=namespace_properties,
                 ray_remote_args=ray_remote_args,
+                max_task_retries=max_task_retries,
             )
             results.append({"table_id": table_id, "metrics": metrics})
         except Exception as e:

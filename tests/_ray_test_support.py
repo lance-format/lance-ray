@@ -158,3 +158,23 @@ def die_once_handler(marker: str) -> Callable[[list[int]], dict[str, Any]]:
         return {"status": "success", "fragment_ids": fragment_ids}
 
     return handler
+
+
+def fail_first_attempt(
+    handler: Callable[[Any], dict[str, Any]], marker_dir: str
+) -> Callable[[Any], dict[str, Any]]:
+    """Make a compaction task handler fail once per task, then delegate to it."""
+
+    def wrapped(task: Any) -> dict[str, Any]:
+        name = "-".join(str(fragment.id) for fragment in task.fragments)
+        try:
+            os.close(os.open(os.path.join(marker_dir, name), os.O_CREAT | os.O_EXCL))
+        except FileExistsError:
+            return handler(task)
+        return {
+            "status": "error",
+            "fragments": task.fragments,
+            "error": "transient failure",
+        }
+
+    return wrapped

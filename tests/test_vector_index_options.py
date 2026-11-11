@@ -275,6 +275,92 @@ def test_map_async_with_pool_fails_when_every_worker_died() -> None:
         )
 
 
+def test_map_async_with_pool_fail_fast_stops_dispatching(tmp_path: Path) -> None:
+    """The first batch to fail for good stops the run before later batches start."""
+    marker_dir = str(tmp_path)
+
+    def handler(fragment_ids: list[int]) -> dict[str, Any]:
+        attempt_marker(marker_dir, fragment_ids)
+        return {"status": "error", "fragment_ids": fragment_ids, "error": "boom"}
+
+    with pytest.raises(RuntimeError, match="failed: boom"):
+        index_mod._map_async_with_pool(
+            create_fragment_handler=lambda: handler,
+            fragment_batches=[[0], [1], [2]],
+            num_workers=1,
+            ray_remote_args=None,
+            error_prefix="failed",
+            max_task_retries=1,
+            fail_fast=True,
+        )
+
+    # Batch 0 and its retry ran; batches 1 and 2 never started.
+    attempts = sorted(name.split(".")[0] for name in os.listdir(marker_dir))
+    assert attempts == ["0", "0"]
+
+
+def test_map_async_with_pool_fail_fast_keeps_a_batch_that_recovers(
+    tmp_path: Path,
+) -> None:
+    """A batch that succeeds on its retry does not stop the run."""
+    marker_dir = str(tmp_path)
+
+    def handler(fragment_ids: list[int]) -> dict[str, Any]:
+        if attempt_marker(marker_dir, fragment_ids) == 1:
+            return {"status": "error", "error": "boom"}
+        return {"status": "success"}
+
+    results = index_mod._map_async_with_pool(
+        create_fragment_handler=lambda: handler,
+        fragment_batches=[[0], [1]],
+        num_workers=1,
+        ray_remote_args=None,
+        error_prefix="failed",
+        max_task_retries=1,
+        fail_fast=True,
+    )
+
+    assert results == [{"status": "success"}, {"status": "success"}]
+
+
+def test_map_async_with_pool_fail_fast_reports_a_lost_worker(tmp_path: Path) -> None:
+    """A worker process lost mid-batch is a failure like any other."""
+    with pytest.raises(RuntimeError, match="failed: .*Error"):
+        index_mod._map_async_with_pool(
+            create_fragment_handler=lambda: die_once_handler(str(tmp_path / "died")),
+            fragment_batches=[[0], [1]],
+            num_workers=2,
+            ray_remote_args=None,
+            error_prefix="failed",
+            fail_fast=True,
+        )
+
+
+def test_map_async_with_pool_fail_fast_with_retries_on_two_workers(
+    tmp_path: Path,
+) -> None:
+    """A retrying batch keeps its place at the front, so the third batch never starts."""
+    marker_dir = str(tmp_path)
+
+    def handler(fragment_ids: list[int]) -> dict[str, Any]:
+        attempt_marker(marker_dir, fragment_ids)
+        return {"status": "error", "error": "boom"}
+
+    with pytest.raises(RuntimeError, match="failed: boom"):
+        index_mod._map_async_with_pool(
+            create_fragment_handler=lambda: handler,
+            fragment_batches=[[0], [1], [2]],
+            num_workers=2,
+            ray_remote_args=None,
+            error_prefix="failed",
+            max_task_retries=1,
+            fail_fast=True,
+        )
+
+    started = {name.split(".")[0] for name in os.listdir(marker_dir)}
+    assert "2" not in started
+
+
 def test_create_index_rejects_negative_max_task_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
