@@ -23,6 +23,7 @@ from .io import (
     read_lance,
     write_lance,
 )
+from .merge_into import merge_into
 from .pool import clear_global_pool, get_global_pool, init_global_pool, set_global_pool
 from .search import vector_search
 
@@ -37,6 +38,7 @@ __all__ = [
     "add_columns",
     "add_columns_from",
     "merge_columns_from",
+    "merge_into",
     "create_scalar_index",
     "create_index",
     "optimize_indices",
