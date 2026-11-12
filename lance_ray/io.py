@@ -307,8 +307,6 @@ def write_lance(
         return
 
     # Streaming path: commit one fragment per batch to minimize memory usage.
-    import lance
-
     if (namespace_impl is not None or namespace_properties is not None) and table_id:
         raise ValueError(
             "Streaming write with 'namespace_impl' + 'table_id' is not supported; "
@@ -321,23 +319,18 @@ def write_lance(
         )
 
     dest_uri: str = uri
-    dest_exists = False
-    dest_version: Optional[int] = None
     base_store_params_kwargs: dict[str, Any] = {}
     if base_store_params:
         base_store_params_kwargs = {"base_store_params": base_store_params}
 
+    dest_version: Optional[int]
     try:
-        _dest = lance.LanceDataset(
-            dest_uri,
-            storage_options=storage_options,
-            **base_store_params_kwargs,
-        )
-        dest_exists = True
-        dest_version = _dest.version
+        dest_version = LanceDataset(
+            dest_uri, storage_options=storage_options, **base_store_params_kwargs
+        ).version
     except Exception:
-        dest_exists = False
         dest_version = None
+    dest_exists = dest_version is not None
 
     # Enforce mode semantics.
     if mode == "create" and dest_exists:
@@ -348,6 +341,9 @@ def write_lance(
     from .fragment import LanceFragmentWriter
 
     effective_batch_size = batch_size if batch_size is not None else 1024
+    overwrite_initial_bases = (
+        materialize_initial_bases(initial_bases) if mode == "create" else None
+    )
 
     rows_seen = 0
     first_commit_done = False
@@ -415,99 +411,33 @@ def write_lance(
                 "LanceFragmentWriter returned no fragments for a non-empty batch"
             )
 
-        # Commit after each batch.
-        op: LanceOperation.BaseOperation
-        if not first_commit_done:
-            # First commit: respect mode.
-            if mode in ("create", "overwrite") or not dest_exists:
-                op = LanceOperation.Overwrite(
-                    schema_obj,
-                    fragments,
-                    initial_bases=(
-                        materialize_initial_bases(initial_bases)
-                        if mode == "create"
-                        else None
-                    ),
-                )
-                LanceDataset.commit(
-                    dest_uri,
-                    op,
-                    read_version=None,
-                    storage_options=storage_options,
-                    enable_stable_row_ids=enable_stable_row_ids,
-                    **base_store_params_kwargs,
-                )
-                first_commit_done = True
-                dest_exists = True
-                try:
-                    _dest = lance.LanceDataset(
-                        dest_uri,
-                        storage_options=storage_options,
-                        **base_store_params_kwargs,
-                    )
-                    dest_version = _dest.version
-                except Exception:
-                    dest_version = None
-            elif mode == "append":
-                op = LanceOperation.Append(fragments)
-                LanceDataset.commit(
-                    dest_uri,
-                    op,
-                    read_version=dest_version,
-                    storage_options=storage_options,
-                    enable_stable_row_ids=enable_stable_row_ids,
-                    **base_store_params_kwargs,
-                )
-                first_commit_done = True
-                try:
-                    _dest = lance.LanceDataset(
-                        dest_uri,
-                        storage_options=storage_options,
-                        **base_store_params_kwargs,
-                    )
-                    dest_version = _dest.version
-                except Exception:
-                    pass
-            else:
-                # Fallback: overwrite.
-                op = LanceOperation.Overwrite(
-                    schema_obj,
-                    fragments,
-                    initial_bases=(
-                        materialize_initial_bases(initial_bases)
-                        if mode == "create"
-                        else None
-                    ),
-                )
-                LanceDataset.commit(
-                    dest_uri,
-                    op,
-                    read_version=None,
-                    storage_options=storage_options,
-                    enable_stable_row_ids=enable_stable_row_ids,
-                    **base_store_params_kwargs,
-                )
-                first_commit_done = True
-        else:
-            # Subsequent commits always append.
-            op = LanceOperation.Append(fragments)
-            LanceDataset.commit(
+        # Commit after each batch: the first commit honours ``mode`` and later
+        # ones append. ``commit`` returns the dataset at the new version, which
+        # the next append reads from.
+        if first_commit_done or mode == "append":
+            committed = LanceDataset.commit(
                 dest_uri,
-                op,
+                LanceOperation.Append(fragments),
                 read_version=dest_version,
                 storage_options=storage_options,
                 enable_stable_row_ids=enable_stable_row_ids,
                 **base_store_params_kwargs,
             )
-            try:
-                _dest = lance.LanceDataset(
-                    dest_uri,
-                    storage_options=storage_options,
-                    **base_store_params_kwargs,
-                )
-                dest_version = _dest.version
-            except Exception:
-                pass
+        else:
+            committed = LanceDataset.commit(
+                dest_uri,
+                LanceOperation.Overwrite(
+                    schema_obj,
+                    fragments,
+                    initial_bases=overwrite_initial_bases,
+                ),
+                read_version=None,
+                storage_options=storage_options,
+                enable_stable_row_ids=enable_stable_row_ids,
+                **base_store_params_kwargs,
+            )
+        dest_version = committed.version
+        first_commit_done = True
 
         rows_seen += tbl.num_rows
 
