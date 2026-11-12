@@ -12,6 +12,7 @@ import lance_ray as lr
 import pyarrow as pa
 import pytest
 import ray
+from lance_ray.datasink import LanceDatasink
 from ray.data import Dataset
 
 import pandas as pd
@@ -125,6 +126,34 @@ class TestWriteLance:
 
         with pytest.raises((ValueError, AttributeError, TypeError)):
             lr.write_lance(None, str(path))  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_write_lance_invalid_mode(
+        self, sample_dataset: Dataset, temp_dir: str, stream: bool
+    ) -> None:
+        """An unknown mode must raise and leave an existing dataset untouched.
+
+        Before validation, the non-stream path wrote fragments without
+        committing them and the stream path overwrote the dataset.
+        """
+        path = Path(temp_dir) / "bad_mode.lance"
+        lr.write_lance(sample_dataset, str(path))
+        version = lance.dataset(str(path)).version
+
+        new_rows = ray.data.from_pandas(pd.DataFrame({"id": [100, 101]}))
+        with pytest.raises(ValueError, match="Invalid write mode"):
+            lr.write_lance(new_rows, str(path), mode="upsert", stream=stream)  # type: ignore[arg-type]
+
+        dataset = lance.dataset(str(path))
+        assert dataset.version == version
+        assert dataset.count_rows() == 5
+
+    def test_datasinks_reject_invalid_mode(self, temp_dir: str) -> None:
+        """Datasinks used directly validate the mode too."""
+        uri = str(Path(temp_dir) / "bad_mode.lance")
+        for sink_cls in (LanceDatasink, lr.LanceFragmentCommitter):
+            with pytest.raises(ValueError, match="Invalid write mode"):
+                sink_cls(uri, mode="upsert")  # type: ignore[arg-type]
 
     def test_write_with_pandas_map_batches(self, temp_dir: str) -> None:
         def map_fn(row: dict[str, Any]) -> dict[str, Any]:
