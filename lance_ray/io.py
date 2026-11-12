@@ -858,13 +858,7 @@ def add_columns_from(
                 for col in batch.column_names
                 if col not in _metadata_cols
             }
-            result = transform(batch_dict)
-            if isinstance(result, pa.RecordBatch):
-                new_cols = pa.Table.from_batches([result])
-            elif isinstance(result, pa.Table | dict):
-                new_cols = result
-            else:
-                new_cols = result
+            new_cols = transform(batch_dict)
         else:
             reader = pa.RecordBatchReader.from_batches(
                 batch.schema, batch.to_batches(max_chunksize=batch_size)

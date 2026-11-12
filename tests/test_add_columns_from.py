@@ -122,6 +122,28 @@ class TestAddColumnsFrom:
         assert df["id"].tolist() == [1, 2, 3, 4]
         assert df["name"].tolist() == ["Alice", "Bob", "Charlie", "Dave"]
 
+    @pytest.mark.parametrize("return_type", ["dict", "record_batch", "table"])
+    def test_callable_transform_return_types(
+        self, temp_dir: str, return_type: str
+    ) -> None:
+        path = Path(temp_dir) / "acf_return_types.lance"
+        lance.write_dataset(
+            pa.table({"id": [1, 2, 3, 4]}), str(path), max_rows_per_file=2
+        )
+
+        def add_double(batch: dict[str, list[Any]]) -> Any:
+            cols = {"doubled": [x * 2 for x in batch["id"]]}
+            if return_type == "record_batch":
+                return pa.RecordBatch.from_pydict(cols)
+            if return_type == "table":
+                return pa.table(cols)
+            return cols
+
+        lr.add_columns_from(str(path), transform=add_double)
+
+        df = lr.read_lance(str(path)).to_pandas().sort_values("id")
+        assert df["doubled"].tolist() == [2, 4, 6, 8]
+
     def test_transform_multi_fragment_with_small_batch(self, temp_dir: str) -> None:
         path = Path(temp_dir) / "acf_multi.lance"
         n_rows = 30
