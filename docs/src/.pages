@@ -4,6 +4,7 @@ nav:
   - Read: read.md
   - Write: write.md
   - Index: distributed-indexing.md
+  - Index Prewarm: index-prewarm.md
   - Compaction: compaction.md
   - Data Evolution: data-evolution.md
   - Examples: examples.md
