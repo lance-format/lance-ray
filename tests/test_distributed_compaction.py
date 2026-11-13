@@ -11,7 +11,8 @@ import lance_ray as lr
 import pyarrow as pa
 import pytest
 import ray
-from lance.optimize import CompactionOptions
+from lance.lance import CompactionMetrics
+from lance.optimize import Compaction, CompactionOptions
 
 import pandas as pd
 
@@ -21,15 +22,6 @@ def temp_dir() -> Iterator[str]:
     """Create a temporary directory for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
         yield temp_dir
-
-
-def _compaction_options(**options: Any) -> CompactionOptions:
-    """Build a partial ``CompactionOptions``.
-
-    pylance declares the TypedDict as total even though every key is optional
-    at runtime, so a partial literal cannot be spelled out directly.
-    """
-    return cast(CompactionOptions, options)
 
 
 def create_dataset_with_fragments(
@@ -140,7 +132,7 @@ class TestDistributedCompaction:
 
         metrics = lr.compact_files(
             dataset_path,
-            compaction_options=_compaction_options(
+            compaction_options=CompactionOptions(
                 target_rows_per_fragment=1000, num_threads=1
             ),
             num_workers=2,
@@ -184,7 +176,7 @@ class TestDistributedCompaction:
         assert dataset.count_rows() == 20, "Should have 20 total rows"
 
         # Configure compaction to merge fragments (target 100 rows per fragment)
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -208,6 +200,42 @@ class TestDistributedCompaction:
         assert len(fragments) == 1, "Should have 1 fragment after compaction"
         assert fragments[0].count_rows() == 20, "Fragment should have 20 rows"
         assert dataset.count_rows() == 20, "Should still have 20 total rows"
+
+    def test_compaction_options_are_passed_to_commit(
+        self, temp_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dataset_path = Path(temp_dir) / "test_dataset_commit_options"
+
+        fragments = [
+            pd.DataFrame({"id": range(i * 10, (i + 1) * 10)}) for i in range(2)
+        ]
+        create_dataset_with_fragments(dataset_path, fragments)
+
+        compaction_options = CompactionOptions(
+            target_rows_per_fragment=100,
+            defer_index_remap=True,
+        )
+        commit_options: list[CompactionOptions | None] = []
+        real_commit = Compaction.commit
+
+        def record_commit(
+            dataset: lance.LanceDataset,
+            rewrites: list[Any],
+            options: CompactionOptions | None = None,
+        ) -> CompactionMetrics:
+            commit_options.append(options)
+            return real_commit(dataset, rewrites, options)
+
+        monkeypatch.setattr("lance_ray.compaction.Compaction.commit", record_commit)
+
+        metrics = lr.compact_files(
+            uri=str(dataset_path),
+            compaction_options=compaction_options,
+            num_workers=1,
+        )
+
+        assert metrics is not None
+        assert commit_options == [compaction_options]
 
     def test_compaction_without_options(self, temp_dir: str) -> None:
         """
@@ -271,7 +299,7 @@ class TestDistributedCompaction:
         assert dataset.count_rows() == 11, "Should have 11 rows after deletion"
 
         # Configure compaction to materialize deletions
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             materialize_deletions=True,
             materialize_deletions_threshold=0.5,  # 50% threshold
             num_threads=1,
@@ -319,7 +347,7 @@ class TestDistributedCompaction:
         assert dataset.count_rows() == 5000, "Should have 5000 total rows"
 
         # Configure compaction to merge small fragments
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=20,
             num_threads=1,
         )
@@ -360,7 +388,7 @@ class TestDistributedCompaction:
         assert len(dataset.get_fragments()) == 1, "Should start with 1 fragment"
 
         # Configure compaction with target that matches current state
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -396,7 +424,7 @@ class TestDistributedCompaction:
         create_dataset_with_fragments(dataset_path, [fragment1, fragment2])
 
         # Configure compaction
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -435,7 +463,7 @@ class TestDistributedCompaction:
         create_dataset_with_fragments(dataset_path, [fragment1, fragment2])
 
         # Configure compaction
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -474,7 +502,7 @@ class TestDistributedCompaction:
         create_dataset_with_fragments(dataset_path, [fragment1, fragment2])
 
         # Configure compaction
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -519,7 +547,7 @@ class TestDistributedCompaction:
         )
 
         # Configure and execute compaction
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -592,7 +620,7 @@ class TestDistributedCompaction:
         assert len(dataset.get_fragments()) == 2, "Should start with 2 fragments"
         assert dataset.count_rows() == 20, "Should have 20 total rows"
 
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
@@ -670,7 +698,7 @@ class TestCompactDatabase:
 
         database = ["compact_db"]
         table_names = ["table_a", "table_b"]
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             num_threads=1,
         )
