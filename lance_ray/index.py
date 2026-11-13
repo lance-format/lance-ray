@@ -8,8 +8,11 @@ import math
 import os
 import time
 import uuid
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Callable
+from heapq import heappop, heappush
+from itertools import accumulate
 from typing import Any, Literal, Optional, TypeAlias, cast, get_args
 
 import lance
@@ -71,14 +74,17 @@ def _distribute_fragments_balanced(
 
     Preserve dataset fragment order so that segment coverage does not prevent
     adjacent small fragments from being compacted. Binary search finds the
-    smallest possible maximum row count across contiguous batches; a greedy
-    pass then creates exactly the requested number of non-empty batches (capped
-    at the fragment count). Boundaries are deterministic for identical inputs.
+    smallest possible maximum row count across contiguous batches. If that
+    partition has fewer segments than requested, repeatedly split the heaviest
+    multi-fragment batch near its row-count midpoint. This avoids avoidable
+    singleton tails while retaining the optimal maximum workload. Boundaries
+    are deterministic for identical inputs.
 
     Parameters
     ----------
     fragments : list
-        List of Lance fragment objects in dataset order.
+        List of Lance fragment objects. Fragments are ordered by ID, which is
+        their dataset order, before partitioning.
     num_segments : int
         Number of segment batches to distribute fragments across.
     logger : logging.Logger
@@ -96,7 +102,7 @@ def _distribute_fragments_balanced(
     num_segments = min(num_segments, len(fragments))
 
     fragment_info: list[dict[str, int]] = []
-    for fragment in fragments:
+    for fragment in sorted(fragments, key=lambda fragment: fragment.fragment_id):
         try:
             # Try to get fragment size information
             # fragment.count_rows() gives us the number of rows in the fragment
@@ -130,19 +136,59 @@ def _distribute_fragments_balanced(
         else:
             lower = limit + 1
 
-    segment_batches: list[list[int]] = [[]]
-    segment_workloads = [0]
+    prefix_rows = list(accumulate((info["size"] for info in fragment_info), initial=0))
+    # Only multi-fragment runs are eligible for splitting. Prefer longer runs
+    # on row-count ties (including zero rows), then the earlier starting point.
+    splittable: list[tuple[int, int, int, int]] = []
+    singletons: list[tuple[int, int, int, int]] = []
+
+    def add_run(start: int, end: int) -> None:
+        run = (-(prefix_rows[end] - prefix_rows[start]), -(end - start), start, end)
+        if end - start > 1:
+            heappush(splittable, run)
+        else:
+            singletons.append(run)
+
+    start = 0
+    workload = 0
     for i, info in enumerate(fragment_info):
-        # Reserve one fragment for every remaining batch, including when all
-        # remaining fragments have zero rows.
-        if segment_batches[-1] and (
-            segment_workloads[-1] + info["size"] > lower
-            or len(fragment_info) - i == num_segments - len(segment_batches)
-        ):
-            segment_batches.append([])
-            segment_workloads.append(0)
-        segment_batches[-1].append(info["id"])
-        segment_workloads[-1] += info["size"]
+        if i > start and workload + info["size"] > lower:
+            add_run(start, i)
+            start = i
+            workload = 0
+        workload += info["size"]
+    add_run(start, len(fragment_info))
+
+    # Reserving tail fragments for missing segments creates avoidable
+    # singletons. Split the heaviest run without increasing the optimal limit.
+    while len(splittable) + len(singletons) < num_segments:
+        negative_rows, _, start, end = heappop(splittable)
+        rows = -negative_rows
+        if rows == 0:
+            cut = (start + end + 1) // 2
+        else:
+            middle = bisect_left(
+                prefix_rows,
+                prefix_rows[start] + (rows + 1) // 2,
+                start + 1,
+                end,
+            )
+            candidates = {max(start + 1, middle - 1), min(end - 1, middle)}
+            cut = min(
+                candidates,
+                key=lambda pos: (
+                    abs(2 * (prefix_rows[pos] - prefix_rows[start]) - rows),
+                    -pos,
+                ),
+            )
+        add_run(start, cut)
+        add_run(cut, end)
+
+    runs = sorted(splittable + singletons, key=lambda run: run[2])
+    segment_batches = [
+        [info["id"] for info in fragment_info[start:end]] for _, _, start, end in runs
+    ]
+    segment_workloads = [-negative_rows for negative_rows, _, _, _ in runs]
 
     logger.info("Fragment distribution statistics:")
     logger.info("  Total fragments: %d", len(fragment_info))

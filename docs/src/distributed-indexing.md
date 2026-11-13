@@ -514,7 +514,7 @@ except ValueError as e:
 - For very large datasets, use Ray worker nodes with sufficient CPU and memory. Increasing `num_workers` can improve index build speed when there are enough segment batches to process, but requires more cluster resources.
 - `num_segments` determines the number of index segments. More segments can slow FTS queries because more index segments need to be loaded during search.
 - `num_segments` is capped at the number of fragments, and `num_workers` is capped at the number of non-empty segment batches.
-- Index segments cover contiguous ranges in dataset fragment order. Row counts are balanced within this constraint by minimizing the largest segment's row count. This preserves opportunities to compact adjacent small fragments within each segment; compaction still cannot cross different index-coverage boundaries. Equivalent index builds with the same ordered fragments, row counts, and segment count use the same boundaries.
+- Index segments cover contiguous ranges in dataset fragment-ID order. Row counts are balanced within this constraint by minimizing the largest segment's row count. If that initial layout has fewer segments than requested, the heaviest multi-fragment segment is split near its row-count midpoint, avoiding avoidable singleton tail segments. This preserves opportunities to compact adjacent small fragments within each segment; compaction still cannot cross different index-coverage boundaries. Equivalent index builds with the same selected fragments, row counts, and segment count use the same boundaries.
 
 ### Important Notes
 

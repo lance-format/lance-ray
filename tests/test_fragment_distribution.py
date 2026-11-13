@@ -29,6 +29,42 @@ def test_equal_fragments_form_contiguous_segments() -> None:
 
 
 @pytest.mark.parametrize(
+    "rows, num_segments, expected_lengths",
+    [
+        ([5000] + [100] * 9, 5, [1, 3, 2, 2, 2]),
+        ([1_000_000] + [1000] * 99, 10, [1, 7, 6, 12, 13, 12, 13, 12, 12, 12]),
+        ([0] * 8, 4, [2, 2, 2, 2]),
+    ],
+)
+def test_missing_segments_split_heaviest_run(
+    rows: list[int], num_segments: int, expected_lengths: list[int]
+) -> None:
+    fragments = [_Fragment(i, count) for i, count in enumerate(rows)]
+
+    batches = _distribute_fragments_balanced(
+        fragments, num_segments, logging.getLogger(__name__)
+    )
+
+    assert [len(batch) for batch in batches] == expected_lengths
+    assert [fragment_id for batch in batches for fragment_id in batch] == list(
+        range(len(rows))
+    )
+
+
+def test_fragment_ids_determine_order_without_mutating_input() -> None:
+    fragments = [_Fragment(i, 100) for i in [20, 3, 10, 0, 30, 7]]
+
+    assert _distribute_fragments_balanced(
+        fragments, 3, logging.getLogger(__name__)
+    ) == [
+        [0, 3],
+        [7, 10],
+        [20, 30],
+    ]
+    assert [fragment.fragment_id for fragment in fragments] == [20, 3, 10, 0, 30, 7]
+
+
+@pytest.mark.parametrize(
     "rows",
     [
         [],
@@ -45,28 +81,31 @@ def test_equal_fragments_form_contiguous_segments() -> None:
 def test_contiguous_distribution_minimizes_maximum_rows(
     rows: list[int], num_segments: int
 ) -> None:
-    # IDs deliberately differ from positions and are not sorted: only input
-    # order should determine adjacency, never numerical ID or row-count order.
+    # IDs deliberately differ from positions and are descending: IDs determine
+    # dataset order, never input order or row-count order.
     fragments = [_Fragment(100 - i * 3, count) for i, count in enumerate(rows)]
     logger = logging.getLogger(__name__)
     batches = _distribute_fragments_balanced(fragments, num_segments, logger)
 
     assert len(batches) == min(num_segments, len(rows))
     assert all(batches)
-    assert [fragment_id for batch in batches for fragment_id in batch] == [
+    assert [fragment_id for batch in batches for fragment_id in batch] == sorted(
         fragment.fragment_id for fragment in fragments
-    ]
+    )
     assert batches == _distribute_fragments_balanced(fragments, num_segments, logger)
     if not rows:
         return
 
+    ordered_rows = [
+        fragment.rows for fragment in sorted(fragments, key=lambda f: f.fragment_id)
+    ]
     sizes = {fragment.fragment_id: fragment.rows for fragment in fragments}
     actual = max(sum(sizes[fragment_id] for fragment_id in batch) for batch in batches)
     # Enumerate every legal cut placement as an independent optimality oracle.
     optimal = min(
         max(
-            sum(rows[start:end])
-            for start, end in zip((0, *cuts), (*cuts, len(rows)), strict=True)
+            sum(ordered_rows[start:end])
+            for start, end in zip((0, *cuts), (*cuts, len(ordered_rows)), strict=True)
         )
         for cuts in combinations(range(1, len(rows)), len(batches) - 1)
     )
