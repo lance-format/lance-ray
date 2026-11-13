@@ -3,10 +3,12 @@
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import lance
 import lance_ray as lr
+import pyarrow as pa
 import pytest
 import ray
 from lance.lance import CompactionMetrics
@@ -58,6 +60,94 @@ def create_dataset_with_fragments(
 
 class TestDistributedCompaction:
     """Test cases for distributed compaction functionality."""
+
+    @pytest.mark.parametrize("index_type", ["BTREE", "IVF_FLAT"])
+    def test_distributed_index_preserves_compaction(
+        self, tmp_path: Path, index_type: str
+    ) -> None:
+        """Index segments must leave adjacent small fragments mergeable (#5317)."""
+        dataset_path = str(tmp_path / "indexed_compaction.lance")
+        table = pa.table(
+            {
+                "id": range(800),
+                "value": range(800),
+                "vector": pa.array(
+                    [[float(i), float(i % 7)] for i in range(800)],
+                    type=pa.list_(pa.float32(), 2),
+                ),
+            }
+        )
+        dataset = lance.write_dataset(
+            table, dataset_path, max_rows_per_file=100, max_rows_per_group=100
+        )
+        assert len(dataset.get_fragments()) == 8
+
+        if index_type == "BTREE":
+            # Equivalent column-index builds must align their coverage so that
+            # the intersection of both index layouts still permits compaction.
+            for column in ["id", "value"]:
+                dataset = lr.create_scalar_index(
+                    dataset_path,
+                    column=column,
+                    index_type="BTREE",
+                    name=f"{column}_idx",
+                    num_workers=2,
+                    num_segments=2,
+                )
+        else:
+            dataset = lr.create_index(
+                dataset_path,
+                column="vector",
+                index_type="IVF_FLAT",
+                name="vector_idx",
+                num_workers=2,
+                num_segments=2,
+                num_partitions=2,
+            )
+
+        for index in dataset.describe_indices():
+            assert sorted(
+                sorted(segment.fragment_ids) for segment in index.segments
+            ) == [
+                [0, 1, 2, 3],
+                [4, 5, 6, 7],
+            ]
+
+        def query_ids(dataset: lance.LanceDataset) -> list[int]:
+            if index_type == "BTREE":
+                scanner = dataset.scanner(
+                    filter="id >= 120 AND value < 130", columns=["id"]
+                )
+                assert "ScalarIndexQuery" in scanner.explain_plan()
+            else:
+                scanner = dataset.scanner(
+                    nearest={"column": "vector", "q": [123.0, 4.0], "k": 1},
+                    columns=["id"],
+                )
+                assert "ANNSubIndex" in scanner.explain_plan()
+            return sorted(cast(list[int], scanner.to_table()["id"].to_pylist()))
+
+        expected_ids = list(range(120, 130)) if index_type == "BTREE" else [123]
+        assert query_ids(dataset) == expected_ids
+
+        metrics = lr.compact_files(
+            dataset_path,
+            compaction_options=CompactionOptions(
+                target_rows_per_fragment=1000, num_threads=1
+            ),
+            num_workers=2,
+        )
+        assert metrics is not None
+        assert metrics.fragments_removed == 8
+        assert metrics.fragments_added == 2
+
+        dataset = lance.dataset(dataset_path)
+        assert [fragment.count_rows() for fragment in dataset.get_fragments()] == [
+            400,
+            400,
+        ]
+        assert dataset.to_table().sort_by("id") == table
+        assert query_ids(dataset) == expected_ids
 
     def test_basic_compaction(self, temp_dir: str) -> None:
         """
@@ -121,7 +211,7 @@ class TestDistributedCompaction:
         ]
         create_dataset_with_fragments(dataset_path, fragments)
 
-        compaction_options = _compaction_options(
+        compaction_options = CompactionOptions(
             target_rows_per_fragment=100,
             defer_index_remap=True,
         )
