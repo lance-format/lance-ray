@@ -3,8 +3,8 @@
 This test ensures that pa.large_binary fields with metadata
 {"lance-encoding:blob": "true"} are written and read back with
 byte-for-byte fidelity using write_lance and read_lance.
-These tests explicitly use file format 2.1 to exercise legacy blob
-encoding, which is not supported by file formats 2.2 and later.
+The tests cover PyLance's default format selection and explicit use of
+file format 2.1 to preserve legacy Blob v1 encoding.
 
 Tests cover:
 - Single blob column round-trip
@@ -19,7 +19,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # Make local Lance python package available for import
 sys.path.insert(
@@ -36,6 +36,7 @@ from _utils import to_numpy_backed
 # Skip cleanly if Lance isn't available in the environment
 pytest.importorskip("lance")
 
+import lance
 import lance_ray.io as lr
 
 
@@ -73,34 +74,48 @@ def _generate_jpg_bytes() -> bytes:
             return os.urandom(64 * 64 * 3)
 
 
-@pytest.mark.parametrize("provide_schema", [True, False])
-def test_legacy_blob_requires_explicit_version(
-    temp_dir: str, provide_schema: bool
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("mode", ["create", "append", "overwrite"])
+def test_legacy_blob_uses_pylance_default_format(
+    tmp_path: Path, stream: bool, mode: Literal["create", "append", "overwrite"]
 ) -> None:
-    """Reject legacy blobs before dispatch when the file version is omitted."""
-    path = Path(temp_dir) / "legacy_blob_default_version.lance"
-    schema_fields: list[pa.Field[Any]] = [
-        pa.field(
-            "blob",
-            pa.large_binary(),
-            metadata={"lance-encoding:blob": "true"},
-        ),
-        pa.field("id", pa.int64()),
-    ]
-    schema = pa.schema(schema_fields)
-    table = pa.table({"blob": [b"foo", None], "id": [1, 2]}, schema=schema)
-
-    with pytest.raises(ValueError) as exc_info:
-        lr.write_lance(
-            ray.data.from_arrow(table),
-            str(path),
-            schema=schema if provide_schema else None,
+    """Use the stable format for a new table and inherit an existing format."""
+    path = tmp_path / "legacy_blob_default_version.lance"
+    schema = pa.schema(
+        [pa.field("blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"})]
+    )
+    table = pa.table({"blob": [b"foo", b"bar"]}, schema=schema)
+    existing = mode != "create"
+    if existing:
+        lance.write_dataset(
+            pa.table({"blob": [b"old"]}, schema=schema),
+            path,
+            data_storage_version="2.1",
         )
 
-    message = str(exc_info.value)
-    assert "blob" in message
-    assert 'data_storage_version="2.1"' in message
-    assert "Blob v2" in message
+    lr.write_lance(
+        ray.data.from_arrow(table), str(path), mode=mode, stream=stream, batch_size=1
+    )
+
+    dataset = lance.dataset(path)
+    blob_type = dataset.schema.field("blob").type
+    if existing:
+        assert blob_type == pa.large_binary()
+    else:
+        assert isinstance(blob_type, pa.ExtensionType)
+        assert blob_type.extension_name == "lance.blob.v2"
+    # An existing table can report 2.1 even if a new fragment uses 2.2.
+    expected_file_version = (2, 1) if existing else (2, 2)
+    assert {
+        (file.file_major_version, file.file_minor_version)
+        for fragment in dataset.get_fragments()
+        for file in fragment.data_files()
+    } == {expected_file_version}
+    expected_bytes = [b"old", b"foo", b"bar"] if mode == "append" else [b"foo", b"bar"]
+    blobs = dataset.take_blobs("blob", indices=list(range(len(expected_bytes))))
+    assert [
+        blob.read() if blob is not None else None for blob in blobs
+    ] == expected_bytes
 
 
 def test_single_blob_roundtrip(temp_dir: str) -> None:
