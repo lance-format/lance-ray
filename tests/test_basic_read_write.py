@@ -5,13 +5,16 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Optional, cast
 
 import lance
 import lance_ray as lr
 import pyarrow as pa
 import pytest
 import ray
+from lance.dataset import LANCE_COMMIT_MESSAGE_KEY
+from lance_namespace import DescribeTableRequest
+from lance_ray.utils import get_or_create_namespace
 from ray.data import Dataset
 
 import pandas as pd
@@ -215,6 +218,151 @@ class TestWriteLance:
             {"meta.`a.b`": "literal dot one"},
             {"meta.`a.b`": "literal dot two"},
         ]
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("mode", ["create", "append", "overwrite"])
+    @pytest.mark.parametrize(
+        ("properties", "message"),
+        [
+            (None, None),
+            ({}, None),
+            ({"job_id": "caf\u00e9-import"}, None),
+            (None, "Import complete \u2713"),
+            ({"job_id": "123"}, "Complete"),
+            ({LANCE_COMMIT_MESSAGE_KEY: "original", "source": "daily"}, "override"),
+            ({LANCE_COMMIT_MESSAGE_KEY: "original"}, ""),
+            ({LANCE_COMMIT_MESSAGE_KEY: "original"}, None),
+        ],
+    )
+    def test_write_metadata_matches_pylance(
+        self,
+        tmp_path: Path,
+        stream: bool,
+        mode: Literal["create", "append", "overwrite"],
+        properties: Optional[dict[str, str]],
+        message: Optional[str],
+    ) -> None:
+        uri = str(tmp_path / "ray.lance")
+        reference_uri = str(tmp_path / "reference.lance")
+        seed = pa.table({"id": [-1]})
+        before_version = 0
+        if mode != "create":
+            for path in (uri, reference_uri):
+                lance.write_dataset(
+                    seed,
+                    path,
+                    transaction_properties={"previous": "yes"},
+                    enable_stable_row_ids=True,
+                )
+            before_version = 1
+
+        table = pa.table({"id": [0, 1, 2, 3]})
+        original = properties.copy() if properties is not None else None
+        reference = lance.write_dataset(
+            table,
+            reference_uri,
+            mode=mode,
+            transaction_properties=properties,
+            commit_message=message,
+            enable_stable_row_ids=True,
+        )
+        reference_txn = reference.read_transaction(reference.version)
+        assert reference_txn is not None
+        expected = reference_txn.transaction_properties or {}
+
+        lr.write_lance(
+            ray.data.from_arrow(table),
+            uri,
+            mode=mode,
+            stream=stream,
+            batch_size=2,
+            enable_stable_row_ids=True,
+            transaction_properties=properties,
+            commit_message=message,
+        )
+        result = lance.dataset(uri)
+        assert result.to_table().equals(reference.to_table())
+        assert result.has_stable_row_ids
+        assert result.version == before_version + (2 if stream else 1)
+        for version in range(before_version + 1, result.version + 1):
+            txn = result.read_transaction(version)
+            assert txn is not None
+            assert (txn.transaction_properties or {}) == expected
+        if before_version:
+            previous = result.read_transaction(before_version)
+            assert previous is not None
+            assert previous.transaction_properties == {"previous": "yes"}
+        assert properties == original
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"transaction_properties": []},
+            {"transaction_properties": {1: "value"}},
+            {"transaction_properties": {"key": 1}},
+            {"commit_message": 123},
+        ],
+    )
+    def test_invalid_metadata_fails_before_write(
+        self, tmp_path: Path, stream: bool, kwargs: dict[str, Any]
+    ) -> None:
+        uri = str(tmp_path / "invalid.lance")
+        with pytest.raises(TypeError, match="transaction_properties|commit_message"):
+            lr.write_lance(cast(Any, object()), uri, stream=stream, **kwargs)
+        assert not Path(uri).exists()
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_separate_calls_do_not_inherit_metadata(
+        self, tmp_path: Path, stream: bool
+    ) -> None:
+        uri = str(tmp_path / "history.lance")
+        ds = ray.data.range(2)
+        for mode, properties, message in [
+            ("create", {"first": "yes"}, "first"),
+            ("append", {"second": "yes"}, "second"),
+            ("append", None, None),
+        ]:
+            lr.write_lance(
+                ds,
+                uri,
+                mode=cast(Literal["create", "append"], mode),
+                stream=stream,
+                batch_size=2,
+                transaction_properties=properties,
+                commit_message=message,
+            )
+        result = lance.dataset(uri)
+        assert result.count_rows() == 6
+        for version, expected in enumerate(
+            [
+                {"first": "yes", LANCE_COMMIT_MESSAGE_KEY: "first"},
+                {"second": "yes", LANCE_COMMIT_MESSAGE_KEY: "second"},
+                {},
+            ],
+            start=1,
+        ):
+            txn = result.read_transaction(version)
+            assert txn is not None
+            assert (txn.transaction_properties or {}) == expected
+
+    def test_stream_resume_without_new_rows_does_not_commit(
+        self, tmp_path: Path
+    ) -> None:
+        uri = str(tmp_path / "resume.lance")
+        initial = lance.write_dataset(
+            pa.table({"id": [0, 1]}), uri, commit_message="initial"
+        )
+        lr.write_lance(
+            ray.data.range(2),
+            uri,
+            mode="append",
+            stream=True,
+            batch_size=1,
+            resume_rows=2,
+            commit_message="should not be stored",
+        )
+        assert lance.dataset(uri).version == initial.version
 
 
 class TestReadLance:
@@ -430,6 +578,30 @@ class TestNamespaceReadWrite:
         read_sorted = read_df.sort_values("id").reset_index(drop=True)
 
         pd.testing.assert_frame_equal(original_sorted, read_sorted)
+
+    def test_namespace_metadata(self, tmp_path: Path) -> None:
+        properties = {"root": str(tmp_path)}
+        table_id = ["events"]
+        lr.write_lance(
+            ray.data.range(4),
+            namespace_impl="dir",
+            namespace_properties=properties,
+            table_id=table_id,
+            transaction_properties={"source": "namespace"},
+            commit_message="created",
+        )
+        namespace = get_or_create_namespace("dir", properties)
+        assert namespace is not None
+        location = namespace.describe_table(DescribeTableRequest(id=table_id)).location
+        assert location is not None
+        result = lance.dataset(location)
+        txn = result.read_transaction(result.version)
+        assert txn is not None
+        assert txn.transaction_properties == {
+            "source": "namespace",
+            LANCE_COMMIT_MESSAGE_KEY: "created",
+        }
+        assert result.count_rows() == 4
 
 
 class TestDatasetOptions:

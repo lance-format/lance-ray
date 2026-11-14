@@ -25,6 +25,8 @@ from .utils import (
     get_or_create_namespace,
     materialize_initial_bases,
     normalize_initial_bases,
+    normalize_transaction_properties,
+    with_transaction_properties,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +76,8 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
         schema: Optional[pa.Schema] = None,
         mode: Literal["create", "append", "overwrite"] = "create",
         enable_stable_row_ids: bool = False,
+        transaction_properties: Optional[dict[str, str]] = None,
+        commit_message: Optional[str] = None,
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
@@ -83,6 +87,10 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
+
+        self.transaction_properties = normalize_transaction_properties(
+            transaction_properties, commit_message
+        )
 
         if initial_bases and mode != "create":
             raise ValueError("'initial_bases' can only be used with mode='create'")
@@ -249,7 +257,9 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
                 base_store_params_kwargs = {"base_store_params": self.base_store_params}
             lance.LanceDataset.commit(
                 self.dataset_uri,
-                op,
+                with_transaction_properties(
+                    op, self.read_version, self.transaction_properties
+                ),
                 read_version=self.read_version,
                 storage_options=self.storage_options,
                 enable_stable_row_ids=self.enable_stable_row_ids,
@@ -290,6 +300,11 @@ class LanceDatasink(_BaseLanceDatasink):
             for more details.
         enable_stable_row_ids : bool, default False
             Enable stable row IDs for the dataset and all written fragments.
+        transaction_properties : dict[str, str], optional
+            Properties stored with this commit; not inherited from earlier commits.
+        commit_message : str, optional
+            Commit message. Overrides ``__lance_commit_message`` in
+            ``transaction_properties``, including when the message is empty.
         storage_options : Dict[str, Any], optional
             The storage options for the writer. Default is None.
         base_store_params : dict, optional
@@ -339,6 +354,8 @@ class LanceDatasink(_BaseLanceDatasink):
         max_bytes_per_file: Optional[int] = None,
         data_storage_version: Optional[str] = None,
         enable_stable_row_ids: bool = False,
+        transaction_properties: Optional[dict[str, str]] = None,
+        commit_message: Optional[str] = None,
         storage_options: Optional[dict[str, Any]] = None,
         base_store_params: Optional[dict[str, dict[str, Any]]] = None,
         initial_bases: Optional[list[Any]] = None,
@@ -366,6 +383,8 @@ class LanceDatasink(_BaseLanceDatasink):
             schema=schema,
             mode=mode,
             enable_stable_row_ids=enable_stable_row_ids,
+            transaction_properties=transaction_properties,
+            commit_message=commit_message,
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=initial_bases,
@@ -455,7 +474,8 @@ class LanceFragmentCommitter(_BaseLanceDatasink):
     """Lance Committer as Ray Datasink.
 
     This is used with `LanceFragmentWriter` to write large-than-memory data to
-    lance file.
+    lance file. Supports ``transaction_properties`` and ``commit_message``
+    with the same semantics as :class:`LanceDatasink`.
     """
 
     @property
