@@ -5,5 +5,6 @@ nav:
   - Write: write.md
   - Index: distributed-indexing.md
   - Compaction: compaction.md
+  - Cleanup: cleanup.md
   - Data Evolution: data-evolution.md
   - Examples: examples.md

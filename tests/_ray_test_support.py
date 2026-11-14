@@ -158,3 +158,61 @@ def die_once_handler(marker: str) -> Callable[[list[int]], dict[str, Any]]:
         return {"status": "success", "fragment_ids": fragment_ids}
 
     return handler
+
+
+# Stand-ins for pylance's cleanup sweep task and result, so the distributed
+# cleanup driver can be tested against pylance releases without them. Workers
+# unpickle them, so they live here for the same reason as the handlers above.
+
+
+class FakeCleanupStats:
+    """The fields of ``CleanupStats`` the driver reads."""
+
+    def __init__(self, data_files_removed: int = 0, bytes_removed: int = 0) -> None:
+        self.data_files_removed = data_files_removed
+        self.transaction_files_removed = 0
+        self.index_files_removed = 0
+        self.deletion_files_removed = 0
+        self.bytes_removed = bytes_removed
+
+
+class FakeSweepResult:
+    def __init__(
+        self,
+        index: int,
+        delete_concurrency: Optional[int],
+        delete_rate_limit: Optional[int],
+    ) -> None:
+        self.index = index
+        self.delete_concurrency = delete_concurrency
+        self.delete_rate_limit = delete_rate_limit
+        self.stats = FakeCleanupStats(data_files_removed=1, bytes_removed=10)
+
+
+class FakeSweepTask:
+    """Fails its first ``fail_attempts`` attempts, counted with files in
+    ``marker_dir``; its result carries the limits it ran with."""
+
+    def __init__(self, index: int, marker_dir: str, fail_attempts: int = 0) -> None:
+        self.index = index
+        self.subtree = "data"
+        self.start_after: Optional[str] = None if index == 0 else f"data/{index}"
+        self.end_inclusive: Optional[str] = f"data/{index + 1}"
+        self.marker_dir = marker_dir
+        self.fail_attempts = fail_attempts
+
+    def execute(
+        self,
+        dataset: Any,
+        *,
+        delete_concurrency: Optional[int] = None,
+        delete_rate_limit: Optional[int] = None,
+    ) -> FakeSweepResult:
+        prefix = f"{self.index}."
+        attempts = len([f for f in os.listdir(self.marker_dir) if f.startswith(prefix)])
+        open(os.path.join(self.marker_dir, f"{prefix}{time.time_ns()}"), "w").close()
+        if attempts < self.fail_attempts:
+            raise RuntimeError(f"injected failure of task {self.index}")
+        if dataset.count_rows() == 0:
+            raise RuntimeError("the worker opened an empty dataset")
+        return FakeSweepResult(self.index, delete_concurrency, delete_rate_limit)

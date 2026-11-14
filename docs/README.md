@@ -44,6 +44,7 @@ The built documentation will be in the `site/` directory.
   - `write.md` - Write operations guide  
   - `distributed-indexing.md` - Distributed indexing guide
   - `compaction.md` - Distributed compaction guide
+  - `cleanup.md` - Distributed cleanup guide
   - `data-evolution.md` - Data evolution guide
   - `examples.md` - Usage examples
   - `.pages` - Navigation configuration
