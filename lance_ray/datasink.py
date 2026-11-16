@@ -1,5 +1,7 @@
 import pickle
 from collections.abc import Iterable, Iterator
+from contextlib import ExitStack
+from itertools import chain, dropwhile
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -15,6 +17,7 @@ from ray.data._internal.util import _check_import
 from ray.data.datasource.datasink import Datasink, WriteResult
 
 from .fragment import (
+    FragmentBlock,
     FragmentStream,
     FragmentStreamFactory,
     prepare_fragment_write_options,
@@ -138,6 +141,7 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
             self.uri = uri
 
         self.schema = schema
+        self._append_target_schema: Optional[pa.Schema] = None
         self.mode = mode
         self.enable_stable_row_ids = enable_stable_row_ids
         self.read_version: Optional[int] = None
@@ -185,7 +189,7 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
             )
             self.read_version = ds.version
             if self.schema is None:
-                self.schema = ds.schema
+                self._append_target_schema = ds.schema
 
     def on_write_complete(
         self,
@@ -285,9 +289,8 @@ class LanceDatasink(_BaseLanceDatasink):
             provided, the PyLance default is used.
         data_storage_version: optional, str, default None
             The version of the data storage format to use. Newer versions are more
-            efficient but require newer versions of lance to read.  The default is
-            "legacy" which will use the legacy v1 version.  See the user guide
-            for more details.
+            efficient but require newer versions of lance to read. When omitted,
+            PyLance uses the destination's default or the stable format for a new dataset.
         enable_stable_row_ids : bool, default False
             Enable stable row IDs for the dataset and all written fragments.
         storage_options : Dict[str, Any], optional
@@ -416,35 +419,62 @@ class LanceDatasink(_BaseLanceDatasink):
         ctx: Any,
     ) -> WriteReturn:
         stream: FragmentStream | FragmentStreamFactory = blocks
-        if self._retry_params.get("max_attempts", 1) > 1:
-            # Retain the existing block objects, without copying their Arrow data.
-            replayable_blocks = list(blocks)
+        target_schema = self._append_target_schema if self.schema is None else None
+        cast_schema = self.schema if target_schema is None else target_schema
+        first: FragmentBlock | None = None
 
-            def stream_factory() -> Iterator[Union[pa.Table, "pd.DataFrame"]]:
-                return iter(replayable_blocks)
+        with ExitStack() as resources:
+            if self._retry_params.get("max_attempts", 1) > 1:
+                # Retain the existing block objects, without copying their Arrow data.
+                replayable_blocks = list(blocks)
+                if target_schema is not None:
+                    first = next(
+                        dropwhile(_is_empty_block_without_columns, replayable_blocks),
+                        None,
+                    )
 
-            stream = stream_factory
+                def stream_factory() -> Iterator[Union[pa.Table, "pd.DataFrame"]]:
+                    return iter(replayable_blocks)
 
-        fragments_and_schema = write_fragment(
-            stream,
-            self.dataset_uri,
-            schema=self.schema,
-            max_rows_per_file=self.max_rows_per_file,
-            max_bytes_per_file=self.max_bytes_per_file,
-            data_storage_version=self.data_storage_version,
-            enable_stable_row_ids=self.enable_stable_row_ids,
-            storage_options=self.storage_options,
-            base_store_params=self.base_store_params,
-            initial_bases=self.initial_bases if self.mode == "create" else None,
-            target_bases=self.target_bases,
-            target_all_bases=self.target_all_bases,
-            external_blob_mode=self.external_blob_mode,
-            allow_external_blob_outside_bases=self.allow_external_blob_outside_bases,
-            namespace_impl=self._namespace_impl,
-            namespace_properties=self._namespace_properties,
-            table_id=self.table_id,
-            retry_params=self._retry_params,
-        )
+                stream = stream_factory
+            elif target_schema is not None:
+                block_iter = iter(blocks)
+                # The wrapped iterator has no close() of its own.
+                if not isinstance(blocks, Iterator):
+                    close = getattr(block_iter, "close", None)
+                    if callable(close):
+                        resources.callback(close)
+                data_blocks = dropwhile(_is_empty_block_without_columns, block_iter)
+                try:
+                    first = next(data_blocks)
+                except StopIteration:
+                    stream = ()
+                else:
+                    stream = chain((first,), data_blocks)
+
+            if target_schema is not None and isinstance(first, pa.Table):
+                cast_schema = _append_cast_schema(target_schema, first.schema)
+
+            fragments_and_schema = write_fragment(
+                stream,
+                self.dataset_uri,
+                schema=cast_schema,
+                max_rows_per_file=self.max_rows_per_file,
+                max_bytes_per_file=self.max_bytes_per_file,
+                data_storage_version=self.data_storage_version,
+                enable_stable_row_ids=self.enable_stable_row_ids,
+                storage_options=self.storage_options,
+                base_store_params=self.base_store_params,
+                initial_bases=self.initial_bases if self.mode == "create" else None,
+                target_bases=self.target_bases,
+                target_all_bases=self.target_all_bases,
+                external_blob_mode=self.external_blob_mode,
+                allow_external_blob_outside_bases=self.allow_external_blob_outside_bases,
+                namespace_impl=self._namespace_impl,
+                namespace_properties=self._namespace_properties,
+                table_id=self.table_id,
+                retry_params=self._retry_params,
+            )
         return [
             (pickle.dumps(fragment), pickle.dumps(schema))
             for fragment, schema in fragments_and_schema
@@ -482,3 +512,58 @@ class LanceFragmentCommitter(_BaseLanceDatasink):
             ):
                 v.append((fragment, schema))
         return v
+
+
+def _is_empty_block_without_columns(block: FragmentBlock) -> bool:
+    return isinstance(block, pa.Table) and block.num_rows == block.num_columns == 0
+
+
+def _append_cast_schema(target: pa.Schema, source: pa.Schema) -> pa.Schema:
+    """Keep legacy Blob values intact for PyLance while casting ordinary fields."""
+    metadata = target.metadata
+    return pa.schema(
+        _append_fields_with_legacy_blobs(target, source),
+        metadata=dict(metadata.items()) if metadata is not None else None,
+    )
+
+
+def _append_fields_with_legacy_blobs(
+    target: pa.Schema | pa.StructType, source: pa.Schema | pa.StructType
+) -> "list[pa.Field[Any]]":
+    fields = []
+    for field in target:
+        source_index = source.get_field_index(field.name)
+        if source_index != -1:
+            field = _append_field_with_legacy_blob(field, source.field(source_index))
+        fields.append(field)
+    return fields
+
+
+def _append_field_with_legacy_blob(
+    target: "pa.Field[Any]", source: "pa.Field[Any]"
+) -> "pa.Field[Any]":
+    target_type, source_type = target.type, source.type
+    if (
+        isinstance(target_type, pa.ExtensionType)
+        and target_type.extension_name == "lance.blob.v2"
+        and source_type in (pa.binary(), pa.large_binary())
+        and b"lance-encoding:blob" in (source.metadata or {})
+    ):
+        return source.with_name(target.name).with_nullable(target.nullable)
+    if isinstance(target_type, pa.StructType) and isinstance(
+        source_type, pa.StructType
+    ):
+        return target.with_type(
+            pa.struct(_append_fields_with_legacy_blobs(target_type, source_type))
+        )
+    if isinstance(target_type, pa.ListType | pa.LargeListType) and isinstance(
+        source_type, pa.ListType | pa.LargeListType
+    ):
+        value = _append_field_with_legacy_blob(
+            target_type.value_field, source_type.value_field
+        )
+        list_type = (
+            pa.large_list if isinstance(target_type, pa.LargeListType) else pa.list_
+        )
+        return target.with_type(list_type(value))
+    return target

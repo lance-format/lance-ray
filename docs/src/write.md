@@ -44,20 +44,16 @@ Write a Ray Dataset to Lance format.
 ### Blob storage formats
 
 For new datasets, omitting `data_storage_version` uses PyLance's stable format,
-currently 2.2. To write Blob v2 with the default format, construct the input with
-`lance.blob_field` and `lance.blob_array`. For writes to an existing dataset,
-PyLance uses that dataset's format when the version is omitted.
+currently 2.2. Appends that omit the version use the destination's default.
 
-Legacy Blob fields marked with `lance-encoding:blob=true` require an explicit
-`data_storage_version` in both regular and streaming writes. Choose 2.1 to
+In format 2.2, PyLance accepts Blob v2 inputs created with `lance.blob_field` and
+`lance.blob_array` and converts legacy Blob fields marked with
+`lance-encoding:blob=true` to Blob v2. Choose 2.1 with a legacy Blob schema to
 preserve Blob v1 encoding.
 
 ```python
 write_lance(ds, uri, data_storage_version="2.1")
 ```
-
-When creating a table from a legacy Blob schema, explicitly selecting 2.2 lets
-PyLance convert the fields to Blob v2.
 
 ## Write retries
 

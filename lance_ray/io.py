@@ -215,7 +215,9 @@ def write_lance(
             with namespace parameters when creating a new dataset (mode='create' or 'overwrite').
         table_id: The table identifier as a list of strings. Must be provided together
             with namespace_impl and namespace_properties.
-        schema: The schema of the dataset. If not provided, it is inferred from the data.
+        schema: The Arrow schema to use for the input. Regular appends default to
+            the destination schema for casting, leaving legacy Blob inputs for
+            PyLance to handle. Other writes infer the schema from the input.
         mode: The write mode. Can be "create", "append", or "overwrite".
         min_rows_per_file: The minimum number of rows per file.
         max_rows_per_file: The maximum number of rows per file.
@@ -224,8 +226,8 @@ def write_lance(
         data_storage_version: The version of the data storage format to use. Newer versions are more
             efficient but require newer versions of lance to read. The default
             (None) lets PyLance select the format for the destination. New datasets
-            use the stable format (currently "2.2"). Legacy Blob schemas require an
-            explicit version, such as "2.1" to preserve Blob v1 encoding.
+            use the stable format (currently "2.2"). Appends use the destination's
+            default. Choose "2.1" with a legacy Blob schema to preserve Blob v1 encoding.
         enable_stable_row_ids: Enable stable row IDs for the dataset and all
             fragments written by this operation. Default is False.
         storage_options: The storage options for the writer. Default is None.
@@ -269,13 +271,6 @@ def write_lance(
         stacklevel=2,
     )
     initial_bases = normalize_initial_bases(initial_bases)
-    if data_storage_version is None:
-        write_schema = schema
-        if write_schema is None:
-            ray_schema = ds.schema()
-            if ray_schema is not None and isinstance(ray_schema.base_schema, pa.Schema):
-                write_schema = ray_schema.base_schema
-        _validate_legacy_blob_storage_version(write_schema)
 
     # Fast path: non-streaming write using the Datasink API.
     if not stream:
@@ -1225,25 +1220,4 @@ def _validate_write_args(
     if uri is None and not has_ns:
         raise ValueError(
             "Must provide either 'uri' OR ('namespace_impl' + 'table_id')."
-        )
-
-
-def _validate_legacy_blob_storage_version(schema: Optional[pa.Schema]) -> None:
-    if schema is None:
-        return
-
-    def legacy_blob_paths(field: "pa.Field[Any]", parent: str = "") -> list[str]:
-        path = f"{parent}.{field.name}" if parent else field.name
-        paths = [path] if b"lance-encoding:blob" in (field.metadata or {}) else []
-        for index in range(field.type.num_fields):
-            paths.extend(legacy_blob_paths(field.type.field(index), path))
-        return paths
-
-    paths = [path for field in schema for path in legacy_blob_paths(field)]
-    if paths:
-        fields = ", ".join(repr(path) for path in paths)
-        raise ValueError(
-            f"Legacy Blob field(s) {fields} require an explicit data_storage_version. "
-            'Use data_storage_version="2.1" to preserve Blob v1 encoding, or provide '
-            "a Blob v2 schema to use the default format."
         )
