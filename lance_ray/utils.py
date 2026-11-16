@@ -1,5 +1,4 @@
 import os
-import sys
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, TypeVar
@@ -337,16 +336,22 @@ def get_write_fragments_kwargs(
     return {"storage_options_provider": provider}
 
 
-if sys.version_info >= (3, 12):
-    from itertools import batched
+def array_split(iterable: Iterable[T], n: int) -> list[Sequence[T]]:
+    """Split iterable into exactly ``n`` contiguous chunks.
 
-    def array_split(iterable: Iterable[T], n: int) -> list[Sequence[T]]:
-        """Split iterable into n chunks."""
-        items = list(iterable)
-        chunk_size = (len(items) + n - 1) // n
-        return list(batched(items, chunk_size))
-else:
-    from more_itertools import divide
-
-    def array_split(iterable: Iterable[T], n: int) -> list[Sequence[T]]:
-        return list(map(list, divide(n, iterable)))
+    Chunk sizes differ by at most one (earlier chunks are larger), matching
+    ``numpy.array_split``; trailing chunks are empty when ``n`` exceeds the
+    number of items.
+    """
+    items = list(iterable)
+    if n <= 0:
+        # numpy.array_split and more_itertools.divide both reject n < 1.
+        raise ValueError("n must be at least one")
+    base, extra = divmod(len(items), n)
+    chunks: list[Sequence[T]] = []
+    start = 0
+    for chunk in range(n):
+        end = start + base + (1 if chunk < extra else 0)
+        chunks.append(items[start:end])
+        start = end
+    return chunks
