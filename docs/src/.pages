@@ -5,5 +5,6 @@ nav:
   - Write: write.md
   - Index: distributed-indexing.md
   - Compaction: compaction.md
+  - Merge Into: merge_into.md
   - Data Evolution: data-evolution.md
   - Examples: examples.md
