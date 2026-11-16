@@ -428,7 +428,6 @@ def _read_fragments(
             #
             # - Legacy blob columns often return one handle per requested row ID
             #   (including null rows).
-            # - Blob v2 currently *skips* null rows, returning fewer handles.
             desc_py = table.column(col).to_pylist()
 
             # Fetch BlobFile handles in batch order
@@ -437,7 +436,7 @@ def _read_fragments(
             values: list[Optional[bytes]] = []
 
             if len(blob_files) == len(desc_py):
-                # 1:1 alignment with requested rows (legacy behavior).
+                # 1:1 alignment with requested rows.
                 for desc, blob_file in zip(desc_py, blob_files, strict=False):
                     if desc is None:
                         values.append(None)
@@ -447,20 +446,6 @@ def _read_fragments(
                         pos = desc.get("position")
                         size = desc.get("size")
                         if pos == 1 and size == 0:
-                            values.append(None)
-                            continue
-
-                    if kind == "v2" and isinstance(desc, dict):
-                        v2_pos = desc.get("position")
-                        v2_size = desc.get("size")
-                        v2_blob_id = desc.get("blob_id")
-                        v2_uri = desc.get("blob_uri")
-                        if (
-                            v2_pos == 0
-                            and v2_size == 0
-                            and v2_blob_id == 0
-                            and (v2_uri == "" or v2_uri is None)
-                        ):
                             values.append(None)
                             continue
 
@@ -480,7 +465,7 @@ def _read_fragments(
                     with blob_file as bf:
                         values.append(bf.read())
             else:
-                # Sparse alignment (blob v2 behavior): consume a handle only for
+                # Sparse alignment: consume a handle only for
                 # non-null rows.
                 blob_iter = iter(blob_files)
                 for desc in desc_py:
@@ -492,20 +477,6 @@ def _read_fragments(
                         pos = desc.get("position")
                         size = desc.get("size")
                         if pos == 1 and size == 0:
-                            values.append(None)
-                            continue
-
-                    if kind == "v2" and isinstance(desc, dict):
-                        v2_pos = desc.get("position")
-                        v2_size = desc.get("size")
-                        v2_blob_id = desc.get("blob_id")
-                        v2_uri = desc.get("blob_uri")
-                        if (
-                            v2_pos == 0
-                            and v2_size == 0
-                            and v2_blob_id == 0
-                            and (v2_uri == "" or v2_uri is None)
-                        ):
                             values.append(None)
                             continue
 

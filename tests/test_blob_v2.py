@@ -191,6 +191,21 @@ def test_blob_v2_roundtrip_with_projection_and_filter(tmp_path: Path) -> None:
     assert df_proj["blob"].tolist() == [external_payload, None]
 
 
+@pytest.mark.parametrize("max_rows_per_file", [1, 4])
+def test_blob_v2_read_preserves_empty_and_null(
+    tmp_path: Path, max_rows_per_file: int
+) -> None:
+    expected = [b"", None, b"one", b""]
+    table = pa.table({"id": range(len(expected)), "blob": blob_array(expected)})
+    path = tmp_path / "blob_v2_empty.lance"
+    lance.write_dataset(
+        table, path, data_storage_version="2.2", max_rows_per_file=max_rows_per_file
+    )
+
+    rows = lr.read_lance(str(path)).take_all()
+    assert [row["blob"] for row in sorted(rows, key=lambda row: row["id"])] == expected
+
+
 def test_blob_v2_take_blobs_ids_and_indices(tmp_path: Path) -> None:
     """Validate blob v2 take_blobs semantics for ids and indices selectors.
 
