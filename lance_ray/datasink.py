@@ -25,6 +25,7 @@ from .utils import (
     get_or_create_namespace,
     materialize_initial_bases,
     normalize_initial_bases,
+    validate_write_mode,
 )
 
 if TYPE_CHECKING:
@@ -84,6 +85,7 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
     ):
         super().__init__(*args, **kwargs)
 
+        validate_write_mode(mode)
         if initial_bases and mode != "create":
             raise ValueError("'initial_bases' can only be used with mode='create'")
 

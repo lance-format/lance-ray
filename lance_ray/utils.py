@@ -14,6 +14,16 @@ _NAMESPACE_CACHE_SIZE = int(os.environ.get("LANCE_RAY_NAMESPACE_CACHE_SIZE", "16
 
 _PYLANCE_5 = (5, 0, 0)
 
+_WRITE_MODES = ("create", "append", "overwrite")
+
+
+def validate_write_mode(mode: str) -> None:
+    """Raise ``ValueError`` unless ``mode`` is a supported write mode."""
+    if mode not in _WRITE_MODES:
+        raise ValueError(
+            f"Invalid write mode {mode!r}. Must be one of {list(_WRITE_MODES)}."
+        )
+
 
 def normalize_initial_bases(
     initial_bases: Optional[list[Any]],
