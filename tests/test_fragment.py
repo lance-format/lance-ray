@@ -584,6 +584,50 @@ def test_datasink_reuses_block_objects(
     source.close()
 
 
+@pytest.mark.parametrize("caller_owns_iterator", [False, True])
+def test_datasink_single_attempt_append_preserves_iterator_ownership(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caller_owns_iterator: bool
+) -> None:
+    path = str(tmp_path / "append.lance")
+    lance.write_dataset(pa.table({"blob": lance.blob_array([b"existing"])}), path)
+    legacy_schema = pa.schema(
+        [
+            pa.field(
+                "blob", pa.large_binary(), metadata={b"lance-encoding:blob": b"true"}
+            )
+        ]
+    )
+    first = pa.table({"blob": [b"first"]}, schema=legacy_schema)
+    second = pa.table({"blob": [b"second"]}, schema=legacy_schema)
+    replayable = ReplayableBlocks([pa.table({}), first, second])
+    block_iter = iter(replayable)
+
+    class Blocks:
+        def __iter__(self) -> Iterator[pa.Table]:
+            return block_iter
+
+    def write(
+        stream: FragmentStream | FragmentStreamFactory, _uri: str, **kwargs: Any
+    ) -> list[tuple[FragmentMetadata, pa.Schema]]:
+        assert not callable(stream)
+        assert next(iter(stream)) is first
+        assert kwargs["schema"].equals(legacy_schema, check_metadata=True)
+        raise RuntimeError("injected write error")
+
+    monkeypatch.setattr("lance_ray.datasink.write_fragment", write)
+    sink = LanceDatasink(path, mode="append")
+    sink._retry_params["max_attempts"] = 1
+    sink.on_write_start()
+
+    with pytest.raises(RuntimeError, match="injected write error"):
+        sink.write(block_iter if caller_owns_iterator else Blocks(), None)
+
+    if caller_owns_iterator:
+        assert replayable.closed == 0
+        assert list(block_iter) == [second]
+    assert replayable.closed == 1
+
+
 @pytest.mark.parametrize("output_kind", ["table", "list", "generator"])
 @pytest.mark.usefixtures("no_replay_staging")
 def test_fragment_writer_repeats_transform(

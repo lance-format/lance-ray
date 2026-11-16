@@ -3,8 +3,8 @@
 This test ensures that pa.large_binary fields with metadata
 {"lance-encoding:blob": "true"} are written and read back with
 byte-for-byte fidelity using write_lance and read_lance.
-These tests explicitly use file format 2.1 to exercise legacy blob
-encoding, which is not supported by file formats 2.2 and later.
+The tests cover PyLance's default file format and explicit format selection
+for legacy Blob and native Blob v2 fields.
 
 Tests cover:
 - Single blob column round-trip
@@ -36,6 +36,7 @@ from _utils import to_numpy_backed
 # Skip cleanly if Lance isn't available in the environment
 pytest.importorskip("lance")
 
+import lance
 import lance_ray.io as lr
 
 
@@ -73,34 +74,152 @@ def _generate_jpg_bytes() -> bytes:
             return os.urandom(64 * 64 * 3)
 
 
-@pytest.mark.parametrize("provide_schema", [True, False])
-def test_legacy_blob_requires_explicit_version(
-    temp_dir: str, provide_schema: bool
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("create_version", [None, "2.1"], ids=["default", "v2.1"])
+def test_legacy_blob_uses_default_version(
+    tmp_path: Path, stream: bool, create_version: str | None
 ) -> None:
-    """Reject legacy blobs before dispatch when the file version is omitted."""
-    path = Path(temp_dir) / "legacy_blob_default_version.lance"
-    schema_fields: list[pa.Field[Any]] = [
-        pa.field(
-            "blob",
-            pa.large_binary(),
-            metadata={"lance-encoding:blob": "true"},
-        ),
-        pa.field("id", pa.int64()),
-    ]
-    schema = pa.schema(schema_fields)
-    table = pa.table({"blob": [b"foo", None], "id": [1, 2]}, schema=schema)
+    path = str(tmp_path / "legacy_blob_default_version.lance")
+    schema = pa.schema(
+        [pa.field("blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"})]
+    )
+    data = ray.data.from_arrow(pa.table({"blob": [b"foo", None]}, schema=schema))
 
-    with pytest.raises(ValueError) as exc_info:
+    lr.write_lance(data, path, stream=stream, data_storage_version=create_version)
+    lr.write_lance(data, path, mode="append", stream=stream)
+
+    dataset = lance.dataset(path)
+    expected_version = create_version or "2.2"
+    assert dataset.data_storage_version == expected_version
+    file_versions = {
+        f"{file.file_major_version}.{file.file_minor_version}"
+        for fragment in dataset.get_fragments()
+        for file in fragment.data_files()
+    }
+    assert file_versions == {expected_version}
+    blobs = dataset.take_blobs("blob", indices=[0, 1, 2, 3])
+    assert [blob.read() if blob is not None else None for blob in blobs] == [
+        b"foo",
+        None,
+        b"foo",
+        None,
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "legacy_input", [False, True], ids=["native-default", "legacy-2.2"]
+)
+def test_write_blob_v2(tmp_path: Path, stream: bool, legacy_input: bool) -> None:
+    path = tmp_path / "blob_v2.lance"
+    values = [b"foo", None]
+    if legacy_input:
+        schema = pa.schema(
+            [
+                pa.field(
+                    "blob", pa.large_binary(), metadata={"lance-encoding:blob": "true"}
+                )
+            ]
+        )
+        table = pa.table({"blob": values}, schema=schema)
         lr.write_lance(
             ray.data.from_arrow(table),
             str(path),
-            schema=schema if provide_schema else None,
+            stream=stream,
+            data_storage_version="2.2",
         )
+    else:
+        table = pa.table({"blob": lance.blob_array(values)})
+        lr.write_lance(ray.data.from_arrow(table), str(path), stream=stream)
 
-    message = str(exc_info.value)
-    assert "blob" in message
-    assert 'data_storage_version="2.1"' in message
-    assert "Blob v2" in message
+    dataset = lance.dataset(path)
+    assert dataset.data_storage_version == "2.2"
+    blob_type = dataset.schema.field("blob").type
+    assert isinstance(blob_type, pa.ExtensionType)
+    assert blob_type.extension_name == "lance.blob.v2"
+    blobs = dataset.take_blobs("blob", indices=[0, 1])
+    assert [blob.read() if blob is not None else None for blob in blobs] == values
+
+
+def test_append_legacy_blob_to_blob_v2(tmp_path: Path) -> None:
+    path = str(tmp_path / "blob_v2.lance")
+    lance.write_dataset(
+        pa.table(
+            {"id": pa.array([1], type=pa.int32()), "blob": lance.blob_array([b"first"])}
+        ),
+        path,
+    )
+    legacy_fields: list[pa.Field[Any]] = [
+        pa.field("id", pa.int64()),
+        pa.field("blob", pa.large_binary(), metadata={b"lance-encoding:blob": b"true"}),
+    ]
+    data = pa.table({"id": [2], "blob": [b"second"]}, schema=pa.schema(legacy_fields))
+
+    lr.write_lance(ray.data.from_arrow([pa.table({}), data]), path, mode="append")
+
+    dataset = lance.dataset(path)
+    ids = dataset.to_table(columns=["id"]).column("id")
+    assert ids.type == pa.int32()
+    assert ids.to_pylist() == [1, 2]
+    blobs = dataset.take_blobs("blob", indices=[0, 1])
+    assert [blob.read() if blob is not None else None for blob in blobs] == [
+        b"first",
+        b"second",
+    ]
+
+
+@pytest.mark.parametrize("container", ["struct", "list", "large_list"])
+def test_append_nested_legacy_blob_to_blob_v2(tmp_path: Path, container: str) -> None:
+    def table(values: pa.StructArray) -> pa.Table:
+        if container == "list":
+            return pa.table(
+                {"payload": pa.ListArray.from_arrays([0, len(values)], values)}
+            )
+        if container == "large_list":
+            return pa.table(
+                {
+                    "payload": pa.LargeListArray.from_arrays(
+                        pa.array([0, len(values)], type=pa.int64()), values
+                    )
+                }
+            )
+        return pa.table({"payload": values})
+
+    path = str(tmp_path / "nested_blob_v2.lance")
+    native = pa.StructArray.from_arrays(
+        [pa.array([1], type=pa.int32()), lance.blob_array([b"first"])],
+        fields=[pa.field("id", pa.int32()), lance.blob_field("blob")],
+    )
+    legacy = pa.StructArray.from_arrays(
+        [
+            pa.array([2, 3], type=pa.int64()),
+            pa.array([b"second", None], type=pa.large_binary()),
+        ],
+        fields=[
+            pa.field("id", pa.int64()),
+            pa.field(
+                "blob", pa.large_binary(), metadata={b"lance-encoding:blob": b"true"}
+            ),
+        ],
+    )
+
+    lance.write_dataset(table(native), path, data_storage_version="2.2")
+    lr.write_lance(ray.data.from_arrow(table(legacy)), path, mode="append")
+
+    payload = (
+        lance.dataset(path)
+        .scanner(blob_handling="all_binary")
+        .to_table()
+        .column("payload")
+        .combine_chunks()
+    )
+    if isinstance(payload, pa.ListArray | pa.LargeListArray):
+        assert payload.offsets.to_pylist() == [0, 1, 3]
+        payload = payload.values
+    assert isinstance(payload, pa.StructArray)
+    assert payload.field("id").type == pa.int32()
+    assert payload.field("id").to_pylist() == [1, 2, 3]
+    assert payload.field("blob").to_pylist() == [b"first", b"second", None]
 
 
 def test_single_blob_roundtrip(temp_dir: str) -> None:
