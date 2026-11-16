@@ -53,7 +53,7 @@ import pyarrow as pa
 
 def add_computed_column(batch: pa.RecordBatch) -> pa.RecordBatch:
     df = batch.to_pandas()
-    df['computed'] = df['value'] * 2 + df['id']
+    df['computed'] = df['score'] * 2 + df['user_id']
     return pa.RecordBatch.from_pandas(df[["computed"]])
 
 add_columns(
@@ -69,23 +69,28 @@ For enterprise environments with metadata catalogs, you can use Lance Namespace 
 
 ```python
 import ray
-import lance_namespace as ln
 from lance_ray import read_lance, write_lance
 
 # Initialize Ray
 ray.init()
 
-# Connect to a metadata catalog (directory-based example)
-namespace = ln.connect("dir", {"root": "/path/to/tables"})
-
 # Create a Ray dataset
 data = ray.data.range(1000).map(lambda row: {"id": row["id"], "value": row["id"] * 2})
 
 # Write to Lance format using metadata catalog
-write_lance(data, namespace=namespace, table_id=["my_table"])
+write_lance(
+    data,
+    namespace_impl="dir",
+    namespace_properties={"root": "/path/to/tables"},
+    table_id=["my_table"],
+)
 
 # Read Lance dataset back using metadata catalog
-ray_dataset = read_lance(namespace=namespace, table_id=["my_table"])
+ray_dataset = read_lance(
+    namespace_impl="dir",
+    namespace_properties={"root": "/path/to/tables"},
+    table_id=["my_table"],
+)
 
 # Perform distributed operations
 result = ray_dataset.filter(lambda row: row["value"] > 100).count()
@@ -104,15 +109,10 @@ And then you can do:
 
 ```python
 import ray
-import lance_namespace as ln
 from lance_ray import read_lance, write_lance
 
 # Initialize Ray
 ray.init()
-
-# Connect to AWS Glue catalog 
-# using the default account and region in the current AWS environment
-namespace = ln.connect("glue", {})
 
 # Create a Ray dataset
 data = ray.data.range(1000).map(lambda row: {"id": row["id"], "value": row["id"] * 2})
@@ -120,13 +120,17 @@ data = ray.data.range(1000).map(lambda row: {"id": row["id"], "value": row["id"]
 # Write to Lance format using metadata catalog
 write_lance(
     data, 
-    uri="s3://my-bucket/my-table", 
-    namespace=namespace, 
+    namespace_impl="glue",
+    namespace_properties={},
     table_id=["default", "my_table"]
 )
 
 # Read Lance dataset back using metadata catalog
-ray_dataset = read_lance(namespace=namespace, table_id=["default", "my_table"])
+ray_dataset = read_lance(
+    namespace_impl="glue",
+    namespace_properties={},
+    table_id=["default", "my_table"],
+)
 
 # Perform distributed operations
 result = ray_dataset.filter(lambda row: row["value"] > 100).count()
