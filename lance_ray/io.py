@@ -22,8 +22,10 @@ from .utils import (
     has_namespace_params,
     materialize_initial_bases,
     normalize_initial_bases,
+    normalize_transaction_properties,
     resolve_namespace_table,
     validate_uri_or_namespace,
+    with_transaction_properties,
 )
 
 if TYPE_CHECKING:
@@ -167,6 +169,8 @@ def write_lance(
     max_bytes_per_file: Optional[int] = None,
     data_storage_version: Optional[str] = None,
     enable_stable_row_ids: bool = False,
+    transaction_properties: Optional[dict[str, str]] = None,
+    commit_message: Optional[str] = None,
     storage_options: Optional[dict[str, Any]] = None,
     base_store_params: Optional[dict[str, dict[str, Any]]] = None,
     initial_bases: Optional[list[Any]] = None,
@@ -227,6 +231,12 @@ def write_lance(
             explicit compatible version such as "2.1".
         enable_stable_row_ids: Enable stable row IDs for the dataset and all
             fragments written by this operation. Default is False.
+        transaction_properties: String key-value properties stored with each commit.
+            Not inherited from earlier commits. Streaming commits all receive the
+            same properties. Default is None.
+        commit_message: Message stored as ``__lance_commit_message`` in transaction
+            properties. Overrides that key when provided, including an empty string.
+            Streaming commits all receive the same message. Default is None.
         storage_options: The storage options for the writer. Default is None.
         base_store_params: Runtime-only storage options keyed by registered
             base path URI. Used for BlobV2 references that live outside the
@@ -257,6 +267,9 @@ def write_lance(
         resume_rows: Number of leading rows to skip when streaming (for resume).
     """
     _validate_write_args(uri, namespace_impl, table_id, mode)
+    transaction_properties = normalize_transaction_properties(
+        transaction_properties, commit_message
+    )
     if initial_bases and mode != "create":
         raise ValueError("'initial_bases' can only be used with mode='create'")
     allow_external_blob_outside_bases = prepare_fragment_write_options(
@@ -288,6 +301,7 @@ def write_lance(
             max_bytes_per_file=max_bytes_per_file,
             data_storage_version=data_storage_version,
             enable_stable_row_ids=enable_stable_row_ids,
+            transaction_properties=transaction_properties,
             storage_options=storage_options,
             base_store_params=base_store_params,
             initial_bases=initial_bases,
@@ -431,7 +445,7 @@ def write_lance(
                 )
                 LanceDataset.commit(
                     dest_uri,
-                    op,
+                    with_transaction_properties(op, None, transaction_properties),
                     read_version=None,
                     storage_options=storage_options,
                     enable_stable_row_ids=enable_stable_row_ids,
@@ -452,7 +466,9 @@ def write_lance(
                 op = LanceOperation.Append(fragments)
                 LanceDataset.commit(
                     dest_uri,
-                    op,
+                    with_transaction_properties(
+                        op, dest_version, transaction_properties
+                    ),
                     read_version=dest_version,
                     storage_options=storage_options,
                     enable_stable_row_ids=enable_stable_row_ids,
@@ -481,7 +497,7 @@ def write_lance(
                 )
                 LanceDataset.commit(
                     dest_uri,
-                    op,
+                    with_transaction_properties(op, None, transaction_properties),
                     read_version=None,
                     storage_options=storage_options,
                     enable_stable_row_ids=enable_stable_row_ids,
@@ -493,7 +509,7 @@ def write_lance(
             op = LanceOperation.Append(fragments)
             LanceDataset.commit(
                 dest_uri,
-                op,
+                with_transaction_properties(op, dest_version, transaction_properties),
                 read_version=dest_version,
                 storage_options=storage_options,
                 enable_stable_row_ids=enable_stable_row_ids,

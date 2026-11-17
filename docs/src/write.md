@@ -13,6 +13,8 @@ write_lance(
     mode="create", 
     target_bases=None,
     target_all_bases=None,
+    transaction_properties=None,
+    commit_message=None,
     **kwargs)
 ```
 
@@ -26,6 +28,8 @@ Write a Ray Dataset to Lance format.
 - `table_id`: Table identifier as list of strings (requires namespace)
 - `schema`: Optional PyArrow schema
 - `mode`: Write mode - "create", "append", or "overwrite"
+- `transaction_properties`: Optional `dict[str, str]` stored with each transaction
+- `commit_message`: Optional string stored under `__lance_commit_message` in the transaction properties. When provided, overrides that key in `transaction_properties`, including when the message is an empty string
 - `target_bases`: Optional list of registered base names or base path URIs where new data files should be written. In `create` mode, entries must match `initial_bases`; in `append` and `overwrite` modes, entries must match bases already registered in the dataset manifest
 - `target_all_bases`: Select all registered bases, including primary storage when `True` and excluding it when `False`. `False` requires at least one registered base. `None` (default) leaves base selection unchanged. Mutually exclusive with non-empty `target_bases`
 - `min_rows_per_file`: Minimum rows per file (default: 1024 * 1024)
