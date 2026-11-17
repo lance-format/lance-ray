@@ -4,7 +4,7 @@ import random
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import lance
 import lance_ray as lr
@@ -12,6 +12,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 import ray
+from lance.dataset import IndexConfig
 from lance_ray.search import _scanner_accepts_index_segments
 from packaging import version
 from ray.data import Dataset
@@ -2109,3 +2110,44 @@ def test_build_distributed_vector_index_trains_on_ray_task(tmp_path: Path) -> No
     q = [random.gauss(0, 1) for _ in range(128)]
     result = updated_dataset.to_table(nearest={"column": "vector", "q": q, "k": 5})
     assert result.num_rows == 5
+
+
+@pytest.mark.parametrize(
+    "index_type",
+    ["BTREE", IndexConfig("SCALAR", {})],
+    ids=["segment-workflow", "legacy-workflow"],
+)
+def test_failed_validation_keeps_existing_index(
+    temp_dir: str, index_type: Literal["BTREE"] | IndexConfig
+) -> None:
+    """A replace that fails validation must not drop the existing index.
+
+    The legacy ``IndexConfig`` workflow replaces the index on the driver, so
+    every precondition has to run before that drop; otherwise the dataset is
+    left without an index and no rebuild happens.
+    """
+    ds = generate_multi_fragment_dataset(
+        temp_dir, num_fragments=2, rows_per_fragment=50
+    )
+    lr.create_scalar_index(
+        uri=ds.uri,
+        column="id",
+        index_type="BTREE",
+        name="keep_me",
+        num_workers=2,
+    )
+
+    with pytest.raises(ValueError, match="do not exist"):
+        lr.create_scalar_index(
+            uri=ds.uri,
+            column="id",
+            index_type=index_type,
+            name="keep_me",
+            fragment_ids=[999],
+            replace=True,
+            num_workers=2,
+        )
+
+    assert "keep_me" in {
+        index.name for index in lance.dataset(ds.uri).describe_indices()
+    }
