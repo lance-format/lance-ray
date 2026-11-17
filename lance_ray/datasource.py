@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Iterator
 from functools import partial
 from typing import TYPE_CHECKING, Any, Optional, cast
@@ -21,6 +22,17 @@ from .utils import (
 
 if TYPE_CHECKING:
     import lance
+
+logger = logging.getLogger(__name__)
+
+# ``estimate_inmemory_data_size`` samples variable-width columns from up to this
+# many fragments, spread over the dataset, and this many leading rows of each.
+_ESTIMATE_SAMPLE_FRAGMENTS = 8
+_ESTIMATE_SAMPLE_ROWS = 256
+# A ``with_row_id`` scan keeps the uint64 ``_rowid`` column, and a
+# ``with_metadata`` read adds the uint64 ``_rowaddr`` and ``_fragid`` columns.
+_ROW_ID_BYTES = 8
+_METADATA_ROW_BYTES = 16
 
 
 class LanceDatasource(Datasource):
@@ -232,9 +244,89 @@ class LanceDatasource(Datasource):
 
         return read_tasks
 
+    def _estimate_columns_size(self) -> Optional[int]:
+        """Estimate the in-memory size of the columns this read returns, or None.
+
+        Rows times the Arrow width of the columns: exact from the schema for
+        fixed-width types, and the mean of a sample of leading rows (from
+        spread-out fragments) for the rest, so only variable-width columns are
+        read. The filter is ignored, which can overestimate; a variable-width
+        mean taken from leading rows can be off either way.
+
+        None when the read projects expressions, includes a blob column (read
+        back as raw bytes, not the descriptors a sample sees), or the schema or
+        sample cannot be read.
+        """
+        columns = self._scanner_options.get("columns")
+        try:
+            dataset = self.lance_dataset
+            schema = dataset.schema
+            if columns is None:
+                names = list(schema.names)
+            elif isinstance(columns, list):
+                names = columns
+            else:
+                return None
+            fields = [schema.field(name) for name in names]
+            if not fields or any(_is_blob_field(field) for field in fields):
+                return None
+
+            row_bytes = 0.0
+            variable = []
+            for field in fields:
+                width = _fixed_width(field.type)
+                if width is None:
+                    variable.append(field.name)
+                else:
+                    row_bytes += width
+            fragments = self.fragments
+            if variable:
+                row_bytes += self._sample_row_bytes(dataset, fragments, variable)
+            if self._scanner_options.get("with_row_id"):
+                row_bytes += _ROW_ID_BYTES
+            if self._with_metadata:
+                row_bytes += _METADATA_ROW_BYTES
+            total_rows = sum(fragment.count_rows() for fragment in fragments)
+            return int(total_rows * row_bytes)
+        except Exception as e:
+            # The estimate is advisory: never fail the read over it, and keep
+            # the error text, which may carry the table URI, out of the log.
+            logger.debug(
+                "In-memory size estimate failed (%s); using file sizes",
+                type(e).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _sample_row_bytes(
+        dataset: lance.LanceDataset,
+        fragments: list[lance.LanceFragment],
+        columns: list[str],
+    ) -> float:
+        """Mean in-memory bytes per row of ``columns``.
+
+        Taken from leading rows of up to ``_ESTIMATE_SAMPLE_FRAGMENTS``
+        fragments spread over the dataset.
+        """
+        stride = -(-len(fragments) // _ESTIMATE_SAMPLE_FRAGMENTS)
+        sample_bytes = sample_rows = 0
+        for fragment in fragments[::stride]:
+            sample = dataset.scanner(
+                columns=columns,
+                fragments=[fragment],
+                limit=_ESTIMATE_SAMPLE_ROWS,
+            ).to_table()
+            sample_bytes += sample.nbytes
+            sample_rows += sample.num_rows
+        return sample_bytes / sample_rows if sample_rows else 0.0
+
     def estimate_inmemory_data_size(self) -> Optional[int]:
         if not self.fragments:
             return 0
+
+        in_memory = self._estimate_columns_size()
+        if in_memory is not None:
+            return in_memory
 
         # ``LanceFragment.data_files()`` is unannotated upstream, so pin the
         # element type here instead of returning ``Any``.
@@ -290,6 +382,60 @@ def _read_fragments_with_retry(
     )
 
 
+def _fixed_width(data_type: pa.DataType) -> Optional[float]:
+    """In-memory bytes per value of a fixed-width Arrow type, else None."""
+    if isinstance(data_type, pa.ExtensionType) or pa.types.is_dictionary(data_type):
+        return None
+    if pa.types.is_fixed_size_list(data_type):
+        item = _fixed_width(data_type.value_type)
+        return None if item is None else item * data_type.list_size
+    if pa.types.is_struct(data_type):
+        fields = [data_type.field(i) for i in range(data_type.num_fields)]
+        widths = [_fixed_width(field.type) for field in fields]
+        return None if None in widths else sum(cast("list[float]", widths))
+    try:
+        return float(data_type.bit_width) / 8
+    except ValueError:
+        return None
+
+
+def _is_blob_field(f: pa.Field[Any]) -> Optional[str]:
+    """Detect Lance blob columns.
+
+    Returns:
+        "v2" for blob v2 extension columns,
+        "legacy" for legacy metadata-based blob columns,
+        or None if the field is not a blob.
+    """
+    field_type = f.type
+
+    # Blob v2: extension type `lance.blob.v2`
+    if isinstance(field_type, pa.ExtensionType):
+        ext_name = getattr(field_type, "extension_name", None)
+        if ext_name == "lance.blob.v2":
+            return "v2"
+
+    # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
+    try:
+        is_large_bin = field_type == pa.large_binary()
+    except Exception:
+        is_large_bin = False
+    if not is_large_bin:
+        return None
+
+    meta = f.metadata
+    if meta is None:
+        return None
+
+    # pyarrow may store metadata keys/values as str
+    if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
+        meta.get(b"lance-encoding:blob") == b"true"
+    ):
+        return "legacy"
+
+    return None
+
+
 def _read_fragments(
     fragment_ids: list[int],
     lance_ds: lance.LanceDataset,
@@ -320,42 +466,6 @@ def _read_fragments(
     requested_columns = scan_opts.get("columns")
     # Map column name -> blob kind ("legacy" or "v2")
     blob_columns: dict[str, str] = {}
-
-    def _is_blob_field(f: pa.Field[Any]) -> Optional[str]:
-        """Detect Lance blob columns.
-
-        Returns:
-            "v2" for blob v2 extension columns,
-            "legacy" for legacy metadata-based blob columns,
-            or None if the field is not a blob.
-        """
-        field_type = f.type
-
-        # Blob v2: extension type `lance.blob.v2`
-        if isinstance(field_type, pa.ExtensionType):
-            ext_name = getattr(field_type, "extension_name", None)
-            if ext_name == "lance.blob.v2":
-                return "v2"
-
-        # Legacy: LargeBinary with field metadata {"lance-encoding:blob": "true"}
-        try:
-            is_large_bin = field_type == pa.large_binary()
-        except Exception:
-            is_large_bin = False
-        if not is_large_bin:
-            return None
-
-        meta = f.metadata
-        if meta is None:
-            return None
-
-        # pyarrow may store metadata keys/values as str
-        if (meta.get("lance-encoding:blob") == "true") or (  # type: ignore[call-overload]
-            meta.get(b"lance-encoding:blob") == b"true"
-        ):
-            return "legacy"
-
-        return None
 
     # Build list of blob columns to reconstruct, honoring column projection
     ds_field_names = ds_schema.names
