@@ -7,5 +7,9 @@
 A Python library that provides seamless integration between 
 [Ray](https://ray.io/) and [Lance](https://lance.org) for distributed data processing.
 
+Index prewarm provides planning and execution primitives for applications that
+hold and reuse their own Dataset and Session in each query worker. The caller
+manages worker lifetime, assignment dispatch and query routing.
+
 - [User Guide and API Documentation](https://lance.org/integrations/ray/)
 - [Contributing Guide and Dev Setup](./CONTRIBUTING.md)
