@@ -30,3 +30,107 @@ Add columns to an existing Lance dataset using Ray's distributed processing.
 - `concurrency`: Optional number of concurrent processes
 
 **Returns:** None
+
+## `update_columns`
+
+```python
+from lance_ray import update_columns
+import pyarrow as pa
+import pyarrow.compute as pc
+
+
+def increase_price(batch: pa.RecordBatch) -> pa.RecordBatch:
+    return pa.RecordBatch.from_pydict({"price": pc.multiply(batch["price"], 1.1)})
+
+
+result = update_columns(
+    "products.lance",
+    transform=increase_price,
+    columns=["price"],
+    filter="status = 'active'",
+    read_columns=["price"],
+)
+print(result.version, result.rows_updated)
+```
+
+Overwrite existing columns with a distributed, fragment-local Ray transform.
+Lance-Ray pins a dataset snapshot and processes each fragment in one Ray task.
+The task scans the fragment, applies `filter` and `transform`, then rewrites
+only the requested columns. Untouched columns retain their original data files.
+
+`transform` takes either a mapping of SQL expressions or a callable.
+
+A mapping is the same expression form `add_columns` accepts, and is the simplest
+way to express an update Lance can compute itself:
+
+```python
+result = update_columns(
+    "products.lance",
+    transform={"price": "price * 1.1"},
+    filter="status = 'active'",
+)
+```
+
+Lance evaluates the expressions as a scanner projection, so no Python runs per
+batch. The keys name the columns to update and each expression names its own
+inputs, so `columns` and `read_columns` are rejected with this form. Every
+expression is compiled against the dataset on the driver before any Ray task
+starts.
+
+A callable accepts and returns a `pyarrow.RecordBatch`. Its result must
+contain exactly the fields named in `columns`. The transform must preserve both
+row count and row order: do not filter, sort, join, deduplicate, aggregate, or
+explode rows inside it.
+
+A `lance.udf.BatchUDF` is accepted. Its `output_schema` names the columns it
+produces, so `columns` can be left out; passing both is allowed as long as they
+agree. The schema's *types* are not used — those come from the dataset, and the
+result is checked against them more strictly. A `checkpoint_file` is rejected up
+front: Lance drives that checkpoint while rewriting fragments in-process, but
+here each transform runs in its own Ray task and Lance never sees the
+`BatchUDF`, so the checkpoint could not be honored.
+
+**Parameters:**
+
+- `uri`: Path to the target Lance dataset. Alternatively, resolve the table
+  with `namespace_impl` and `table_id`.
+- `transform`: A `{column: SQL expression}` mapping, or a `RecordBatch`
+  transform or `BatchUDF` that produces replacement values.
+- `columns`: Names of the columns to overwrite. Required for a callable
+  transform; rejected for an expression mapping, whose keys already name them. Each must already exist
+  in the dataset. Their Arrow type and nullability are taken from the dataset —
+  `update_columns` cannot change them — and the transform result is cast to them
+  with `safe=True`. That rejects out-of-range integers, truncating time-unit
+  conversions, and unparseable strings, but it does **not** catch float
+  narrowing: returning a `float64` for a `float32` column rounds, and overflows
+  to `inf`, silently. Produce the column's own type when precision matters.
+- `filter`: Optional Lance filter expression. Only matching rows receive new
+  values; the containing fragment is nevertheless rewritten.
+- `read_columns`: Columns supplied to `transform`. When omitted, all top-level
+  non-Blob columns are read. Request Blob columns explicitly; they are passed
+  to the transform as raw `LargeBinary` bytes and cannot be written by this API.
+- `batch_size`: Maximum rows in each scanner and transform batch. Lance receives
+  the update values as a RecordBatch stream, though its underlying update join
+  can still materialize a fragment's matching rows.
+- `ray_remote_args`: Ray resource options for each fragment task, such as
+  `{"num_gpus": 1}`.
+- `concurrency`: Maximum number of fragment tasks running at once. Lower it to
+  bound aggregate fragment-update memory.
+- `storage_options`, `base_store_params`, `namespace_impl`,
+  `namespace_properties`, `table_id`: Dataset storage and namespace options.
+
+**Returns:** `UpdateColumnsResult(version, rows_updated)`. A filter that
+matches no rows succeeds without a transaction; `rows_updated` is `0` and
+`version` remains unchanged.
+
+### Limitations and operational notes
+
+- Datasets with stable row IDs are supported. Each fragment task reports the
+  physical row offsets its join matched, and the commit refreshes
+  `_row_last_updated_at_version` for those rows only, so CDF consumers observe
+  the update. This requires the matched-offsets support added in pylance 12.
+- Updating an indexed column is allowed, but current Lance index maintenance
+  may leave the affected index stale. Rebuild indexes before relying on them
+  after such an update.
+- A sparse filter still causes fragment-wide rewrites. Prefer this API when the
+  updated rows are reasonably concentrated in their fragments.
