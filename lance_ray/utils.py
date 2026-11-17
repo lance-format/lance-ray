@@ -12,8 +12,6 @@ T = TypeVar("T")
 # Cache size for namespace clients per worker, configurable via environment variable
 _NAMESPACE_CACHE_SIZE = int(os.environ.get("LANCE_RAY_NAMESPACE_CACHE_SIZE", "16"))
 
-_PYLANCE_5 = (5, 0, 0)
-
 
 def normalize_initial_bases(
     initial_bases: Optional[list[Any]],
@@ -95,16 +93,6 @@ def materialize_initial_bases(
             )
         )
     return bases
-
-
-@lru_cache(maxsize=1)
-def _pylance_version() -> tuple[int, ...]:
-    """Return the installed pylance version as a comparable tuple."""
-    import lance
-    from packaging.version import parse
-
-    v = parse(lance.__version__)
-    return (v.major, v.minor, v.micro)
 
 
 def has_namespace_params(
@@ -249,44 +237,12 @@ def resolve_namespace_table(
     raise ValueError("Must provide either 'uri' OR ('namespace_impl' + 'table_id').")
 
 
-def _create_storage_options_provider(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-) -> Optional[Any]:
-    """Create a LanceNamespaceStorageOptionsProvider (pylance 4.x only).
-
-    Returns ``Any`` because ``LanceNamespaceStorageOptionsProvider`` no longer
-    exists on pylance 5.0+, so it cannot be named as a static type here.
-    """
-    if not has_namespace_params(namespace_impl, table_id):
-        return None
-
-    namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-    if namespace is None:
-        return None
-
-    import lance
-
-    if not hasattr(lance, "LanceNamespaceStorageOptionsProvider"):
-        return None
-
-    return lance.LanceNamespaceStorageOptionsProvider(
-        namespace=namespace, table_id=table_id
-    )
-
-
 def get_namespace_kwargs(
     namespace_impl: Optional[str],
     namespace_properties: Optional[dict[str, str]],
     table_id: Optional[list[str]],
 ) -> dict[str, Any]:
-    """Return kwargs for pylance namespace / auth integration.
-
-    Handles API differences between pylance versions:
-    - pylance 4.x: ``namespace``, ``table_id``, ``storage_options_provider``
-    - pylance 5.0+: ``namespace_client``, ``table_id``
-    """
+    """Return ``namespace_client`` / ``table_id`` kwargs for pylance."""
     if not has_namespace_params(namespace_impl, table_id):
         return {}
 
@@ -294,47 +250,7 @@ def get_namespace_kwargs(
     if namespace is None:
         return {}
 
-    kwargs: dict[str, Any] = {"table_id": table_id}
-
-    if _pylance_version() >= _PYLANCE_5:
-        kwargs["namespace_client"] = namespace
-    else:
-        kwargs["namespace"] = namespace
-        provider = _create_storage_options_provider(
-            namespace_impl, namespace_properties, table_id
-        )
-        if provider is not None:
-            kwargs["storage_options_provider"] = provider
-
-    return kwargs
-
-
-def get_write_fragments_kwargs(
-    namespace_impl: Optional[str],
-    namespace_properties: Optional[dict[str, str]],
-    table_id: Optional[list[str]],
-) -> dict[str, Any]:
-    """Return kwargs for ``lance.fragment.write_fragments``.
-
-    Handles API differences between pylance versions:
-    - pylance 4.x: ``storage_options_provider``
-    - pylance 5.0+: ``namespace_client``, ``table_id``
-    """
-    if not has_namespace_params(namespace_impl, table_id):
-        return {}
-
-    if _pylance_version() >= _PYLANCE_5:
-        namespace = get_or_create_namespace(namespace_impl, namespace_properties)
-        if namespace is None:
-            return {}
-        return {"namespace_client": namespace, "table_id": table_id}
-
-    provider = _create_storage_options_provider(
-        namespace_impl, namespace_properties, table_id
-    )
-    if provider is None:
-        return {}
-    return {"storage_options_provider": provider}
+    return {"namespace_client": namespace, "table_id": table_id}
 
 
 if sys.version_info >= (3, 12):
