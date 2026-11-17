@@ -215,8 +215,14 @@ def write_lance(
             with namespace parameters when creating a new dataset (mode='create' or 'overwrite').
         table_id: The table identifier as a list of strings. Must be provided together
             with namespace_impl and namespace_properties.
-        schema: The schema of the dataset. If not provided, it is inferred from the data.
-        mode: The write mode. Can be "create", "append", or "overwrite".
+        schema: The schema of the dataset. If not provided, it is inferred from the
+            data. For create/overwrite, provide it when input blocks may differ
+            in column order or types (e.g. a union of different sources);
+            otherwise the write raises before committing.
+        mode: The write mode (default "create"). Can be "create", "append", or
+            "overwrite". "create" and "overwrite" use the schema of the incoming
+            data, so an overwrite can add, drop or retype columns. "append" keeps
+            the existing dataset schema.
         min_rows_per_file: The minimum number of rows per file.
         max_rows_per_file: The maximum number of rows per file.
         max_bytes_per_file: The maximum number of bytes per file. This is a soft
@@ -381,6 +387,10 @@ def write_lance(
         fragment_initial_bases = (
             initial_bases if mode == "create" and not first_commit_done else None
         )
+        # Only the first committed batch carries the requested mode so that
+        # create/overwrite assign new field ids for the incoming schema. Every
+        # later batch appends to the dataset just created/overwritten above.
+        fragment_mode = "append" if first_commit_done else mode
         writer = LanceFragmentWriter(
             uri=dest_uri,
             schema=schema,  # if None, writer infers from first batch (preserves Arrow metadata)
@@ -388,6 +398,7 @@ def write_lance(
             max_bytes_per_file=max_bytes_per_file,
             max_rows_per_group=min_rows_per_file,  # keep naming aligned with v1 semantics
             data_storage_version=data_storage_version,
+            mode=fragment_mode,
             enable_stable_row_ids=enable_stable_row_ids,
             storage_options=storage_options,
             base_store_params=base_store_params,

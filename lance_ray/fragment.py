@@ -50,6 +50,7 @@ def write_fragment(
     uri: str,
     *,
     schema: Optional[pa.Schema] = None,
+    mode: Literal["create", "append", "overwrite"] = "append",
     max_rows_per_file: int = 64 * 1024 * 1024,
     max_bytes_per_file: Optional[int] = None,
     # Only useful for v1 writer. ``None`` defers to the pylance writer default.
@@ -82,6 +83,13 @@ def write_fragment(
     exit; caller-supplied one-shot iterators remain the caller's responsibility.
     No input is staged or serialized for replay. Row-count validation does not
     check content equivalence or clean up files from failed attempts.
+
+    ``mode`` is the fragment write mode passed to pylance. "append" validates
+    fragments against the existing dataset schema (rejecting columns not
+    present in it); "create" and "overwrite" assign new field ids for the
+    incoming schema (schema evolution). The high-level ``write_lance``
+    defaults to "create", while this helper defaults to "append" to keep
+    append validation for direct callers.
     """
     from lance.dependencies import _PANDAS_AVAILABLE
     from lance.dependencies import pandas as pd
@@ -136,6 +144,7 @@ def write_fragment(
             uri,
             return_transaction=False,
             schema=attempt_schema,
+            mode=mode,
             max_rows_per_file=max_rows_per_file,
             max_rows_per_group=max_rows_per_group,
             max_bytes_per_file=max_bytes_per_file,
@@ -368,6 +377,13 @@ class LanceFragmentWriter:
         The version of the data storage format to use. Newer versions are more
         efficient but require newer versions of lance to read.  The default
         (None) will use the 2.0 version.  See the user guide for more details.
+    mode : {"create", "append", "overwrite"}, default "append"
+        Fragment write mode passed to pylance. "append" validates fragments
+        against the existing dataset schema (rejecting columns not present in
+        it); "create" and "overwrite" assign new field ids for the incoming schema
+        (schema evolution). Note the high-level ``write_lance`` defaults to
+        "create"; this writer defaults to "append" to preserve append-validation
+        semantics for direct callers.
     enable_stable_row_ids : bool, default False
         Enable stable row IDs for fragments written into a stable-row-ID dataset.
     use_legacy_format : optional, bool, default None
@@ -411,6 +427,15 @@ class LanceFragmentWriter:
         Arrow table, without IPC staging. The transform may execute more than
         once and must return complete, logically equivalent output each time.
 
+    Notes
+    -----
+    When pairing this writer with :class:`LanceFragmentCommitter`, pass the
+    SAME ``mode`` to both: this writer assigns field ids (so "create"/
+    "overwrite" enable schema evolution), while the committer selects the
+    commit operation (append vs overwrite). Using the default ``mode="append"``
+    writer with a ``mode="overwrite"`` committer on an evolved schema raises a
+    schema-mismatch error rather than evolving the schema.
+
     """
 
     def __init__(
@@ -423,6 +448,7 @@ class LanceFragmentWriter:
         max_bytes_per_file: Optional[int] = None,
         max_rows_per_group: Optional[int] = None,  # Only useful for v1 writer.
         data_storage_version: Optional[str] = None,
+        mode: Literal["create", "append", "overwrite"] = "append",
         enable_stable_row_ids: bool = False,
         use_legacy_format: Optional[bool] = False,
         storage_options: Optional[dict[str, Any]] = None,
@@ -464,6 +490,7 @@ class LanceFragmentWriter:
         self.max_rows_per_file = max_rows_per_file
         self.max_bytes_per_file = max_bytes_per_file
         self.data_storage_version = data_storage_version
+        self.mode = mode
         self.enable_stable_row_ids = enable_stable_row_ids
         self.storage_options = storage_options
         self.base_store_params = base_store_params
@@ -514,6 +541,7 @@ class LanceFragmentWriter:
             stream_factory,
             self.uri,
             schema=self.schema,
+            mode=self.mode,
             max_rows_per_file=self.max_rows_per_file,
             max_rows_per_group=self.max_rows_per_group,
             max_bytes_per_file=self.max_bytes_per_file,
