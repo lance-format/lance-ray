@@ -401,6 +401,20 @@ class TestAddColumns:
         assert df.columns.tolist() == ["id", "name", "age", "score", "new_column"]
         assert (df["new_column"] == df["score"] * 2).all()
 
+    def test_add_columns_filter_is_not_silently_ignored(self, temp_dir: str) -> None:
+        """Ensure passing ``filter`` raises instead of being ignored."""
+        path = Path(temp_dir) / "add_columns_filter_test.lance"
+
+        def double_score(x: pa.RecordBatch) -> pa.RecordBatch:
+            return x
+
+        with pytest.raises(NotImplementedError, match="filter"):
+            lr.add_columns(
+                str(path),
+                transform=double_score,
+                filter="id > 0",
+            )
+
 
 class TestNamespaceReadWrite:
     """Test cases for read/write with DirectoryNamespace."""
