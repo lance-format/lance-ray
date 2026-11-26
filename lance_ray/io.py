@@ -590,8 +590,9 @@ def add_columns(
             the namespace.
         transform: The transform to apply to the dataset. It support a lot of types,
             see `LanceDB API doc https://lancedb.github.io/lance-python-doc/data-evolution.html ` for more details.
-        filter: The filter to apply to the dataset. It is not supported yet, will be
-            supported when `get_fragments` support filter see
+        filter: The filter to apply to the dataset. This is not supported yet;
+            passing it raises :class:`NotImplementedError`. Support will be
+            added when `get_fragments` supports filtering. See
             `LanceDB API doc <https://lancedb.github.io/lance-python-doc/all-modules.html#lance.LanceDataset.get_fragments>`_.
         read_columns: The columns from the original dataset to read.
         reader_schema: The schema to use for the reader.
@@ -610,6 +611,12 @@ def add_columns(
         concurrency: The number of processes to use for the pool.
     """
     validate_uri_or_namespace(uri, namespace_impl, table_id)
+
+    if filter is not None:
+        raise NotImplementedError(
+            "The 'filter' argument is not supported yet and would be silently "
+            "ignored; use add_columns_from with a filtered Ray Dataset instead."
+        )
 
     uri, storage_options = resolve_namespace_table(
         uri,
