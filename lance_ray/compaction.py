@@ -118,6 +118,9 @@ def compact_files(
         ValueError: If input parameters are invalid.
         RuntimeError: If compaction fails.
     """
+    if num_workers <= 0:
+        raise ValueError(f"num_workers must be positive, got {num_workers}")
+
     validate_uri_or_namespace(uri, namespace_impl, table_id)
 
     # Resolve URI and get storage options from namespace if provided
