@@ -1,6 +1,7 @@
 """Test cases for lance_ray.fragment module."""
 
 import inspect
+import pickle
 import tempfile
 import warnings
 from collections.abc import Generator, Iterable, Iterator
@@ -582,6 +583,66 @@ def test_datasink_reuses_block_objects(
         sink._retry_params["max_attempts"] = 1
     assert sink.write(source, None) == []
     source.close()
+
+
+def test_on_write_complete_rejects_mismatched_fragment_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def serialized_fragment(schema: pa.Schema, fragment_id: int) -> tuple[bytes, bytes]:
+        fragment = FragmentMetadata(id=fragment_id, files=[], physical_rows=1)
+        return pickle.dumps(fragment), pickle.dumps(schema)
+
+    schema = pa.schema([pa.field("id", pa.int64())])
+    mismatched_schema = pa.schema(
+        [pa.field("id", pa.int64()), pa.field("name", pa.string())]
+    )
+    write_results = [
+        [serialized_fragment(schema, 0)],
+        [serialized_fragment(mismatched_schema, 1)],
+    ]
+    sink = LanceDatasink(str(tmp_path))
+
+    def fail_commit(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("commit must not be called for mismatched schemas")
+
+    monkeypatch.setattr(lance.LanceDataset, "commit", fail_commit)
+
+    with pytest.raises(ValueError, match="must share the same schema"):
+        sink.on_write_complete(write_results)
+
+
+def test_on_write_complete_accepts_consistent_fragment_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def serialized_fragment(schema: pa.Schema, fragment_id: int) -> tuple[bytes, bytes]:
+        fragment = FragmentMetadata(id=fragment_id, files=[], physical_rows=1)
+        return pickle.dumps(fragment), pickle.dumps(schema)
+
+    schema = pa.schema([pa.field("id", pa.int64())])
+    write_results = [
+        [serialized_fragment(schema, 0)],
+        [serialized_fragment(schema, 1)],
+    ]
+    sink = LanceDatasink(str(tmp_path))
+    commits: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    class _FakeOperation:
+        pass
+
+    def fake_overwrite(_schema: pa.Schema, _fragments: Any, **_kwargs: Any) -> Any:
+        return _FakeOperation()
+
+    def fake_commit(*args: Any, **kwargs: Any) -> None:
+        commits.append((args, kwargs))
+
+    monkeypatch.setattr(lance.LanceOperation, "Overwrite", fake_overwrite)
+    monkeypatch.setattr(lance.LanceDataset, "commit", fake_commit)
+
+    sink.on_write_complete(write_results)
+
+    assert len(commits) == 1
 
 
 @pytest.mark.parametrize("output_kind", ["table", "list", "generator"])

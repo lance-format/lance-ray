@@ -225,7 +225,14 @@ class _BaseLanceDatasink(Datasink[WriteReturn]):
             for fragment_str, schema_str in batch:
                 fragment = pickle.loads(fragment_str)
                 fragments.append(fragment)
-                schema = pickle.loads(schema_str)
+                current_schema = pickle.loads(schema_str)
+                if schema is None:
+                    schema = current_schema
+                elif not schema.equals(current_schema, check_metadata=True):
+                    raise ValueError(
+                        "All fragments written by the datasink must share the same "
+                        f"schema, got {schema} and {current_schema}"
+                    )
         # Check weather writer has fragments or not.
         # Skip commit when there are no fragments.
         if not schema:
