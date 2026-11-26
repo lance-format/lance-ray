@@ -61,6 +61,14 @@ def create_dataset_with_fragments(
 class TestDistributedCompaction:
     """Test cases for distributed compaction functionality."""
 
+    @pytest.mark.parametrize("num_workers", [0, -1])
+    def test_compact_files_rejects_non_positive_num_workers(
+        self, num_workers: int
+    ) -> None:
+        """compact_files rejects non-positive worker counts before Ray starts."""
+        with pytest.raises(ValueError, match="num_workers must be positive"):
+            lr.compact_files(num_workers=num_workers)
+
     @pytest.mark.parametrize("index_type", ["BTREE", "IVF_FLAT"])
     def test_distributed_index_preserves_compaction(
         self, tmp_path: Path, index_type: str
