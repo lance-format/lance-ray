@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import ray
 from lance.dataset import LanceDataset, LanceOperation
+from lance.file import LanceFileSession
 from lance.udf import BatchUDF
 from ray.data import Dataset, read_datasource
 from ray.util.multiprocessing import Pool
@@ -321,29 +322,29 @@ def write_lance(
         )
 
     dest_uri: str = uri
-    dest_exists = False
-    dest_version: Optional[int] = None
     base_store_params_kwargs: dict[str, Any] = {}
     if base_store_params:
         base_store_params_kwargs = {"base_store_params": base_store_params}
 
-    try:
-        _dest = lance.LanceDataset(
-            dest_uri,
-            storage_options=storage_options,
-            **base_store_params_kwargs,
-        )
-        dest_exists = True
-        dest_version = _dest.version
-    except Exception:
-        dest_exists = False
-        dest_version = None
+    destination = LanceFileSession(
+        dest_uri, storage_options=storage_options
+    ).list_with_delimiter()
+    dest_exists = bool(destination.objects or destination.common_prefixes)
+    dest_version: Optional[int] = None
 
     # Enforce mode semantics.
     if mode == "create" and dest_exists:
         raise ValueError("Destination exists but mode='create' was specified.")
     if mode == "append" and not dest_exists:
         raise ValueError("Destination does not exist but mode='append' was specified.")
+
+    if mode == "append":
+        _dest = lance.LanceDataset(
+            dest_uri,
+            storage_options=storage_options,
+            **base_store_params_kwargs,
+        )
+        dest_version = _dest.version
 
     from .fragment import LanceFragmentWriter
 

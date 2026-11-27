@@ -5,7 +5,8 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+from unittest.mock import MagicMock
 
 import lance
 import lance_ray as lr
@@ -125,6 +126,49 @@ class TestWriteLance:
 
         with pytest.raises((ValueError, AttributeError, TypeError)):
             lr.write_lance(None, str(path))  # type: ignore[arg-type]
+
+    def test_streaming_create_propagates_probe_errors(
+        self, temp_dir: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = Path(temp_dir) / "probe_error.lance"
+
+        class FailingFileSession:
+            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def list_with_delimiter(self) -> None:
+                raise OSError("temporary storage failure")
+
+        monkeypatch.setattr("lance_ray.io.LanceFileSession", FailingFileSession)
+
+        with pytest.raises(OSError, match="temporary storage failure"):
+            lr.write_lance(
+                cast(Any, MagicMock()),
+                str(path),
+                mode="create",
+                stream=True,
+                data_storage_version="stable",
+            )
+
+    def test_streaming_create_does_not_treat_nonempty_root_as_missing(
+        self, temp_dir: str
+    ) -> None:
+        path = Path(temp_dir) / "corrupt_dataset.lance"
+        versions = path / "_versions"
+        versions.mkdir(parents=True)
+        manifest = versions / "1.manifest"
+        manifest.write_bytes(b"not a valid manifest")
+
+        with pytest.raises(ValueError, match="Destination exists"):
+            lr.write_lance(
+                cast(Any, MagicMock()),
+                str(path),
+                mode="create",
+                stream=True,
+                data_storage_version="stable",
+            )
+
+        assert manifest.read_bytes() == b"not a valid manifest"
 
     def test_write_with_pandas_map_batches(self, temp_dir: str) -> None:
         def map_fn(row: dict[str, Any]) -> dict[str, Any]:
