@@ -48,6 +48,7 @@ def _handle_compaction_task(
             # Load dataset
             dataset = lance.LanceDataset(
                 dataset_uri,
+                version=task.read_version,
                 storage_options=storage_options,
                 **namespace_kwargs,
             )
