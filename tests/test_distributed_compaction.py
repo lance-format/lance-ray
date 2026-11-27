@@ -13,6 +13,7 @@ import pytest
 import ray
 from lance.lance import CompactionMetrics
 from lance.optimize import Compaction, CompactionOptions
+from lance_ray.compaction import _handle_compaction_task
 
 import pandas as pd
 
@@ -236,6 +237,52 @@ class TestDistributedCompaction:
 
         assert metrics is not None
         assert commit_options == [compaction_options]
+
+    def test_worker_opens_dataset_at_task_read_version(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        task = cast(Any, MagicMock())
+        task.read_version = 7
+        task.fragments = []
+        rewrite_result = object()
+        task.execute.return_value = rewrite_result
+
+        dataset = object()
+        namespace_client = object()
+        storage_options = {"anon": "true"}
+        open_calls: list[tuple[str, dict[str, Any]]] = []
+
+        def open_dataset(uri: str, **kwargs: Any) -> object:
+            open_calls.append((uri, kwargs))
+            return dataset
+
+        monkeypatch.setattr("lance_ray.compaction.lance.LanceDataset", open_dataset)
+        monkeypatch.setattr(
+            "lance_ray.compaction.get_namespace_kwargs",
+            lambda *_args: {"namespace_client": namespace_client},
+        )
+
+        result = _handle_compaction_task(
+            "s3://bucket/dataset",
+            storage_options=storage_options,
+        )(task)
+
+        assert result == {
+            "status": "success",
+            "fragments": task.fragments,
+            "result": rewrite_result,
+        }
+        assert open_calls == [
+            (
+                "s3://bucket/dataset",
+                {
+                    "version": task.read_version,
+                    "storage_options": storage_options,
+                    "namespace_client": namespace_client,
+                },
+            )
+        ]
+        task.execute.assert_called_once_with(dataset)
 
     def test_compaction_without_options(self, temp_dir: str) -> None:
         """
