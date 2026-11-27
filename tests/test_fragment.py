@@ -593,10 +593,8 @@ def test_on_write_complete_rejects_mismatched_fragment_schemas(
         fragment = FragmentMetadata(id=fragment_id, files=[], physical_rows=1)
         return pickle.dumps(fragment), pickle.dumps(schema)
 
-    schema = pa.schema([pa.field("id", pa.int64())])
-    mismatched_schema = pa.schema(
-        [pa.field("id", pa.int64()), pa.field("name", pa.string())]
-    )
+    schema = pa.schema([("id", pa.int64())])
+    mismatched_schema = pa.schema([("id", pa.int64()), ("name", pa.string())])
     write_results = [
         [serialized_fragment(schema, 0)],
         [serialized_fragment(mismatched_schema, 1)],
